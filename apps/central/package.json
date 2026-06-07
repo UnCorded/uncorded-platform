@@ -1,0 +1,26 @@
+{
+  "name": "@uncorded/central",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "dev:vault": "bun run scripts/dev-secrets.ts",
+    "start": "bun run src/index.ts",
+    "migrate:001": "bun run migrations/001-username.ts",
+    "migrate:001:vault": "bun run scripts/dev-secrets.ts bun run migrations/001-username.ts",
+    "migrate:002": "bun run migrations/002-session-sliding.ts",
+    "migrate:002:vault": "bun run scripts/dev-secrets.ts bun run migrations/002-session-sliding.ts",
+    "migrate:004": "bun run migrations/004-voice-reachability.ts",
+    "migrate:004:vault": "bun run scripts/dev-secrets.ts bun run migrations/004-voice-reachability.ts",
+    "nudge-runtimes:vault": "bun run scripts/dev-secrets.ts bun run scripts/nudge-runtimes-after-key-rotation.ts",
+    "restore-db-password": "bun run scripts/restore-db-password.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1039.0",
+    "@aws-sdk/s3-presigned-post": "^3.1039.0",
+    "@aws-sdk/s3-request-presigner": "^3.1039.0",
+    "@node-rs/argon2": "^2.0.2",
+    "postgres": "^3.4.5",
+    "resend": "3"
+  }
+}

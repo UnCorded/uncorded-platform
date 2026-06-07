@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "skipLibCheck": true
+  },
+  "include": ["runtime/src", "packages/*/src"],
+  "exclude": ["node_modules", "**/node_modules", "**/dist", "packages/plugin-sdk-frontend"]
+}

@@ -1,0 +1,14 @@
+-- Tombstone migration — intentionally performs no schema change.
+--
+-- Migration 012 originally created the `registered_terminals` table for the
+-- Terminal Anywhere feature (spec-25), which has been removed. Per the removal
+-- decision we do NOT drop the table on existing databases (it is left as dead
+-- schema; production cleanup is a separate reviewed migration).
+--
+-- This placeholder keeps migration numbering gap-free for the sequential runner
+-- (runtime/src/migrations.ts), and — critically — preserves the number->migration
+-- mapping for databases that already applied the original 012. Because the runner
+-- only re-runs files numbered greater than the highest applied migration, keeping
+-- voice_reachability_state at 013 ensures it is still created on a database that
+-- had applied 012 (terminals) before 013 (voice) shipped.
+SELECT 1;

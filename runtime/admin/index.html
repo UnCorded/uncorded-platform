@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UnCorded Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Runtime Admin</h1>
+      <p id="status">Waiting for token handshake…</p>
+    </header>
+
+    <nav id="tabs">
+      <button data-tab="roles">Roles</button>
+      <button data-tab="plugins">Plugins</button>
+      <button data-tab="audit">Audit</button>
+      <button data-tab="cascade">Cascade</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+
+    <main>
+      <section id="tab-roles" class="tab">
+        <h2>Role Management</h2>
+        <form id="role-create-form">
+          <input name="name" placeholder="Role name" required />
+          <input name="level" type="number" min="1" max="99" placeholder="Level" required />
+          <button type="submit">Create Role</button>
+        </form>
+        <div id="roles-list"></div>
+      </section>
+
+      <section id="tab-plugins" class="tab hidden">
+        <h2>Plugin Management</h2>
+        <div id="plugins-list"></div>
+        <h3>Plugin Logs</h3>
+        <div class="row">
+          <select id="logs-plugin"></select>
+          <button id="logs-refresh">Refresh Logs</button>
+        </div>
+        <pre id="plugin-logs"></pre>
+      </section>
+
+      <section id="tab-audit" class="tab hidden">
+        <h2>Audit Log</h2>
+        <button id="audit-refresh">Refresh</button>
+        <div id="audit-list"></div>
+      </section>
+
+      <section id="tab-cascade" class="tab hidden">
+        <h2>Cascade Rules</h2>
+        <form id="cascade-form">
+          <input name="sourcePlugin" placeholder="source plugin" required />
+          <input name="eventTopic" placeholder="event topic" required />
+          <input name="targetPlugin" placeholder="target plugin" required />
+          <input name="targetAction" placeholder="target action" required />
+          <label><input name="enabled" type="checkbox" checked /> enabled</label>
+          <button type="submit">Add Rule</button>
+        </form>
+        <div id="cascade-list"></div>
+      </section>
+    </main>
+
+      <section id="tab-settings" class="tab hidden">
+        <h2>Server Icon</h2>
+        <div style="margin-bottom:12px">
+          <img id="current-icon" src="/icon" alt="Server icon"
+            style="width:80px;height:80px;border-radius:14px;object-fit:cover;border:1px solid #333;display:block;" />
+        </div>
+        <form id="icon-form">
+          <input type="file" id="icon-file" name="icon" accept="image/png,image/jpeg,image/webp,image/gif" required />
+          <button type="submit">Upload</button>
+        </form>
+        <p id="icon-status" style="margin-top:8px;font-size:13px;"></p>
+      </section>
+    </main>
+
+    <script src="/admin/app.js" defer></script>
+  </body>
+</html>

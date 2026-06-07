@@ -1,0 +1,55 @@
+# Keep this stable after the first public desktop build. Secrets, installers,
+# and auto-update identity all key off the packaged app id.
+appId: app.uncorded.desktop
+productName: UnCorded
+protocols:
+  - name: UnCorded
+    schemes:
+      - uncorded
+directories:
+  output: release
+files:
+  - dist/**/*
+  - assets/**/*
+  - "!**/*.ts"
+# Per-platform cosign binary downloaded by scripts/download-cosign.cjs before
+# the build runs (CI invokes it; local dev installs supply their own). Lands
+# at process.resourcesPath/cosign/<target>/cosign[.exe] — see
+# src/cosign-bin.ts. Required because cosign verifies the runtime image on
+# the host *before* the runtime container starts; we can't defer it to a
+# container-internal binary.
+extraResources:
+  - from: resources/cosign
+    to: cosign
+    filter:
+      - "**/*"
+win:
+  target: nsis
+  icon: assets/icon.ico
+  # Unsigned by design through Phase 1 (homelab audience accepts the SmartScreen
+  # warning; formal code-signing cert deferred to v1.0). electron-builder 25.x
+  # skips signing gracefully with `no signing info identified` when no cert is
+  # configured, so we do NOT set `signAndEditExecutable: false` — that flag
+  # also disables rcedit, which is what embeds icon.ico + version metadata
+  # into UnCorded.exe. With the flag on, the exe shipped with Electron's
+  # default atom icon (discovered 2026-04-24 during v0.0.2 icon test).
+# macOS is deferred to a later release. Apple notarization + Developer Program
+# enrolment is a half-day project; keeping it out of v0.0.1 so the first
+# seed release is not gated on Apple credentials. Re-enable once notarization
+# creds are wired into GitHub Actions secrets.
+# mac:
+#   target: dmg
+#   icon: assets/icon.icns
+linux:
+  target: AppImage
+  icon: assets/icon.png
+publish:
+  provider: github
+  # Releases go to a DIFFERENT, public repo so electron-updater can fetch
+  # latest.yml anonymously from installed clients. UnCorded/platform stays
+  # private; UnCorded/releases holds only build artifacts (installers + the
+  # update feed). CI needs the RELEASES_PAT secret (fine-grained PAT with
+  # contents:write on UnCorded/releases) — see .github/workflows/release.yml.
+  # Case matters: electron-updater builds URLs literally from these values.
+  owner: UnCorded
+  repo: releases

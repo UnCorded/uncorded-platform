@@ -1,0 +1,93 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0f141b;
+  color: #e8edf3;
+}
+
+header {
+  padding: 14px 18px;
+  border-bottom: 1px solid #283342;
+}
+
+h1, h2, h3 {
+  margin: 0 0 8px;
+}
+
+p {
+  margin: 0;
+  color: #9cb0c7;
+}
+
+nav {
+  display: flex;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #283342;
+}
+
+main {
+  padding: 14px 18px 22px;
+}
+
+button, input, select {
+  border: 1px solid #36495e;
+  border-radius: 6px;
+  background: #152030;
+  color: #e8edf3;
+  padding: 7px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.hidden {
+  display: none;
+}
+
+.tab h2 {
+  margin-bottom: 10px;
+}
+
+.card {
+  border: 1px solid #2d3b4d;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: #121c2a;
+}
+
+.muted {
+  color: #97adc6;
+}
+
+pre {
+  border: 1px solid #2d3b4d;
+  border-radius: 8px;
+  background: #101925;
+  padding: 10px;
+  min-height: 120px;
+  max-height: 360px;
+  overflow: auto;
+}
+

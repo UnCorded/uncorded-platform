@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "solid-js",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": false,
+    "baseUrl": ".",
+    "paths": {
+      "@uncorded/shared": ["packages/shared/src/index.ts"],
+      "@uncorded/protocol": ["packages/protocol/src/index.ts"],
+      "@uncorded/protocol-schemas": ["packages/protocol-schemas/src/index.ts"],
+      "@uncorded/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+      "@uncorded/plugin-sdk-frontend": ["packages/plugin-sdk-frontend/src/index.ts"],
+      "@uncorded/electron-bridge": ["packages/electron-bridge/src/index.ts"]
+    }
+  },
+  "exclude": [
+    "node_modules",
+    "**/node_modules",
+    "**/dist"
+  ]
+}

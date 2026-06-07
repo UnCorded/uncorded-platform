@@ -1,0 +1,105 @@
+{
+  "name": "text-channels",
+  "version": "0.1.0",
+  "api_version": "^1.0",
+  "author": "UnCorded",
+  "description": "Text channels with real-time messaging, edits, and deletions.",
+  "license": "MIT",
+  "type": "core",
+  "icon": "Hash",
+  "backend": {
+    "entry": "backend/index.ts"
+  },
+  "frontend": {
+    "entry": "frontend/index.html"
+  },
+  "permissions": [
+    "data.sql:self",
+    "events.publish:text-channels.*",
+    "events.subscribe:runtime.cascade.*",
+    "events.subscribe:runtime.presence.*",
+    "events.subscribe:text-channels.*",
+    "events.subscribe:core.category.*",
+    "broadcast.clients",
+    "storage.file:self",
+    "runtime.schedule"
+  ],
+  "public_schema": {
+    "channels": {
+      "columns": ["id", "name", "topic", "created_at", "category_id", "position"],
+      "description": "All text channels in this server."
+    },
+    "messages": {
+      "columns": ["id", "channel_id", "author_id", "content", "created_at", "edited_at", "parent_message_id", "reply_count", "last_reply_at", "attachments"],
+      "description": "All messages across all channels. Replies have a non-null parent_message_id; roots aggregate reply_count and last_reply_at. The attachments column carries a JSON array of file records (filename + metadata only — signed URLs are minted fresh per read)."
+    }
+  },
+  "sidebar": {
+    "contributes": true,
+    "section": "Chat",
+    "refresh_on": ["text-channels.channel.created", "text-channels.channel.updated", "text-channels.channel.deleted"]
+  },
+  "dependencies": {},
+  "resources": {
+    "memory_mb": 128,
+    "cpu_weight": 1024,
+    "disk_mb": 512
+  },
+  "settings": [
+    {
+      "key": "max_message_length",
+      "label": "Max message length",
+      "description": "Maximum characters allowed per message. Edits also enforce this. \"Not Guarded\" disables the cap entirely.",
+      "type": "number",
+      "default": 5000,
+      "stops": [
+        { "value": 2000, "label": "2k" },
+        { "value": 5000, "label": "5k" },
+        { "value": 10000, "label": "10k" },
+        { "value": 0, "label": "Not Guarded" }
+      ]
+    },
+    {
+      "key": "allow_edits",
+      "label": "Allow edits",
+      "description": "When off, posted messages are immutable.",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "attachments_enabled",
+      "label": "Allow file attachments",
+      "description": "Master switch for the Attach button. When off, messages cannot carry files.",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "attachments_max_bytes",
+      "label": "Max file size",
+      "description": "Per-file upload limit. Runtime enforces 5 GB as a hard ceiling. Files over 50 MB are uploaded in resumable chunks.",
+      "type": "number",
+      "default": 5368709120,
+      "stops": [
+        { "value": 5242880,    "label": "5 MB" },
+        { "value": 26214400,   "label": "25 MB" },
+        { "value": 104857600,  "label": "100 MB" },
+        { "value": 524288000,  "label": "500 MB" },
+        { "value": 1073741824, "label": "1 GB" },
+        { "value": 5368709120, "label": "5 GB" }
+      ]
+    },
+    {
+      "key": "attachments_max_per_message",
+      "label": "Attachments per message",
+      "description": "Maximum number of files allowed in a single message.",
+      "type": "number",
+      "default": 10,
+      "stops": [
+        { "value": 1,  "label": "1" },
+        { "value": 5,  "label": "5" },
+        { "value": 10, "label": "10" },
+        { "value": 25, "label": "25" }
+      ]
+    }
+  ]
+}

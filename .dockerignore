@@ -1,0 +1,47 @@
+# Without this, `bun install` symlinks created on the Windows host get copied
+# into the image as absolute-path-to-C:\ symlinks, which then break module
+# resolution inside the container. The Dockerfile runs its own `bun install`
+# in a Linux layer; host-side installs must not leak in.
+node_modules
+**/node_modules
+
+# Git metadata — large, unnecessary in the runtime image.
+.git
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.vscode
+.idea
+.claude
+*.swp
+.DS_Store
+
+# Build outputs that would clobber the image's own builds
+dist
+build
+out
+apps/website/dist
+apps/desktop/dist
+apps/desktop/out
+runtime/public/sdk/plugin-frontend.js
+
+# Test / coverage
+coverage
+.nyc_output
+**/*.test.ts.snap
+
+# Env / secrets — never bake into image
+.env
+.env.*
+!.env.example
+
+# Local tunnel / docker state
+.cloudflared
+docker/data
+docker/uncorded-*
+
+# Logs
+*.log
+npm-debug.log*
+bun-debug.log*

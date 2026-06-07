@@ -1,0 +1,36 @@
+# Throwaway PostgreSQL for running the Central test suite locally and in CI.
+#
+# This is intentionally separate from docker/docker-compose.yml (which builds
+# the server-container runtime). It exists only to satisfy the Postgres
+# connection contract the Central tests expect:
+#   host=localhost port=5432 user=postgres password=postgres
+# (see apps/central/src/db.ts defaults and apps/central/src/test-helpers.ts).
+#
+# The tests create and drop their own `uncorded_central_test` database against
+# the admin `postgres` database, so no init SQL is needed here — the bare
+# superuser + default `postgres` db is enough.
+#
+# Data lives on tmpfs: the volume is RAM-backed and wiped on `down`, which
+# keeps the suite fast and guarantees a clean slate every run. Nothing here is
+# meant to persist.
+#
+# Usage:
+#   bun run test:central:db        # start (waits until healthy)
+#   bun run test:central           # run the suite
+#   bun run test:central:db:stop   # stop and discard
+services:
+  central-test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

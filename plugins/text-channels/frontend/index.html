@@ -1,0 +1,3724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Text Channels</title>
+  <style>
+    /* ── Theme tokens ───────────────────────────────────────────────────────
+     * A custom theme should only need to override the values in this block.
+     * Everything downstream reads `var(--token)` — no hard-coded hex literals
+     * in selectors below. Grouped by role (surfaces, ink, accent, status) so
+     * a theme author can swap one group without rereading the entire sheet. */
+    :root {
+      /* Surfaces — cool-gray ladder (hue 258 at near-zero chroma so the UI
+       * reads as "refined neutral", not tinted). Three steps are enough:
+       * base, raised (hover / inputs), and active (selected / pressed). */
+      --bg:            oklch(0.16  0.004 258);
+      --bg-2:          oklch(0.195 0.004 258);
+      --bg-3:          oklch(0.225 0.004 258);
+      --bg-active:     oklch(0.285 0.006 258);
+      --border:        oklch(1 0 0 / 7%);
+      --border-subtle: oklch(1 0 0 / 4%);
+
+      /* Ink — pure neutral text ladder, no hue. Keeps typography calm. */
+      --text:          oklch(0.97 0 0);
+      --text-2:        oklch(0.70 0 0);
+      --text-3:        oklch(0.48 0 0);
+
+      /* Accent — muted azure. The previous chroma (0.15) read as a bright
+       * Discord-blue and fought with the neutral surfaces. 0.06 keeps just
+       * enough character to mark unread / focused / sent states without
+       * shouting. A themer swapping only these two lines can repalette the
+       * whole surface of interactivity. */
+      --accent:        oklch(0.78 0.06 258);
+      --accent-dim:    oklch(0.78 0.06 258 / 14%);
+
+      /* Status — danger for destructive actions and failed sends. Slightly
+       * softened from pure OKLCH red (0.19 chroma) so it matches the overall
+       * low-saturation aesthetic. */
+      --danger:        oklch(0.72 0.13 22);
+      --danger-dim:    oklch(0.72 0.13 22 / 12%);
+
+      /* Geometry. */
+      --radius:        0.625rem;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* Container queries keyed off the plugin panel width. The shell's panel
+     * layout is dynamic (drag-to-resize, mobile split), so using viewport
+     * queries would fire on the wrong axis — inline-size reacts to the
+     * iframe's actual width and each panel adapts independently. */
+    #app { container-type: inline-size; container-name: panel; }
+
+    button { font-family: inherit; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+
+    /* ── Messages ────────────────────────────────────────────────────────── */
+    #messages-wrap {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      padding-bottom: 4px;
+      min-height: 0;
+    }
+
+    #messages-wrap::-webkit-scrollbar { width: 6px; }
+    #messages-wrap::-webkit-scrollbar-track { background: transparent; }
+    #messages-wrap::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 3px; }
+    #messages-wrap::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+    /* spacer so messages start at the bottom when few */
+    #messages-spacer { flex: 1; }
+
+    /* padding-top lets the first row's floating action bar (top: -14px)
+     * stay inside the scroll viewport instead of clipping at the top edge. */
+    #messages { display: flex; flex-direction: column; padding-top: 16px; }
+
+    /* day divider */
+    .day-divider {
+      display: flex; align-items: center; gap: 10px;
+      padding: 20px 16px 8px;
+      color: var(--text-3);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .day-divider::before, .day-divider::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+
+    /* message row — first in group */
+    .msg {
+      display: flex;
+      gap: 12px;
+      padding: 6px 16px;
+      position: relative;
+    }
+    .msg:hover { background: var(--bg-2); }
+
+    /* continued row (same author, <5 min) */
+    .msg-cont {
+      padding: 1px 16px 1px 68px;
+      position: relative;
+    }
+    .msg-cont:hover { background: var(--bg-2); }
+
+    /* hover timestamp for continued rows */
+    .msg-cont::before {
+      content: attr(data-time);
+      position: absolute;
+      left: 16px;
+      width: 40px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      color: var(--text-3);
+      text-align: right;
+      display: none;
+    }
+    .msg-cont:hover::before { display: block; }
+
+    /* Legacy class — left in place for back-compat with any markup that
+     * still references it, but the new avatar pipeline (renderAuthorAvatar
+     * via SDK avatarHtml) emits inline-styled wrappers and does not depend
+     * on this rule. */
+    .msg-avatar {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700;
+      color: #fff;
+      flex-shrink: 0;
+      margin-top: 1px;
+      user-select: none;
+      object-fit: cover;
+    }
+
+    /* Click-to-open-user-card wrapper. Keeps the message row layout (top
+     * margin, no shrink) and turns the SDK-rendered avatar into a button.
+     * `align-self: flex-start` is load-bearing: `.msg` is a flex row with
+     * default `align-items: stretch`, so without it the button stretches
+     * vertically to match a tall message body (e.g. a video attachment)
+     * and `border-radius: 50%` traces an elongated ellipse on hover. */
+    .msg-author-avatar {
+      align-self: flex-start;
+      margin: 1px 0 0 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      flex-shrink: 0;
+      line-height: 0;
+      border-radius: 50%;
+      transition: box-shadow 0.08s;
+    }
+    .msg-author-avatar:hover {
+      box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 40%, transparent);
+    }
+    .msg-author-avatar:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+
+    .msg-body { flex: 1; min-width: 0; }
+
+    .msg-meta {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 1px;
+    }
+
+    /* Username uses the neutral body text color rather than the avatar
+     * palette — role-based coloring will replace this once the members/roles
+     * plugin lands. Avatars still carry the palette as a per-user identifier. */
+    .msg-author { font-weight: 600; font-size: 14px; color: var(--text); }
+
+    .msg-ts {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .msg-text {
+      font-size: 14px;
+      color: var(--text);
+      word-break: break-word;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+
+    .msg-text.is-deleted { color: var(--text-3); font-style: italic; }
+
+    .msg-edited-tag {
+      font-size: 10px;
+      color: var(--text-3);
+      margin-left: 4px;
+    }
+
+    /* ── Message action bar ──────────────────────────────────────────────────
+     * Visible on hover (fine pointer only) and on keyboard focus inside the
+     * row. We use opacity + pointer-events instead of display:none so the
+     * fade-in is animatable and the bar doesn't trap clicks while invisible.
+     * On coarse pointers the hover bar is suppressed entirely — long-press
+     * opens a context menu instead (see #msg-context-menu). */
+    .msg-actions {
+      display: flex;
+      position: absolute;
+      right: 12px;
+      top: -14px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2px 3px;
+      gap: 1px;
+      z-index: 10;
+      box-shadow: 0 4px 16px rgba(0,0,0,.35);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(2px);
+      transition: opacity 0.12s ease-out, transform 0.12s ease-out;
+    }
+
+    .msg:hover .msg-actions,
+    .msg-cont:hover .msg-actions,
+    .msg:focus-within .msg-actions,
+    .msg-cont:focus-within .msg-actions {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .mabtn {
+      display: flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px;
+      border-radius: 4px; border: none;
+      background: transparent; color: var(--text-2);
+      transition: background 0.1s, color 0.1s, box-shadow 0.1s;
+    }
+    .mabtn:not(:disabled):hover { background: var(--bg-active); color: var(--text); }
+    .mabtn.del:not(:disabled):hover { background: var(--danger-dim); color: var(--danger); }
+    .mabtn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent);
+      color: var(--text);
+    }
+
+    /* ── Inline edit ─────────────────────────────────────────────────────── */
+    .edit-wrap { display: none; margin-top: 4px; }
+    .is-editing .msg-text { display: none; }
+    .is-editing .edit-wrap { display: block; }
+
+    .edit-textarea {
+      width: 100%;
+      background: var(--bg-3);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      line-height: 1.45;
+      padding: 6px 10px;
+      resize: none;
+      outline: none;
+    }
+
+    .edit-hints {
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--text-3);
+      display: flex;
+      gap: 6px;
+    }
+    .edit-hints b { color: var(--text-2); font-weight: 500; }
+
+    /* ── Empty / loading states ──────────────────────────────────────────── */
+    #empty-state {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px;
+      padding: 48px 24px;
+      color: var(--text-3);
+    }
+    #empty-state p { font-size: 13px; text-align: center; line-height: 1.6; }
+
+    /* ── Status / typing bars ────────────────────────────────────────────── */
+    #status-bar, #typing-bar {
+      min-height: 20px;
+      padding: 0 16px 2px;
+      font-size: 11px;
+      color: var(--text-3);
+      flex-shrink: 0;
+    }
+    /* When typing-bar is empty the browser still reserves 20px. Collapse it
+     * so status-bar (directly below) sits flush against the messages list
+     * except when someone is actually typing. */
+    #typing-bar:empty { min-height: 0; padding: 0; }
+
+    /* ── Input area ──────────────────────────────────────────────────────── */
+    #input-area {
+      padding: 0 16px 14px;
+      flex-shrink: 0;
+    }
+
+    #input-box {
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      transition: border-color 0.15s;
+    }
+    #input-box:focus-within { border-color: var(--accent); }
+
+    #input-row {
+      display: flex;
+      align-items: center;
+      padding: 8px 8px 8px 12px;
+      gap: 2px;
+    }
+
+    #message-input {
+      flex: 1;
+      background: transparent;
+      border: none; outline: none;
+      color: var(--text);
+      font-size: 14px; font-family: inherit;
+      line-height: 1.45;
+      resize: none;
+      min-height: 22px;
+      max-height: 200px;
+      padding: 1px 6px;
+      overflow-y: auto;
+    }
+    #message-input::placeholder { color: var(--text-3); }
+    #message-input::-webkit-scrollbar { width: 4px; }
+    #message-input::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 2px; }
+
+    .ibtn {
+      display: flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px;
+      border-radius: var(--radius); border: none;
+      background: transparent; color: var(--text-2);
+      flex-shrink: 0;
+      transition: background 0.1s, color 0.1s;
+    }
+    .ibtn:not(:disabled):hover { background: var(--bg-active); color: var(--text); }
+    .ibtn.send { color: var(--accent); }
+    .ibtn.send:not(:disabled):hover { background: var(--accent-dim); }
+
+    /* ── Thread reply pill (on root messages) ─────────────────────────────
+     * Visual language: a left accent bar that tells two stories at once —
+     * thin muted by default (there's a thread here), saturated accent when
+     * there's something new to read. No separate "X new" badge; the pill
+     * itself changes state. Icon gives it an unmistakable "tap to open"
+     * affordance versus a stray text link. */
+    .reply-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 6px;
+      padding: 4px 10px 4px 9px;
+      background: transparent;
+      color: var(--text-2);
+      border: none;
+      border-left: 2px solid var(--border);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      font-size: 12px;
+      font-weight: 500;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s, border-left-color 0.12s;
+    }
+    .reply-pill:hover {
+      background: var(--bg-2);
+      color: var(--text);
+      border-left-color: var(--text-2);
+    }
+    .reply-pill .reply-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      color: var(--text-3);
+      transition: color 0.12s;
+    }
+    .reply-pill:hover .reply-icon { color: var(--text-2); }
+    .reply-pill .reply-count { font-weight: 600; color: var(--text); }
+    .reply-pill .reply-when {
+      color: var(--text-3);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+
+    /* Unread: accent bar + faint accent wash + accent-colored icon. The
+     * whole row reads as "this thread moved", not "look at this little
+     * badge in the corner". */
+    .reply-pill.has-unread {
+      background: var(--accent-dim);
+      border-left-color: var(--accent);
+      color: var(--text);
+    }
+    .reply-pill.has-unread .reply-icon { color: var(--accent); }
+    /* Layer bg-2 over the accent wash instead of bumping the accent alpha —
+     * that way a themer who overrides --accent doesn't have to also tune a
+     * second accent-at-higher-alpha value for the hover state. */
+    .reply-pill.has-unread:hover {
+      background: var(--bg-2);
+      border-left-color: var(--accent);
+    }
+
+    /* ── Typing indicator (channel + thread) ─────────────────────────────── */
+    .typing-line {
+      display: flex; align-items: center; gap: 6px;
+      font-style: italic;
+      color: var(--text-2);
+      font-size: 11px;
+    }
+    .typing-dots { display: inline-flex; gap: 2px; }
+    .typing-dots span {
+      width: 4px; height: 4px;
+      border-radius: 50%;
+      background: var(--text-3);
+      animation: typingBounce 1.2s infinite ease-in-out;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes typingBounce {
+      0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+      30% { opacity: 1; transform: translateY(-2px); }
+    }
+
+    /* ── Thread side panel ───────────────────────────────────────────────── */
+    #thread-panel {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 400px;
+      max-width: 100vw;
+      background: var(--bg);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 200ms ease-out;
+      z-index: 50;
+      box-shadow: -8px 0 24px rgba(0,0,0,0.2);
+    }
+    #thread-panel.open { transform: translateX(0); }
+
+    #thread-head {
+      padding: 12px 14px 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    #thread-head .thread-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--bg-2);
+      color: var(--text-2);
+      flex-shrink: 0;
+    }
+    #thread-head .thread-title {
+      flex: 1;
+      min-width: 0;
+      display: flex; flex-direction: column;
+    }
+    #thread-head .thread-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    #thread-head .thread-sub {
+      font-size: 11px;
+      color: var(--text-3);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #thread-viewer-count {
+      font-size: 11px;
+      color: var(--text-3);
+      padding: 2px 8px;
+      background: var(--bg-2);
+      border-radius: 10px;
+    }
+    #thread-close {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent;
+      border: none;
+      border-radius: 4px;
+      color: var(--text-2);
+    }
+    #thread-close:hover { background: var(--bg-active); color: var(--text); }
+
+    #thread-root {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    #thread-root .msg-avatar { width: 28px; height: 28px; font-size: 12px; }
+    #thread-root .msg-meta { margin-bottom: 0; }
+    #thread-root .msg-text { font-size: 13px; color: var(--text-2); }
+    #thread-root .msg-text.is-deleted { font-style: italic; color: var(--text-3); }
+
+    #thread-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 0;
+      min-height: 0;
+    }
+    #thread-messages::-webkit-scrollbar { width: 4px; }
+    #thread-messages::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 2px; }
+
+    #thread-typing {
+      min-height: 16px;
+      padding: 2px 16px 0;
+      flex-shrink: 0;
+    }
+
+    #thread-input-area {
+      padding: 0 16px 14px;
+      flex-shrink: 0;
+    }
+    #thread-input-box {
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      transition: border-color 0.15s;
+    }
+    #thread-input-box:focus-within { border-color: var(--accent); }
+    #thread-input-row {
+      display: flex; align-items: center;
+      padding: 8px 8px 8px 12px;
+      gap: 2px;
+    }
+    #thread-input {
+      flex: 1;
+      background: transparent;
+      border: none; outline: none;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      line-height: 1.45;
+      resize: none;
+      min-height: 22px;
+      max-height: 160px;
+      padding: 1px 6px;
+      overflow-y: auto;
+    }
+    #thread-input::placeholder { color: var(--text-3); }
+
+    /* Optimistic-pending reply in the thread panel */
+    .msg.is-pending, .msg-cont.is-pending { opacity: 0.55; }
+    .msg.is-failed .msg-text, .msg-cont.is-failed .msg-text { color: var(--danger); }
+    .msg-retry {
+      margin-top: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      background: var(--danger-dim);
+      color: var(--danger);
+      border: 1px solid color-mix(in oklch, var(--danger) 35%, transparent);
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .msg-retry:hover { background: color-mix(in oklch, var(--danger) 22%, transparent); }
+    .msg-retry:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--danger);
+    }
+
+    /* ── Context menu (right-click + long-press) ─────────────────────────────
+     * One shared menu shared across all messages. Positioned at pointer
+     * coordinates on desktop right-click, anchored to the bottom-center as a
+     * sheet on coarse pointers (long-press). Outside-click / Escape / scroll
+     * dismiss. The menu items mirror the hover-bar actions plus Copy text /
+     * Copy ID — the hover bar's "…" button also opens this same surface so
+     * desktop users reach Copy without an extra click depth. */
+    #msg-context-menu {
+      position: fixed;
+      z-index: 100;
+      min-width: 180px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px;
+      box-shadow: 0 10px 32px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.25);
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      opacity: 0;
+      transform: translateY(-4px) scale(0.98);
+      transition: opacity 0.1s ease-out, transform 0.1s ease-out;
+      pointer-events: none;
+    }
+    #msg-context-menu[data-open="true"] {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
+    }
+    .ctx-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 7px 10px;
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.08s, color 0.08s;
+    }
+    .ctx-item:hover, .ctx-item:focus-visible {
+      background: var(--bg-active);
+      outline: none;
+    }
+    .ctx-item.danger { color: var(--danger); }
+    .ctx-item.danger:hover, .ctx-item.danger:focus-visible {
+      background: var(--danger-dim);
+      color: var(--danger);
+    }
+    .ctx-item .ctx-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      color: var(--text-2);
+    }
+    .ctx-item.danger .ctx-icon { color: var(--danger); }
+    .ctx-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 3px 4px;
+    }
+    /* Backdrop on coarse pointers — turns the menu into a bottom-anchored
+     * sheet so users don't have to land a fingertip on a tiny floating
+     * popover. The backdrop also catches taps for dismiss without depending
+     * on document-level outside-click detection inside an iframe. */
+    #msg-context-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 99;
+      opacity: 0;
+      transition: opacity 0.12s;
+      pointer-events: none;
+    }
+    #msg-context-backdrop[data-open="true"] {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    @media (hover: none) {
+      #msg-context-menu {
+        left: 0 !important;
+        right: 0 !important;
+        top: auto !important;
+        bottom: 0;
+        margin: 0 8px 8px;
+        min-width: 0;
+        border-radius: 14px;
+        padding: 6px;
+        transform: translateY(8px);
+      }
+      #msg-context-menu[data-open="true"] {
+        transform: translateY(0);
+      }
+      .ctx-item { padding: 12px 14px; font-size: 15px; }
+    }
+
+    /* ── Narrow-panel adaptations ─────────────────────────────────────────
+     * Hide the disabled toolbar stubs (attach / emoji / GIF) when the panel
+     * is too narrow to fit them alongside a usable input. These are Phase 1
+     * placeholders anyway — hiding them at narrow widths costs no real
+     * functionality and lets the compose row collapse to input + send. */
+    @container panel (max-width: 420px) {
+      .msg { padding: 6px 12px; gap: 10px; }
+      .msg-cont { padding-left: 58px; padding-right: 12px; }
+      .msg-cont::before { left: 12px; width: 36px; }
+      .msg-avatar { width: 32px; height: 32px; font-size: 13px; }
+      #input-area, #thread-input-area { padding: 0 12px 12px; }
+      #input-row, #thread-input-row { padding: 6px 6px 6px 10px; }
+      .day-divider { padding: 16px 12px 6px; }
+      #status-bar, #typing-bar { padding: 0 12px 2px; }
+    }
+
+    @container panel (max-width: 340px) {
+      #input-row .ibtn:disabled,
+      #thread-input-row .ibtn:disabled { display: none; }
+      /* At this width the relative timestamp chokes the pill — keep the
+       * count + icon, drop the "· 5m ago" suffix. Still tappable, still
+       * states the invariant ("N replies"). */
+      .reply-pill .reply-when { display: none; }
+    }
+
+    /* ── Attachments ────────────────────────────────────────────────────── */
+
+    /* Drop overlay — appears when a file drag enters the iframe. Pointer-events
+     * stay on so the underlying compose row doesn't see drag events; we attach
+     * dragleave/drop on the overlay itself to know when the user releases. */
+    #drop-overlay {
+      position: fixed; inset: 0;
+      background: oklch(0.20 0.06 258 / 0.85);
+      border: 2px dashed var(--accent);
+      border-radius: var(--radius);
+      margin: 12px;
+      display: none;
+      align-items: center; justify-content: center;
+      z-index: 50;
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      pointer-events: none;
+    }
+    #drop-overlay.is-active { display: flex; pointer-events: auto; }
+    #drop-overlay .drop-inner {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      pointer-events: none;
+    }
+    #drop-overlay svg { color: var(--accent); }
+
+    /* Pending tray — horizontal row of attachment chips above the textarea.
+     * Only rendered when there's at least one pending file. */
+    .att-tray {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      padding: 8px 10px 4px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .att-tray:empty { display: none; padding: 0; border-bottom: none; }
+
+    .att-chip {
+      position: relative;
+      display: flex; align-items: center; gap: 8px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px 6px 6px;
+      min-height: 48px;
+      max-width: 220px;
+      overflow: hidden;
+    }
+    .att-chip.is-error { border-color: var(--danger); background: var(--danger-dim); }
+    .att-chip .att-thumb {
+      width: 36px; height: 36px;
+      border-radius: 6px;
+      background: var(--bg-active);
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .att-chip .att-thumb img,
+    .att-chip .att-thumb video {
+      width: 100%; height: 100%; object-fit: cover;
+    }
+    .att-chip .att-thumb svg { color: var(--text-2); }
+    .att-chip .att-meta {
+      display: flex; flex-direction: column; min-width: 0; gap: 1px;
+    }
+    .att-chip .att-name {
+      font-size: 12px; font-weight: 500; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 130px;
+    }
+    .att-chip .att-sub {
+      font-size: 10.5px; color: var(--text-3);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .att-chip .att-cancel {
+      background: oklch(0 0 0 / 0.4);
+      border: none;
+      color: var(--text);
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background 120ms;
+    }
+    .att-chip .att-cancel:hover { background: var(--danger); }
+    .att-chip .att-progress {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      height: 2px;
+      background: var(--accent);
+      transform-origin: left;
+      transition: transform 100ms linear;
+    }
+    .att-chip.is-done .att-progress { display: none; }
+
+    /* Inline rendered attachments inside .msg-text rows. */
+    .msg-att-list {
+      display: flex; flex-direction: column; gap: 6px;
+      margin-top: 6px;
+      max-width: 520px;
+    }
+    .msg-att-list:empty { display: none; }
+
+    /* Image grid — 1 / 2 / 3+ images use different layouts. */
+    .msg-att-images {
+      display: grid; gap: 4px;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 480px;
+    }
+    .msg-att-images.count-1 { grid-template-columns: 1fr; }
+    .msg-att-images.count-2 { grid-template-columns: 1fr 1fr; }
+    .msg-att-images.count-3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
+    .msg-att-images.count-3 .att-img:nth-child(1) { grid-row: 1 / span 2; }
+    .msg-att-images.count-4,
+    .msg-att-images.count-many { grid-template-columns: 1fr 1fr; }
+    .att-img {
+      position: relative;
+      background: var(--bg-3);
+      cursor: zoom-in;
+      overflow: hidden;
+      min-height: 80px;
+      max-height: 320px;
+    }
+    .att-img img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+      max-height: 320px;
+    }
+    .msg-att-images.count-1 .att-img img { object-fit: contain; background: oklch(0 0 0 / 0.4); }
+    .att-img-overlay {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: oklch(0 0 0 / 0.55);
+      color: var(--text);
+      font-size: 18px; font-weight: 700;
+      opacity: 0;
+      transition: opacity 120ms;
+      pointer-events: none;
+    }
+    .msg-att-images.count-many .att-img:nth-child(4) .att-img-overlay { opacity: 1; }
+
+    /* Video attachment block. Mirrors the audio player layout — filename /
+     * size / download in a top header, native <video controls> below. We
+     * keep the browser's native controls because they're already dark and
+     * cover playback, fullscreen, picture-in-picture, and "save as." */
+    .att-video {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      max-width: 480px;
+    }
+    .att-video-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .att-video-name {
+      flex: 1 1 auto;
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .att-video-size {
+      flex: 0 0 auto;
+      font-size: 11px;
+      color: var(--text-3);
+    }
+    .att-video-download {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-2);
+      cursor: pointer;
+      padding: 0;
+      transition: background 120ms, color 120ms;
+    }
+    .att-video-download:hover {
+      background: var(--bg-active);
+      color: var(--text);
+    }
+    .att-video-player {
+      border-radius: 8px;
+      overflow: hidden;
+      background: black;
+      /* color-scheme: dark nudges Chromium to render the native <video>
+       * control bar in its dark variant so it matches the surrounding card. */
+      color-scheme: dark;
+    }
+    .att-video-player video {
+      display: block;
+      width: 100%;
+      max-height: 360px;
+    }
+    /* Custom audio player. We don't use `<audio controls>` because the native
+     * UI is light by default and only partially styleable across browsers.
+     * Layout (two-row grid below an inline header):
+     *   header:  filename · size                       [⬇ download]
+     *   body:    [▶]  ─────●─────────── seek  ──────   00:42 / 03:24
+     *            [▶]  🔊 ───●─────── volume
+     * The actual `<audio>` element is kept (display:none) so the browser
+     * handles decoding, network buffering, and keyboard/media-key integration —
+     * we only paint the chrome. Volume + mute are synced across every audio
+     * player on the page via the shared sharedAudioVolume/Muted module state,
+     * so changing one player's volume changes them all. */
+    .att-audio {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      max-width: 480px;
+    }
+    .att-audio audio { display: none; }
+
+    .att-audio-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .att-audio-name {
+      flex: 1 1 auto;
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .att-audio-size {
+      flex: 0 0 auto;
+      font-size: 11px;
+      color: var(--text-3);
+    }
+    .att-audio-download {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-2);
+      cursor: pointer;
+      padding: 0;
+      transition: background 120ms, color 120ms;
+    }
+    .att-audio-download:hover {
+      background: var(--bg-active);
+      color: var(--text);
+    }
+
+    .att-audio-body {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 12px;
+      row-gap: 10px;
+      align-items: center;
+    }
+
+    .att-audio-play {
+      grid-row: 1 / span 2;
+      grid-column: 1;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: var(--bg-active);
+      border: 1px solid var(--border);
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 0;
+      transition: background 120ms, transform 80ms;
+    }
+    .att-audio-play:hover { background: color-mix(in oklch, var(--bg-active) 60%, var(--text) 40%); }
+    .att-audio-play:active { transform: scale(0.94); }
+    .att-audio-play .att-audio-icon-pause { display: none; }
+    .att-audio.is-playing .att-audio-play .att-audio-icon-play { display: none; }
+    .att-audio.is-playing .att-audio-play .att-audio-icon-pause { display: inline-flex; }
+
+    /* Seek bar: visible 6px track inside a 22px-tall hit area for comfortable
+     * tap/click targets. Thumb only appears on hover or while dragging — keeps
+     * the resting state minimal. */
+    .att-audio-track {
+      grid-row: 1;
+      grid-column: 2;
+      position: relative;
+      height: 22px;
+      cursor: pointer;
+      padding: 8px 0;
+      box-sizing: border-box;
+      touch-action: none;
+    }
+    .att-audio-track::before {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; top: 8px;
+      height: 6px;
+      background: var(--bg);
+      border-radius: 3px;
+    }
+    .att-audio-track-fill {
+      position: absolute;
+      left: 0; top: 8px;
+      height: 6px;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      pointer-events: none;
+    }
+    .att-audio-track-thumb {
+      position: absolute;
+      top: 5px;
+      left: 0%;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--text);
+      transform: translateX(-50%);
+      opacity: 0;
+      transition: opacity 120ms;
+      pointer-events: none;
+    }
+    .att-audio-track:hover .att-audio-track-thumb,
+    .att-audio.is-seeking .att-audio-track-thumb { opacity: 1; }
+
+    .att-audio-time {
+      grid-row: 1;
+      grid-column: 3;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-2);
+      min-width: 84px;
+      text-align: right;
+    }
+
+    .att-audio-volume-row {
+      grid-row: 2;
+      grid-column: 2 / span 2;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .att-audio-mute {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: none;
+      background: transparent;
+      color: var(--text-2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: color 120ms;
+    }
+    .att-audio-mute:hover { color: var(--text); }
+    .att-audio-mute .att-audio-icon-muted { display: none; }
+    .att-audio.is-muted .att-audio-mute .att-audio-icon-vol { display: none; }
+    .att-audio.is-muted .att-audio-mute .att-audio-icon-muted { display: inline-flex; }
+
+    .att-audio-volume-track {
+      flex: 0 0 100px;
+      position: relative;
+      height: 22px;
+      cursor: pointer;
+      padding: 9px 0;
+      box-sizing: border-box;
+      touch-action: none;
+    }
+    .att-audio-volume-track::before {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; top: 9px;
+      height: 4px;
+      background: var(--bg);
+      border-radius: 2px;
+    }
+    .att-audio-volume-fill {
+      position: absolute;
+      left: 0; top: 9px;
+      height: 4px;
+      width: 100%;
+      background: var(--text-2);
+      border-radius: 2px;
+      pointer-events: none;
+    }
+    .att-audio-volume-thumb {
+      position: absolute;
+      top: 5px;
+      left: 100%;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--text);
+      transform: translateX(-50%);
+      opacity: 0;
+      transition: opacity 120ms;
+      pointer-events: none;
+    }
+    .att-audio-volume-track:hover .att-audio-volume-thumb,
+    .att-audio.is-volume-dragging .att-audio-volume-thumb { opacity: 1; }
+
+    /* Universal file card. Every attachment kind (pdf, markdown, generic
+     * file, video, audio) renders as this card so download buttons align
+     * across rows. Body-link holds the icon + name; actions hold the
+     * download button (and optionally an eye preview button). */
+    .att-card {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      max-width: 420px;
+      transition: background 120ms;
+    }
+    .att-card .att-card-icon {
+      width: 36px; height: 36px;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--bg-active);
+      border-radius: 6px;
+      color: var(--accent);
+    }
+    .att-card .att-card-body {
+      min-width: 0; flex: 1;
+      display: flex; flex-direction: column;
+    }
+    .att-card .att-card-name {
+      font-size: 13px; font-weight: 500; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .att-card .att-card-sub {
+      font-size: 11px; color: var(--text-3);
+    }
+    .att-card .att-card-body-link {
+      display: flex; align-items: center; gap: 10px;
+      flex: 1; min-width: 0;
+      text-decoration: none; color: inherit;
+    }
+    .att-card a.att-card-body-link:hover .att-card-name { text-decoration: underline; }
+
+    /* Lightbox — full-iframe modal for image preview. Esc + arrow keys nav. */
+    #lightbox {
+      position: fixed; inset: 0;
+      background: oklch(0.04 0 0 / 0.92);
+      display: none;
+      align-items: center; justify-content: center;
+      z-index: 100;
+      padding: 32px;
+    }
+    #lightbox.is-open { display: flex; }
+    #lightbox .lb-img {
+      max-width: 100%; max-height: 100%;
+      object-fit: contain;
+      box-shadow: 0 6px 60px oklch(0 0 0 / 0.6);
+    }
+    #lightbox .lb-close, #lightbox .lb-prev, #lightbox .lb-next {
+      position: absolute;
+      background: oklch(1 0 0 / 0.08);
+      border: 1px solid oklch(1 0 0 / 0.12);
+      color: var(--text);
+      border-radius: 50%;
+      width: 40px; height: 40px;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 120ms;
+    }
+    #lightbox .lb-close:hover, #lightbox .lb-prev:hover, #lightbox .lb-next:hover {
+      background: oklch(1 0 0 / 0.18);
+    }
+    #lightbox .lb-close { top: 16px; right: 16px; }
+    #lightbox .lb-prev  { left: 16px; top: 50%; transform: translateY(-50%); }
+    #lightbox .lb-next  { right: 16px; top: 50%; transform: translateY(-50%); }
+    #lightbox .lb-caption {
+      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+      background: oklch(0 0 0 / 0.5);
+      color: var(--text-2);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      max-width: 80%;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #lightbox .lb-download {
+      position: absolute; top: 16px; left: 16px;
+      background: oklch(1 0 0 / 0.08);
+      border: 1px solid oklch(1 0 0 / 0.12);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 12px;
+      text-decoration: none;
+      cursor: pointer;
+      font: inherit;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #lightbox .lb-download:hover { background: oklch(1 0 0 / 0.18); }
+
+    /* PDF / inline-safe file cards. The card is clickable; click anywhere
+     * outside the download anchor asks the shell (via `sdk.platform.files
+     * .preview`) to open a fullscreen overlay around the file. The shell
+     * owns rendering — see file-preview-overlay.tsx. */
+    .att-card.att-card-clickable { cursor: pointer; }
+    .att-card.att-card-clickable:hover { background: oklch(1 0 0 / 0.04); }
+    .att-card .att-card-actions {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .att-card .att-card-action {
+      width: 28px; height: 28px;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--text-2);
+      background: transparent;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .att-card .att-card-action:hover {
+      background: oklch(1 0 0 / 0.08);
+      color: var(--text);
+    }
+
+    /* Mobile / coarse-pointer: make the send button a comfortable tap target
+     * and stop hover-revealed affordances (message actions, continued-row
+     * timestamps) from flashing on every tap. Long-press opens the shared
+     * context menu instead — no inline buttons cluttering the row. */
+    @media (hover: none) {
+      .ibtn.send { width: 36px; height: 36px; }
+      .msg:hover .msg-actions,
+      .msg-cont:hover .msg-actions,
+      .msg:focus-within .msg-actions,
+      .msg-cont:focus-within .msg-actions {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .msg-cont:hover::before { display: none; }
+      /* Disable text selection during long-press so the OS menu doesn't fight
+       * with our context menu. -webkit-touch-callout: none suppresses iOS's
+       * "tap-and-hold preview" overlay which would otherwise race ours. We
+       * keep selection enabled inside the actual text so users can still
+       * select/copy via the in-iframe path or by entering edit mode. */
+      .msg, .msg-cont {
+        -webkit-user-select: none; user-select: none;
+        -webkit-touch-callout: none;
+      }
+      .msg-text, .edit-textarea {
+        -webkit-user-select: text; user-select: text;
+        -webkit-touch-callout: default;
+      }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Messages -->
+  <div id="messages-wrap">
+    <div id="messages-spacer"></div>
+    <div id="messages"></div>
+  </div>
+
+  <!-- Typing indicator (independent of status messages so a setStatus call
+       can't wipe an active "X is typing…" line). -->
+  <div id="typing-bar"></div>
+  <!-- Status / system messages -->
+  <div id="status-bar"></div>
+
+  <!-- Input -->
+  <div id="input-area">
+    <div id="input-box">
+      <div id="att-tray-main" class="att-tray"></div>
+      <div id="input-row">
+        <!-- Attach -->
+        <button class="ibtn att-btn" id="attach-btn" title="Attach file" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
+        <input type="file" id="attach-input" hidden multiple>
+
+        <textarea id="message-input" rows="1" placeholder="Message #—" autocomplete="off" spellcheck="true"></textarea>
+
+        <!-- Emoji -->
+        <button class="ibtn" title="Emoji" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M8 14s1.5 2 4 2 4-2 4-2"/>
+            <line x1="9" y1="9" x2="9.01" y2="9"/>
+            <line x1="15" y1="9" x2="15.01" y2="9"/>
+          </svg>
+        </button>
+
+        <!-- GIF -->
+        <button class="ibtn" title="GIF" disabled style="font-size:11px;font-weight:700;width:36px;">GIF</button>
+
+        <!-- Send -->
+        <button class="ibtn send" id="send-btn" title="Send (Enter)" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- Thread side panel (hidden by default; slides in on Reply click) -->
+<div id="thread-panel" aria-hidden="true">
+  <div id="thread-head">
+    <span class="thread-icon" aria-hidden="true">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+    </span>
+    <div class="thread-title">
+      <span class="thread-label">Thread</span>
+      <span class="thread-sub" id="thread-sub"></span>
+    </div>
+    <span id="thread-viewer-count" title="People viewing this thread">0</span>
+    <button id="thread-close" title="Close thread (Esc)" aria-label="Close thread">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div id="thread-root"></div>
+  <div id="thread-messages"></div>
+  <div id="thread-typing"></div>
+  <div id="thread-input-area">
+    <div id="thread-input-box">
+      <div id="att-tray-thread" class="att-tray"></div>
+      <div id="thread-input-row">
+        <button class="ibtn att-btn" id="thread-attach-btn" title="Attach file" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
+        <input type="file" id="thread-attach-input" hidden multiple>
+        <textarea id="thread-input" rows="1" placeholder="Reply in thread" autocomplete="off" spellcheck="true"></textarea>
+        <button class="ibtn send" id="thread-send-btn" title="Send (Enter)" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Drop overlay shown when dragging files anywhere over the iframe. -->
+<div id="drop-overlay" role="presentation">
+  <div class="drop-inner">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+    <span>Drop to attach</span>
+  </div>
+</div>
+
+<!-- Lightbox for image previews. Reused for both image and any inline media. -->
+<div id="lightbox" role="dialog" aria-modal="true" aria-hidden="true">
+  <button type="button" class="lb-download" id="lb-download">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    <span>Download</span>
+  </button>
+  <button class="lb-close" id="lb-close" aria-label="Close">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+  </button>
+  <button class="lb-prev" id="lb-prev" aria-label="Previous">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+  </button>
+  <button class="lb-next" id="lb-next" aria-label="Next">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+  <img class="lb-img" id="lb-img" alt="" draggable="false">
+  <div class="lb-caption" id="lb-caption"></div>
+</div>
+
+<!-- Shared message context menu (right-click + long-press + "…" overflow).
+     Lives outside #app so it isn't inadvertently constrained by panel layout.
+     Items are rebuilt per-open from the target message's permissions. -->
+<div id="msg-context-backdrop" aria-hidden="true"></div>
+<div id="msg-context-menu" role="menu" aria-hidden="true" tabindex="-1"></div>
+
+<script src="/sdk/plugin-frontend.js?v=20260429a"></script>
+<script type="module">
+const { createPluginFrontend, avatarHtml } = window.UncodedPlugin;
+
+(async function () {
+  'use strict';
+
+  // ── SDK handle (set after init) ────────────────────────────────────────────
+  var sdk = null;
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  var myUserId           = null;
+  var currentChannelId   = null;
+  var currentChannelName = null;
+
+  // Thread panel state
+  var currentThreadId       = null;  // root message id, or null if panel closed
+  var currentThreadRootMsg  = null;  // cached root payload when panel is open
+  var threadReplies         = [];    // in-memory list for the open thread
+  var pendingThreadReplyIds = new Set();
+  var threadTypingEntries   = [];
+  var threadViewerCount     = 0;
+  var typingPingTimer       = null;
+  var typingStopTimer       = null;
+  var activeTypingScopeKey  = null;  // "<channel>|<thread?>" so we can leave the right scope
+
+  // ── DOM refs ───────────────────────────────────────────────────────────────
+  var msgWrap   = document.getElementById('messages-wrap');
+  var msgList   = document.getElementById('messages');
+  var statusBar = document.getElementById('status-bar');
+  var typingBar = document.getElementById('typing-bar');
+  var inputEl   = document.getElementById('message-input');
+  var sendBtn   = document.getElementById('send-btn');
+
+  var threadPanel        = document.getElementById('thread-panel');
+  var threadRootEl       = document.getElementById('thread-root');
+  var threadMsgsEl       = document.getElementById('thread-messages');
+  var threadTypingEl     = document.getElementById('thread-typing');
+  var threadSubEl        = document.getElementById('thread-sub');
+  var threadViewerCountEl = document.getElementById('thread-viewer-count');
+  var threadInputEl      = document.getElementById('thread-input');
+  var threadSendBtn      = document.getElementById('thread-send-btn');
+  var threadCloseBtn     = document.getElementById('thread-close');
+
+  var ctxMenuEl     = document.getElementById('msg-context-menu');
+  var ctxBackdropEl = document.getElementById('msg-context-backdrop');
+
+  // Attachments DOM
+  var attachBtn       = document.getElementById('attach-btn');
+  var attachInput     = document.getElementById('attach-input');
+  var trayMainEl      = document.getElementById('att-tray-main');
+  var threadAttachBtn   = document.getElementById('thread-attach-btn');
+  var threadAttachInput = document.getElementById('thread-attach-input');
+  var trayThreadEl    = document.getElementById('att-tray-thread');
+  var dropOverlayEl   = document.getElementById('drop-overlay');
+  var lightboxEl      = document.getElementById('lightbox');
+  var lightboxImgEl   = document.getElementById('lb-img');
+  var lightboxCapEl   = document.getElementById('lb-caption');
+  var lightboxDlEl    = document.getElementById('lb-download');
+  var lightboxCloseEl = document.getElementById('lb-close');
+  var lightboxPrevEl  = document.getElementById('lb-prev');
+  var lightboxNextEl  = document.getElementById('lb-next');
+
+  // ── Utilities ──────────────────────────────────────────────────────────────
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    var h = d.getHours(), m = d.getMinutes();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
+  }
+
+  function fmtDate(ts) {
+    var d = new Date(ts);
+    var now = new Date();
+    var diff = now - d;
+    if (diff < 86400000 && d.getDate() === now.getDate()) return 'Today';
+    if (diff < 172800000) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+  }
+
+  function shortName(id) {
+    return id ? id.slice(0, 8) : '?';
+  }
+
+  // Render an author avatar wrapped in a button that opens the shell user
+  // card. SDK `avatarHtml` handles the deterministic 12-hue palette + initial
+  // fallback + image rendering. We layer a button wrapper so it's clickable
+  // and carries data-* attrs picked up by the delegated click handler.
+  //
+  // size is the inline avatar size in pixels — passed through to the SDK
+  // primitive. Choose per-context (36 in main feed, 28 in thread root).
+  function renderAuthorAvatar(userId, displayName, avatarUrl, size) {
+    var dn = (displayName === null || displayName === undefined) ? '' : String(displayName);
+    var au = (avatarUrl === null || avatarUrl === undefined) ? '' : String(avatarUrl);
+    var inner = avatarHtml({
+      userId: userId,
+      displayName: dn,
+      avatarUrl: au === '' ? null : au,
+      size: size,
+    });
+    return (
+      '<button type="button" class="msg-author-avatar" ' +
+      'data-uc-user-id="' + esc(userId) + '" ' +
+      'data-uc-display-name="' + esc(dn) + '" ' +
+      'data-uc-avatar-url="' + esc(au) + '" ' +
+      'aria-label="Open user card for ' + esc(dn) + '">' +
+      inner +
+      '</button>'
+    );
+  }
+
+  function setStatus(msg) { statusBar.textContent = msg; }
+
+  function scrollToBottom(force) {
+    var atBottom = msgWrap.scrollHeight - msgWrap.scrollTop - msgWrap.clientHeight < 80;
+    if (force || atBottom) {
+      msgWrap.scrollTop = msgWrap.scrollHeight;
+    }
+  }
+
+  // ── SDK request wrapper ────────────────────────────────────────────────────
+  function request(action, params) {
+    return sdk.request(action, params);
+  }
+
+  // ── Attachments ────────────────────────────────────────────────────────────
+  //
+  // Each composer (main + thread) owns a tray of pending attachments. Files
+  // are uploaded eagerly on add (so the user sees progress while typing) and
+  // sendMessage rolls up the resulting filenames into the request payload.
+  //
+  // Cancellation aborts the in-flight XHR via AbortSignal. Removed-while-
+  // uploading items become orphans on the server; the plugin's hourly GC
+  // sweep clears them.
+
+  var attachState = { main: [], thread: [] };  // arrays of pending records
+  var attachIdSeq = 0;
+  // Settings — fetched from backend via getAttachmentSettings at init and
+  // kept live via text-channels.attachments.settings_updated events. The
+  // hardcoded values mirror the manifest defaults so the UI works even if
+  // the request hasn't returned yet on the first paint.
+  var attSettings = {
+    enabled: true,
+    maxBytes: 5 * 1024 * 1024 * 1024,
+    maxPerMessage: 10,
+  };
+
+  function applyAttSettings(s) {
+    if (!s || typeof s !== 'object') return;
+    if (typeof s.enabled === 'boolean') attSettings.enabled = s.enabled;
+    if (typeof s.maxBytes === 'number' && Number.isFinite(s.maxBytes) && s.maxBytes >= 0) {
+      attSettings.maxBytes = s.maxBytes;
+    }
+    if (typeof s.maxPerMessage === 'number' && Number.isFinite(s.maxPerMessage) && s.maxPerMessage > 0) {
+      attSettings.maxPerMessage = Math.floor(s.maxPerMessage);
+    }
+  }
+  // Pre-resolved render URLs for completed uploads, keyed by pending-record id.
+  // Used to populate the lightbox without re-requesting from the server.
+  var attLastFlightInfo = '';
+
+  function makePendingId() { attachIdSeq += 1; return 'p' + String(attachIdSeq); }
+
+  function fmtBytes(n) {
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0; var v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+    var rounded = v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+    return rounded + ' ' + units[i];
+  }
+
+  // Categorize a MIME string into one of the renderers' kinds.
+  function mimeKind(mime, filename) {
+    var m = String(mime || '').toLowerCase();
+    if (m.indexOf('image/') === 0) return 'image';
+    if (m.indexOf('video/') === 0) return 'video';
+    if (m.indexOf('audio/') === 0) return 'audio';
+    if (m === 'application/pdf') return 'pdf';
+    // Fallback to extension sniff when the server returned octet-stream.
+    var name = String(filename || '').toLowerCase();
+    var ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.') + 1) : '';
+    if (ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'gif' || ext === 'webp' || ext === 'bmp') return 'image';
+    if (ext === 'mp4' || ext === 'webm' || ext === 'mov' || ext === 'm4v') return 'video';
+    if (ext === 'mp3' || ext === 'wav' || ext === 'ogg' || ext === 'flac' || ext === 'm4a') return 'audio';
+    if (ext === 'pdf') return 'pdf';
+    if (ext === 'md' || ext === 'markdown') return 'markdown';
+    if (ext === 'html' || ext === 'htm') return 'html';
+    return 'generic';
+  }
+
+  // Build a same-origin, absolute URL for a path-only signed URL coming back
+  // from the backend. The iframe is loaded from the runtime origin, so prepending
+  // window.location.origin keeps the request on the runtime.
+  function resolveAttachmentUrl(url) {
+    if (!url) return '';
+    if (url.indexOf('http://') === 0 || url.indexOf('https://') === 0) return url;
+    return window.location.origin + url;
+  }
+
+  // Carry the original filename on inline URLs too, so the runtime emits
+  // `Content-Disposition: inline; filename="<original>"`. Chromium's built-in
+  // download affordances (right-click "Save Image As", the <video> overflow
+  // menu's "Download video" item) honor RFC 6266 — without `?n=` they fall
+  // back to the on-disk UUID-ish filename.
+  function inlineHref(url, name) {
+    if (!name) return url;
+    var sep = url.indexOf('?') >= 0 ? '&' : '?';
+    return url + sep + 'n=' + encodeURIComponent(name);
+  }
+
+  // Build a thumbnail preview for a local File before it finishes uploading.
+  // Returns null if no preview is available (will fall back to icon).
+  function localPreviewFor(file) {
+    if (file.type.indexOf('image/') === 0) {
+      return URL.createObjectURL(file);
+    }
+    return null;
+  }
+
+  function trayElFor(scope) { return scope === 'thread' ? trayThreadEl : trayMainEl; }
+  function trayListFor(scope) { return attachState[scope]; }
+
+  function renderTray(scope) {
+    var trayEl = trayElFor(scope);
+    var list = trayListFor(scope);
+    trayEl.innerHTML = '';
+    for (var i = 0; i < list.length; i++) {
+      var rec = list[i];
+      var chip = document.createElement('div');
+      chip.className = 'att-chip' + (rec.status === 'done' ? ' is-done' : '') + (rec.status === 'error' ? ' is-error' : '');
+      chip.setAttribute('data-att-id', rec.id);
+
+      var thumb = '';
+      if (rec.previewUrl) {
+        thumb = '<img alt="" src="' + esc(rec.previewUrl) + '">';
+      } else {
+        // Generic file icon.
+        thumb = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+      }
+
+      var subText;
+      if (rec.status === 'error') {
+        subText = 'Failed — ' + (rec.error || 'unknown');
+      } else if (rec.status === 'done') {
+        subText = fmtBytes(rec.size || rec.file.size);
+      } else if (rec.retrying) {
+        subText = 'Resuming…';
+      } else {
+        var pct = Math.round((rec.progress || 0) * 100);
+        var loaded = Math.floor((rec.progress || 0) * rec.file.size);
+        subText = pct + '% • ' + fmtBytes(loaded) + ' / ' + fmtBytes(rec.file.size);
+      }
+
+      chip.innerHTML =
+        '<div class="att-thumb">' + thumb + '</div>' +
+        '<div class="att-meta">' +
+          '<div class="att-name" title="' + esc(rec.file.name) + '">' + esc(rec.file.name) + '</div>' +
+          '<div class="att-sub">' + esc(subText) + '</div>' +
+        '</div>' +
+        '<button class="att-cancel" type="button" aria-label="Remove">' +
+          '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
+        '</button>' +
+        (rec.status === 'uploading' || rec.status === 'pending'
+          ? '<div class="att-progress" style="transform:scaleX(' + (rec.progress || 0).toFixed(3) + ')"></div>'
+          : '');
+
+      var cancelBtn = chip.querySelector('.att-cancel');
+      (function (id) {
+        cancelBtn.addEventListener('click', function () { removePending(scope, id); });
+      })(rec.id);
+
+      trayEl.appendChild(chip);
+    }
+  }
+
+  // Apply progress for one record without a full tray re-render (cheaper for
+  // 60Hz progress updates and avoids flickering thumbnails).
+  function updateProgress(scope, id, ratio, loaded) {
+    var trayEl = trayElFor(scope);
+    var chip = trayEl.querySelector('[data-att-id="' + id + '"]');
+    if (!chip) return;
+    var list = trayListFor(scope);
+    var rec = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) { rec = list[i]; break; }
+    }
+    if (!rec) return;
+    // First progress event after a retry clears the "Resuming…" banner.
+    var wasRetrying = !!rec.retrying;
+    rec.progress = ratio;
+    rec.retrying = false;
+    if (wasRetrying) { renderTray(scope); return; }
+    var bar = chip.querySelector('.att-progress');
+    if (bar) bar.style.transform = 'scaleX(' + ratio.toFixed(3) + ')';
+    var sub = chip.querySelector('.att-sub');
+    if (sub) {
+      var size = rec.file.size;
+      var loadedBytes = typeof loaded === 'number' ? loaded : Math.floor(ratio * size);
+      sub.textContent = String(Math.round(ratio * 100)) + '% • ' + fmtBytes(loadedBytes) + ' / ' + fmtBytes(size);
+    }
+  }
+
+  // Begin upload for a record. Resolves to the record on success or error.
+  function startUpload(scope, rec) {
+    rec.status = 'uploading';
+    rec.abort = new AbortController();
+    return sdk.files.upload(rec.file, {
+      maxBytes: attSettings.maxBytes,
+      signal: rec.abort.signal,
+      onProgress: function (p) { updateProgress(scope, rec.id, p.ratio, p.loaded); },
+      onRetry: function () {
+        // A chunk failed and the SDK is sleeping before its next attempt.
+        // Surface "Resuming…" until the next onProgress arrives.
+        rec.retrying = true;
+        renderTray(scope);
+      },
+    }).then(function (result) {
+      rec.status = 'done';
+      rec.progress = 1;
+      rec.filename = result.filename;
+      rec.serverSize = result.size;
+      rec.serverMime = result.mime;
+      renderTray(scope);
+      return rec;
+    }).catch(function (err) {
+      if (err && err.code === 'ABORTED') {
+        // Caller already removed the record from the tray.
+        return null;
+      }
+      rec.status = 'error';
+      rec.error = (err && err.message) ? err.message : 'Upload failed';
+      renderTray(scope);
+      return rec;
+    });
+  }
+
+  // Add one or more File objects to a tray. Each file is validated against
+  // the per-message cap and per-file ceiling before upload starts.
+  function addFiles(scope, files) {
+    if (!attSettings.enabled) {
+      setStatus('Attachments are disabled on this server.');
+      return;
+    }
+    var list = trayListFor(scope);
+    var added = false;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (!f) continue;
+      if (list.length >= attSettings.maxPerMessage) {
+        setStatus('Up to ' + String(attSettings.maxPerMessage) + ' attachments per message.');
+        break;
+      }
+      if (attSettings.maxBytes > 0 && f.size > attSettings.maxBytes) {
+        setStatus('"' + f.name + '" exceeds ' + fmtBytes(attSettings.maxBytes) + '.');
+        continue;
+      }
+      if (f.size === 0) {
+        setStatus('"' + f.name + '" is empty.');
+        continue;
+      }
+      var rec = {
+        id: makePendingId(),
+        file: f,
+        status: 'pending',
+        progress: 0,
+        retrying: false,
+        previewUrl: localPreviewFor(f),
+        abort: null,
+        filename: null,
+        serverSize: 0,
+        serverMime: '',
+        error: '',
+      };
+      list.push(rec);
+      added = true;
+      startUpload(scope, rec);
+    }
+    if (added) renderTray(scope);
+  }
+
+  function removePending(scope, id) {
+    var list = trayListFor(scope);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id !== id) continue;
+      var rec = list[i];
+      if (rec.abort && rec.status === 'uploading') {
+        try { rec.abort.abort(); } catch (_) {}
+      }
+      if (rec.previewUrl) {
+        try { URL.revokeObjectURL(rec.previewUrl); } catch (_) {}
+      }
+      list.splice(i, 1);
+      break;
+    }
+    renderTray(scope);
+  }
+
+  // Wait until every pending upload in a tray is resolved (done or error).
+  // Used by sendMessage to block until the user's selected attachments have
+  // server-issued filenames. Cancelled/removed items are excluded.
+  function waitForUploads(scope) {
+    var list = trayListFor(scope);
+    var promises = [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].status === 'uploading' || list[i].status === 'pending') {
+        // Re-attach a poller-promise; the actual upload promise is owned by
+        // startUpload but we don't keep a handle. Poll status instead since
+        // startUpload mutates rec.status synchronously when the upload
+        // settles, and renderTray is a strong signal.
+        promises.push(new Promise(function (resolve) {
+          var rec = list[i];
+          var check = function () {
+            if (rec.status === 'done' || rec.status === 'error') { resolve(); return; }
+            setTimeout(check, 60);
+          };
+          check();
+        }));
+      }
+    }
+    return Promise.all(promises);
+  }
+
+  // Collect the attachment payload for sendMessage. Errored / pending records
+  // are skipped — the caller decides whether to refuse to send.
+  function collectAttachments(scope) {
+    var list = trayListFor(scope);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var rec = list[i];
+      if (rec.status !== 'done' || !rec.filename) continue;
+      out.push({
+        filename: rec.filename,
+        original_name: rec.file.name,
+        mime: rec.serverMime || rec.file.type || 'application/octet-stream',
+      });
+    }
+    return out;
+  }
+
+  function hasErrors(scope) {
+    var list = trayListFor(scope);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].status === 'error') return true;
+    }
+    return false;
+  }
+
+  function clearTray(scope) {
+    var list = trayListFor(scope);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].previewUrl) {
+        try { URL.revokeObjectURL(list[i].previewUrl); } catch (_) {}
+      }
+    }
+    attachState[scope] = [];
+    renderTray(scope);
+  }
+
+  // Compose-side wiring — click picker, drag-drop, paste.
+  function wireAttachButton(btn, input, scope) {
+    if (!btn || !input) return;
+    btn.addEventListener('click', function () { input.click(); });
+    input.addEventListener('change', function () {
+      if (input.files && input.files.length > 0) {
+        addFiles(scope, input.files);
+      }
+      input.value = '';
+    });
+  }
+
+  // Drag-drop. We attach on the iframe root so any drop within the panel is
+  // captured (drops onto messages target the main composer; drops while the
+  // thread panel is open target the thread composer).
+  function wireDragDrop() {
+    var dragCounter = 0;
+    var hasFiles = function (ev) {
+      if (!ev.dataTransfer) return false;
+      var types = ev.dataTransfer.types;
+      if (!types) return false;
+      for (var i = 0; i < types.length; i++) {
+        if (types[i] === 'Files' || types[i] === 'application/x-moz-file') return true;
+      }
+      return false;
+    };
+    window.addEventListener('dragenter', function (ev) {
+      if (!hasFiles(ev)) return;
+      dragCounter += 1;
+      dropOverlayEl.classList.add('is-active');
+    });
+    window.addEventListener('dragover', function (ev) {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'copy';
+    });
+    window.addEventListener('dragleave', function () {
+      dragCounter = Math.max(0, dragCounter - 1);
+      if (dragCounter === 0) dropOverlayEl.classList.remove('is-active');
+    });
+    window.addEventListener('drop', function (ev) {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      dragCounter = 0;
+      dropOverlayEl.classList.remove('is-active');
+      var files = ev.dataTransfer.files;
+      if (!files || files.length === 0) return;
+      var scope = currentThreadId ? 'thread' : 'main';
+      addFiles(scope, files);
+    });
+  }
+
+  // Clipboard paste — pull File entries out of the clipboard event so users
+  // can ctrl-V a screenshot. Targets the focused composer.
+  function wirePaste() {
+    function handle(scope) {
+      return function (ev) {
+        if (!ev.clipboardData || !ev.clipboardData.items) return;
+        var picked = [];
+        for (var i = 0; i < ev.clipboardData.items.length; i++) {
+          var it = ev.clipboardData.items[i];
+          if (it.kind === 'file') {
+            var f = it.getAsFile();
+            if (f) picked.push(f);
+          }
+        }
+        if (picked.length > 0) {
+          ev.preventDefault();
+          addFiles(scope, picked);
+        }
+      };
+    }
+    inputEl.addEventListener('paste', handle('main'));
+    threadInputEl.addEventListener('paste', handle('thread'));
+  }
+
+  // ── Inline render ──────────────────────────────────────────────────────────
+
+  // Build HTML for an attachment list. Returns '' for empty input.
+  function renderAttachmentsHtml(attachments) {
+    if (!attachments || !attachments.length) return '';
+    var images = [];
+    var others = [];
+    for (var i = 0; i < attachments.length; i++) {
+      var a = attachments[i];
+      var kind = mimeKind(a.mime, a.original_name);
+      if (kind === 'image') images.push(a); else others.push({ kind: kind, a: a });
+    }
+    var out = '<div class="msg-att-list">';
+    if (images.length > 0) out += renderImageGrid(images);
+    for (var j = 0; j < others.length; j++) {
+      out += renderOne(others[j].kind, others[j].a);
+    }
+    out += '</div>';
+    return out;
+  }
+
+  function renderImageGrid(images) {
+    var count = images.length;
+    var cls = count >= 4 ? (count > 4 ? 'count-many' : 'count-4') : 'count-' + String(count);
+    var visible = count > 4 ? images.slice(0, 4) : images;
+    var hidden = count > 4 ? count - 4 : 0;
+    var out = '<div class="msg-att-images ' + cls + '" data-att-images>';
+    for (var i = 0; i < visible.length; i++) {
+      var a = visible[i];
+      var rawName = a.original_name || a.filename;
+      var url = esc(inlineHref(resolveAttachmentUrl(a.url), rawName));
+      var name = esc(rawName);
+      out +=
+        '<div class="att-img" data-att-index="' + String(i) + '" data-att-name="' + name + '" data-att-url="' + url + '" role="button" tabindex="0" aria-label="Open ' + name + '">' +
+          '<img alt="' + name + '" loading="lazy" src="' + url + '">' +
+          (i === 3 && hidden > 0
+            ? '<div class="att-img-overlay">+' + String(hidden) + '</div>'
+            : '') +
+        '</div>';
+    }
+    out += '</div>';
+    return out;
+  }
+
+  function renderOne(kind, a) {
+    var rawUrl = resolveAttachmentUrl(a.url);
+    var rawName = a.original_name || a.filename;
+    // `url` is the inline form (no `?download=1`) used as a media src + as
+    // the preview/download target — the shell appends `?download=1&n=…`
+    // before kicking off the download. `inlineUrl` additionally carries
+    // `?n=` so Chromium's built-in "Save Video/Audio As" overflow menu
+    // uses the original filename via Content-Disposition.
+    var url = esc(rawUrl);
+    var inlineUrl = esc(inlineHref(rawUrl, rawName));
+    var name = esc(rawName);
+    var size = esc(fmtBytes(a.size));
+
+    var fileIconSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    var videoIconSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+    var audioIconSvg = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+    var downloadSvg = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    var eyeSvg = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+    // Every file card uses the same structure: body-link (icon + name + size)
+    // on the left, actions (optional eye + download) on the right. The
+    // download icon is always the rightmost element so download buttons align
+    // across rows of mixed kinds. Body-click behavior is kind-dependent:
+    //   - previewable (pdf/markdown): clicking the body asks the shell to
+    //     open the file-preview overlay (`sdk.platform.files.preview`).
+    //   - everything else: clicking the body asks the shell to trigger a
+    //     native download (`sdk.platform.files.download`).
+    //
+    // Both paths route through the shell because the plugin iframe's own
+    // `<a download>` is unreliable: cross-origin `download` is ignored, and
+    // on Linux Electron the popup-intercept flow drops `downloadURL`. The
+    // shell owns the trigger so every platform works the same way.
+    function buildCard(iconHtml, subType, opts) {
+      var withPreview = !!(opts && opts.withPreview);
+      var classes = 'att-card att-card-clickable' + (withPreview ? ' att-card-preview-card' : '');
+      var bodyAction = withPreview ? 'preview' : 'download';
+      var dataAttrs =
+        ' data-att-url="' + url + '"' +
+        ' data-att-name="' + name + '"' +
+        ' data-att-action="' + bodyAction + '"';
+      var previewBtn = withPreview
+        ? '<button type="button" class="att-card-action att-card-preview" data-att-action="preview" data-att-url="' + url + '" data-att-name="' + name + '" aria-label="Preview ' + name + '">' + eyeSvg + '</button>'
+        : '';
+      return (
+        '<div class="' + classes + '"' + dataAttrs + '>' +
+          '<div class="att-card-body-link">' +
+            '<div class="att-card-icon">' + iconHtml + '</div>' +
+            '<div class="att-card-body">' +
+              '<span class="att-card-name">' + name + '</span>' +
+              '<span class="att-card-sub">' + size + ' · ' + subType + '</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="att-card-actions">' +
+            previewBtn +
+            '<button type="button" class="att-card-action att-card-download" data-att-action="download" data-att-url="' + url + '" data-att-name="' + name + '" aria-label="Download ' + name + '">' + downloadSvg + '</button>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    // Video: self-contained block with a filename / size / download header
+    // above the native <video controls>. No separate file card — the header
+    // owns the download affordance.
+    if (kind === 'video') {
+      return (
+        '<div class="att-video">' +
+          '<div class="att-video-header">' +
+            '<span class="att-video-name" title="' + name + '">' + name + '</span>' +
+            '<span class="att-video-size">' + size + '</span>' +
+            '<button type="button" class="att-video-download" data-att-action="download" data-att-url="' + url + '" data-att-name="' + name + '" aria-label="Download ' + name + '">' + downloadSvg + '</button>' +
+          '</div>' +
+          '<div class="att-video-player">' +
+            '<video controls preload="metadata" playsinline src="' + inlineUrl + '"></video>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+    if (kind === 'audio') {
+      // Self-contained audio block. The hidden <audio> drives decoding +
+      // buffering; we paint the chrome (filename header, play/pause, seek,
+      // time, volume + mute). Seek + volume use direct pointer handlers
+      // (bindDrag in wireAudioPlayer) for drag support; play and mute use
+      // delegation via data-att-action.
+      return (
+        '<div class="att-audio" data-audio-wired="0">' +
+          '<audio preload="metadata" src="' + inlineUrl + '"></audio>' +
+          '<div class="att-audio-header">' +
+            '<span class="att-audio-name" title="' + name + '">' + name + '</span>' +
+            '<span class="att-audio-size">' + size + '</span>' +
+            '<button type="button" class="att-audio-download" data-att-action="download" data-att-url="' + url + '" data-att-name="' + name + '" aria-label="Download ' + name + '">' + downloadSvg + '</button>' +
+          '</div>' +
+          '<div class="att-audio-body">' +
+            '<button type="button" class="att-audio-play" data-att-action="audio-toggle" aria-label="Play audio">' +
+              '<span class="att-audio-icon-play"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7L8 5z"/></svg></span>' +
+              '<span class="att-audio-icon-pause"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg></span>' +
+            '</button>' +
+            '<div class="att-audio-track" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
+              '<div class="att-audio-track-fill"></div>' +
+              '<div class="att-audio-track-thumb"></div>' +
+            '</div>' +
+            '<span class="att-audio-time">0:00 / --:--</span>' +
+            '<div class="att-audio-volume-row">' +
+              '<button type="button" class="att-audio-mute" data-att-action="audio-mute-toggle" aria-label="Mute">' +
+                '<span class="att-audio-icon-vol"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>' +
+                '<span class="att-audio-icon-muted"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg></span>' +
+              '</button>' +
+              '<div class="att-audio-volume-track" role="slider" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">' +
+                '<div class="att-audio-volume-fill"></div>' +
+                '<div class="att-audio-volume-thumb"></div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+    if (kind === 'pdf') return buildCard(fileIconSvg, 'PDF', { withPreview: true });
+    if (kind === 'markdown') return buildCard(fileIconSvg, 'Markdown', { withPreview: true });
+    if (kind === 'html') return buildCard(fileIconSvg, 'HTML', { withPreview: true });
+    return buildCard(fileIconSvg, 'file');
+  }
+
+  // ── Lightbox ───────────────────────────────────────────────────────────────
+  var lightboxImages = [];
+  var lightboxIdx = 0;
+
+  function openLightboxFromGrid(gridEl, startIdx) {
+    var imgs = gridEl.querySelectorAll('[data-att-url]');
+    lightboxImages = [];
+    for (var i = 0; i < imgs.length; i++) {
+      lightboxImages.push({
+        url: imgs[i].getAttribute('data-att-url') || '',
+        name: imgs[i].getAttribute('data-att-name') || '',
+      });
+    }
+    lightboxIdx = startIdx;
+    renderLightbox();
+    lightboxEl.classList.add('is-open');
+    lightboxEl.setAttribute('aria-hidden', 'false');
+  }
+
+  function renderLightbox() {
+    var cur = lightboxImages[lightboxIdx];
+    if (!cur) return;
+    lightboxImgEl.src = cur.url;
+    lightboxImgEl.alt = cur.name;
+    lightboxCapEl.textContent = cur.name + ' (' + String(lightboxIdx + 1) + ' / ' + String(lightboxImages.length) + ')';
+    // Stash url + name on the button — the click handler reads these and
+    // routes through `sdk.platform.files.download` so the shell owns the
+    // trigger (works on Linux Electron, where the plugin iframe's own
+    // `<a download>` path silently drops the download).
+    lightboxDlEl.setAttribute('data-att-url', cur.url);
+    lightboxDlEl.setAttribute('data-att-name', cur.name);
+    lightboxPrevEl.style.display = lightboxImages.length > 1 ? 'flex' : 'none';
+    lightboxNextEl.style.display = lightboxImages.length > 1 ? 'flex' : 'none';
+  }
+
+  function closeLightbox() {
+    lightboxEl.classList.remove('is-open');
+    lightboxEl.setAttribute('aria-hidden', 'true');
+    lightboxImgEl.src = '';
+  }
+
+  function stepLightbox(delta) {
+    if (lightboxImages.length === 0) return;
+    lightboxIdx = (lightboxIdx + delta + lightboxImages.length) % lightboxImages.length;
+    renderLightbox();
+  }
+
+  lightboxCloseEl.addEventListener('click', closeLightbox);
+  lightboxPrevEl.addEventListener('click', function () { stepLightbox(-1); });
+  lightboxNextEl.addEventListener('click', function () { stepLightbox(1); });
+  lightboxDlEl.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    var url = lightboxDlEl.getAttribute('data-att-url') || '';
+    var name = lightboxDlEl.getAttribute('data-att-name') || '';
+    if (!url) return;
+    sdk.platform.files.download({ url: url, name: name });
+  });
+  lightboxEl.addEventListener('click', function (ev) {
+    if (ev.target === lightboxEl) closeLightbox();
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (!lightboxEl.classList.contains('is-open')) return;
+    if (ev.key === 'Escape') { ev.preventDefault(); closeLightbox(); }
+    else if (ev.key === 'ArrowLeft')  { ev.preventDefault(); stepLightbox(-1); }
+    else if (ev.key === 'ArrowRight') { ev.preventDefault(); stepLightbox(1); }
+  });
+
+  // Delegated handler — image grid items open the lightbox.
+  function attachImageClickHandler(rootEl) {
+    if (!rootEl) return;
+    rootEl.addEventListener('click', function (ev) {
+      var img = ev.target && ev.target.closest && ev.target.closest('.att-img');
+      if (!img) return;
+      var grid = img.parentElement;
+      var idx = parseInt(img.getAttribute('data-att-index') || '0', 10);
+      openLightboxFromGrid(grid, idx);
+    });
+    rootEl.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      var img = ev.target && ev.target.closest && ev.target.closest('.att-img');
+      if (!img) return;
+      ev.preventDefault();
+      var grid = img.parentElement;
+      var idx = parseInt(img.getAttribute('data-att-index') || '0', 10);
+      openLightboxFromGrid(grid, idx);
+    });
+  }
+
+  // Delegated handler — every attachment card surface routes its clicks
+  // through the shell. We do this rather than letting plugin-iframe anchors
+  // handle preview/download themselves because:
+  //   - Cross-origin `<a download>` is silently ignored by Chromium, so the
+  //     filename has to come from `Content-Disposition`.
+  //   - On Linux Electron, the `setWindowOpenHandler` → `webContents
+  //     .downloadURL` popup-intercept path drops the download entirely; the
+  //     desktop bridge exposes a direct main-process download instead.
+  //   - The fullscreen preview overlay must live outside the plugin sandbox
+  //     so PDFium can render (sandboxed nested iframes inherit an opaque
+  //     origin and the renderer refuses to paint there).
+  //
+  // The same handler covers the entire card body (data-att-action on the
+  // outer `.att-card`) and the icon-only download / preview buttons.
+  function attachPreviewClickHandler(rootEl) {
+    if (!rootEl) return;
+    rootEl.addEventListener('click', function (ev) {
+      var target = ev.target;
+      if (!target || !target.closest) return;
+      // Specific action buttons (download / preview icons / audio controls)
+      // take precedence over the card-wide body click so e.g. the eye on a
+      // PDF card opens the preview overlay rather than re-firing whatever
+      // the card's body action is. closest() walks up the DOM so a click on
+      // the inner SVG still resolves to the surrounding button.
+      var actionEl = target.closest('[data-att-action]');
+      if (!actionEl) return;
+      var action = actionEl.getAttribute('data-att-action') || '';
+
+      // Audio actions are local to the custom player and don't carry a URL —
+      // we route them before the url-required preview/download check. Seek
+      // and volume sliders aren't here because they need drag (pointer
+      // capture); those are wired directly on the elements in wireAudioPlayer.
+      if (action === 'audio-toggle') {
+        ev.preventDefault();
+        var togglePlayer = actionEl.closest('.att-audio');
+        var toggleAudio = togglePlayer && togglePlayer.querySelector('audio');
+        if (toggleAudio) {
+          if (toggleAudio.paused) toggleAudio.play().catch(function () {});
+          else toggleAudio.pause();
+        }
+        return;
+      }
+      if (action === 'audio-mute-toggle') {
+        ev.preventDefault();
+        var mutePlayer = actionEl.closest('.att-audio');
+        var muteAudio = mutePlayer && mutePlayer.querySelector('audio');
+        if (muteAudio) {
+          muteAudio.muted = !muteAudio.muted;
+          sharedAudioMuted = muteAudio.muted;
+          // If unmuting from zero, bump to a reasonable level so the user
+          // actually hears something instead of silently un-toggling.
+          if (!muteAudio.muted && (muteAudio.volume === 0 || sharedAudioVolume === 0)) {
+            muteAudio.volume = 0.5;
+            sharedAudioVolume = 0.5;
+          }
+          syncSharedAudioState(muteAudio);
+          refreshAudioPlayerUI(mutePlayer);
+        }
+        return;
+      }
+
+      var url = actionEl.getAttribute('data-att-url') || '';
+      var name = actionEl.getAttribute('data-att-name') || '';
+      if (!url) return;
+      ev.preventDefault();
+      if (action === 'preview') {
+        sdk.platform.files.preview({ url: url, name: name });
+      } else if (action === 'download') {
+        sdk.platform.files.download({ url: url, name: name });
+      }
+    });
+  }
+
+  // Shared volume + mute across every audio player on the page. Set the
+  // volume on one and the others follow — discord-style "channel volume."
+  // Lives in module scope so newly-rendered players pick up the current
+  // value at wire time.
+  var sharedAudioVolume = 1;
+  var sharedAudioMuted = false;
+
+  // Wire per-element audio listeners (timeupdate, loadedmetadata, play/pause)
+  // and pointer-based drag for the seek + volume sliders. Idempotent — uses
+  // a wired flag so re-running on the same subtree is harmless.
+  function initAudioPlayers(rootEl) {
+    if (!rootEl) return;
+    var players = rootEl.querySelectorAll('.att-audio[data-audio-wired="0"]');
+    for (var i = 0; i < players.length; i++) wireAudioPlayer(players[i]);
+  }
+
+  function fmtAudioTime(s) {
+    if (!isFinite(s) || s < 0) return '--:--';
+    var m = Math.floor(s / 60);
+    var sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+
+  function refreshAudioPlayerUI(player) {
+    if (!player) return;
+    var audio = player.querySelector('audio');
+    var fill = player.querySelector('.att-audio-track-fill');
+    var thumb = player.querySelector('.att-audio-track-thumb');
+    var timeEl = player.querySelector('.att-audio-time');
+    var track = player.querySelector('.att-audio-track');
+    var volFill = player.querySelector('.att-audio-volume-fill');
+    var volThumb = player.querySelector('.att-audio-volume-thumb');
+    var volTrack = player.querySelector('.att-audio-volume-track');
+    if (!audio || !fill || !timeEl || !track || !volFill || !volTrack) return;
+    var dur = isFinite(audio.duration) ? audio.duration : 0;
+    var cur = audio.currentTime || 0;
+    var seekPct = dur > 0 ? Math.min(100, (cur / dur) * 100) : 0;
+    fill.style.width = seekPct + '%';
+    if (thumb) thumb.style.left = seekPct + '%';
+    timeEl.textContent = fmtAudioTime(cur) + ' / ' + fmtAudioTime(dur);
+    track.setAttribute('aria-valuenow', String(Math.round(seekPct)));
+    var volPct = audio.muted ? 0 : audio.volume * 100;
+    volFill.style.width = volPct + '%';
+    if (volThumb) volThumb.style.left = volPct + '%';
+    volTrack.setAttribute('aria-valuenow', String(Math.round(volPct)));
+    if (audio.muted) player.classList.add('is-muted');
+    else player.classList.remove('is-muted');
+  }
+
+  // Push the current sharedAudioVolume / sharedAudioMuted onto every audio
+  // element on the page (except `except` — which usually already has the
+  // value set as the source of the change) and refresh each player's UI.
+  function syncSharedAudioState(except) {
+    var all = document.querySelectorAll('.att-audio audio');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i] !== except) {
+        all[i].volume = sharedAudioVolume;
+        all[i].muted = sharedAudioMuted;
+      }
+      var p = all[i].closest('.att-audio');
+      if (p) refreshAudioPlayerUI(p);
+    }
+  }
+
+  // Generic pointerdown-to-drag binding. `onValue(pct)` fires on initial
+  // press and every move, with `pct` clamped to [0, 1]. Pointer capture
+  // means moves outside the element still drive the handler — drag feels
+  // continuous even when the cursor leaves the bar.
+  function bindSliderDrag(el, onValue, onStart, onEnd) {
+    el.addEventListener('pointerdown', function (ev) {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      ev.preventDefault();
+      try { el.setPointerCapture(ev.pointerId); } catch (_) {}
+      if (onStart) onStart();
+      fire(ev);
+      function fire(e) {
+        var rect = el.getBoundingClientRect();
+        var pct = rect.width > 0
+          ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+          : 0;
+        onValue(pct);
+      }
+      function move(e) { fire(e); }
+      function up() {
+        try { el.releasePointerCapture(ev.pointerId); } catch (_) {}
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+        if (onEnd) onEnd();
+      }
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
+  }
+
+  function wireAudioPlayer(player) {
+    player.setAttribute('data-audio-wired', '1');
+    var audio = player.querySelector('audio');
+    var playBtn = player.querySelector('.att-audio-play');
+    var track = player.querySelector('.att-audio-track');
+    var volTrack = player.querySelector('.att-audio-volume-track');
+    if (!audio || !playBtn || !track || !volTrack) return;
+
+    audio.volume = sharedAudioVolume;
+    audio.muted = sharedAudioMuted;
+
+    audio.addEventListener('loadedmetadata', function () { refreshAudioPlayerUI(player); });
+    audio.addEventListener('timeupdate', function () { refreshAudioPlayerUI(player); });
+    audio.addEventListener('volumechange', function () { refreshAudioPlayerUI(player); });
+    audio.addEventListener('play', function () {
+      player.classList.add('is-playing');
+      playBtn.setAttribute('aria-label', 'Pause audio');
+      // Only one audio plays at a time — pause every other player on the page.
+      var all = document.querySelectorAll('.att-audio audio');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i] !== audio && !all[i].paused) all[i].pause();
+      }
+    });
+    audio.addEventListener('pause', function () {
+      player.classList.remove('is-playing');
+      playBtn.setAttribute('aria-label', 'Play audio');
+    });
+    audio.addEventListener('ended', function () {
+      player.classList.remove('is-playing');
+      playBtn.setAttribute('aria-label', 'Play audio');
+    });
+
+    bindSliderDrag(track,
+      function (pct) {
+        if (!isFinite(audio.duration) || audio.duration <= 0) return;
+        audio.currentTime = pct * audio.duration;
+        refreshAudioPlayerUI(player);
+      },
+      function () { player.classList.add('is-seeking'); },
+      function () { player.classList.remove('is-seeking'); }
+    );
+
+    bindSliderDrag(volTrack,
+      function (pct) {
+        audio.muted = false;
+        audio.volume = pct;
+        sharedAudioVolume = pct;
+        sharedAudioMuted = false;
+        syncSharedAudioState(audio);
+      },
+      function () { player.classList.add('is-volume-dragging'); },
+      function () { player.classList.remove('is-volume-dragging'); }
+    );
+
+    refreshAudioPlayerUI(player);
+  }
+
+  // ── Token parsing ──────────────────────────────────────────────────────────
+  function parseToken(token) {
+    try {
+      var parts = token.split('.');
+      var payload = JSON.parse(atob(parts[1]));
+      myUserId = payload.sub || payload.user_id || null;
+    } catch (_) {
+      myUserId = null;
+    }
+  }
+
+  // ── Input state ────────────────────────────────────────────────────────────
+  function enableInput() {
+    sendBtn.disabled = false;
+    if (currentChannelName) {
+      inputEl.placeholder = 'Message #' + currentChannelName;
+    }
+  }
+
+  // ── Navigate to channel ────────────────────────────────────────────────────
+  function navigateTo(channelId) {
+    request('getChannels', {}).then(function (channels) {
+      var ch = null;
+      for (var i = 0; i < channels.length; i++) {
+        if (channels[i].id === channelId) { ch = channels[i]; break; }
+      }
+      selectChannel(channelId, ch ? ch.name : channelId, ch ? ch.topic : '');
+    }).catch(function () {
+      selectChannel(channelId, channelId, '');
+    });
+  }
+
+  function selectChannel(id, name, topic) {
+    var prevChannelId  = currentChannelId;
+    currentChannelId   = id;
+    currentChannelName = name;
+
+    inputEl.placeholder = 'Message #' + name;
+
+    // Viewer presence: leave the previous channel's viewer scope and join the
+    // new one. Without joining, broadcasted typing indicators for this channel
+    // fan out to an empty audience and never reach us.
+    if (prevChannelId && prevChannelId !== id) {
+      request('setViewingChannel', { channel_id: prevChannelId, viewing: false }).catch(function () {});
+    }
+    request('setViewingChannel', { channel_id: id, viewing: true }).catch(function () {});
+
+    // Clear and load messages
+    msgList.innerHTML = '';
+    typingBar.innerHTML = ''; // drop any stale "X is typing…" from the previous channel
+    setStatus('Loading…');
+    loadMessages();
+  }
+
+  // ── Messages ───────────────────────────────────────────────────────────────
+  var lastDate = null;
+  var lastAuthor = null;
+  var lastAuthorName = '';
+  var lastTs = 0;
+  var GROUP_GAP = 5 * 60 * 1000; // 5 min
+
+  function loadMessages() {
+    if (!currentChannelId) return;
+    // Guard against stale responses if the user switches channels mid-load.
+    // Without this the previous channel's messages can flash into the new
+    // channel and our group-state (lastAuthor / lastDate) gets corrupted.
+    var loadingForChannelId = currentChannelId;
+    request('getMessages', { channel_id: loadingForChannelId, limit: 50 }).then(function (msgs) {
+      if (loadingForChannelId !== currentChannelId) return;
+      setStatus('');
+      msgList.innerHTML = '';
+      lastDate = null; lastAuthor = null; lastAuthorName = ''; lastTs = 0;
+
+      // getMessages returns newest-first — reverse to render oldest-first
+      var ordered = msgs.slice().reverse();
+      for (var i = 0; i < ordered.length; i++) {
+        appendMessage(ordered[i], false);
+      }
+
+      // Show empty state if nothing
+      if (ordered.length === 0) {
+        var em = document.createElement('div');
+        em.id = 'empty-state';
+        em.innerHTML =
+          '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.25"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>' +
+          '<p>No messages yet.<br>Be the first to say something!</p>';
+        msgList.appendChild(em);
+      }
+
+      scrollToBottom(true);
+    }).catch(function (err) {
+      if (loadingForChannelId !== currentChannelId) return;
+      setStatus('Failed to load messages: ' + (err && err.message ? err.message : 'unknown error'));
+    });
+  }
+
+  function appendMessage(msg, live) {
+    var msgDate = fmtDate(msg.created_at);
+    var isSameAuthor = (msg.author_id === lastAuthor) && (msg.author_name === lastAuthorName);
+    var isClose     = (msg.created_at - lastTs) < GROUP_GAP;
+    var isCont      = isSameAuthor && isClose && (msgDate === lastDate);
+
+    if (msgDate !== lastDate) {
+      var div = document.createElement('div');
+      div.className = 'day-divider';
+      div.textContent = msgDate;
+      msgList.appendChild(div);
+      lastDate = msgDate;
+    }
+
+    var el = document.createElement('div');
+    el.setAttribute('data-msg-id', msg.id);
+
+    var canEdit   = myUserId && msg.author_id === myUserId;
+    var canDelete = myUserId && (msg.author_id === myUserId);
+
+    var actionsHtml =
+      '<div class="msg-actions" role="toolbar" aria-label="Message actions">' +
+        '<button class="mabtn" type="button" title="React" aria-label="React" disabled>' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>' +
+        '</button>' +
+        '<button class="mabtn reply-btn" type="button" title="Reply in thread" aria-label="Reply in thread">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>' +
+        '</button>' +
+        (canEdit
+          ? '<button class="mabtn edit-btn" type="button" title="Edit message" aria-label="Edit message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'
+          : '') +
+        (canDelete
+          ? '<button class="mabtn del delete-btn" type="button" title="Delete message" aria-label="Delete message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>'
+          : '') +
+        '<button class="mabtn more-btn" type="button" title="More actions" aria-label="More actions" aria-haspopup="menu">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>' +
+        '</button>' +
+      '</div>';
+
+    var editHtml =
+      '<div class="edit-wrap">' +
+        '<textarea class="edit-textarea" rows="1"></textarea>' +
+        '<div class="edit-hints"><span>escape to <b>cancel</b> · enter to <b>save</b></span></div>' +
+      '</div>';
+
+    var editedTag = msg.edited_at
+      ? '<span class="msg-edited-tag">(edited)</span>'
+      : '';
+
+    var pillHtml = replyPillHtml(msg);
+    var attHtml = renderAttachmentsHtml(msg.attachments);
+
+    if (isCont) {
+      el.className = 'msg-cont';
+      el.setAttribute('data-time', fmtTime(msg.created_at));
+      el.innerHTML =
+        actionsHtml +
+        '<div class="msg-text">' + esc(msg.content) + editedTag + '</div>' +
+        attHtml +
+        editHtml +
+        pillHtml;
+    } else {
+      el.className = 'msg';
+      var displayName = msg.author_name || shortName(msg.author_id);
+      var avatarMarkup = renderAuthorAvatar(msg.author_id, displayName, msg.author_avatar, 36);
+      el.innerHTML =
+        avatarMarkup +
+        '<div class="msg-body">' +
+          '<div class="msg-meta">' +
+            '<span class="msg-author">' + esc(displayName) + '</span>' +
+            '<span class="msg-ts">' + fmtTime(msg.created_at) + '</span>' +
+          '</div>' +
+          actionsHtml +
+          '<div class="msg-text">' + esc(msg.content) + editedTag + '</div>' +
+          attHtml +
+          editHtml +
+          pillHtml +
+        '</div>';
+    }
+
+    wireMessageEl(el, msg);
+    rememberPayload(el, msg);
+    initAudioPlayers(el);
+    msgList.appendChild(el);
+
+    if (!msg.parent_message_id) cacheRoot(msg);
+
+    lastAuthor     = msg.author_id;
+    lastAuthorName = msg.author_name || '';
+    lastTs     = msg.created_at;
+
+    if (live) scrollToBottom(false);
+  }
+
+  function wireMessageEl(el, msg) {
+    // Edit
+    var editBtn = el.querySelector('.edit-btn');
+    if (editBtn) {
+      editBtn.addEventListener('click', function () { startEdit(el, msg); });
+    }
+
+    // Delete
+    var delBtn = el.querySelector('.delete-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', function () { deleteMsg(el, msg.id); });
+    }
+
+    // Reply → open thread panel for this root
+    var replyBtn = el.querySelector('.reply-btn');
+    if (replyBtn) {
+      replyBtn.addEventListener('click', function () { openThread(msg); });
+    }
+
+    // Reply pill → also opens the thread
+    var pill = el.querySelector('.reply-pill');
+    if (pill) {
+      pill.addEventListener('click', function () { openThread(msg); });
+    }
+
+    // "…" overflow → open the same context menu as right-click / long-press.
+    // Anchor to the button's bounding rect so it lands predictably in the
+    // hover-bar's neighborhood instead of jumping to the pointer position.
+    var moreBtn = el.querySelector('.more-btn');
+    if (moreBtn) {
+      moreBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var rect = moreBtn.getBoundingClientRect();
+        openContextMenu(msg, el, rect.right, rect.bottom + 4, moreBtn);
+      });
+    }
+  }
+
+  // ── Context menu (right-click + long-press + "…" overflow) ───────────────
+  // One shared menu, rebuilt per-open from the target message's permissions.
+  // Source of truth for the message identity is the cached lookup keyed by
+  // ctxMessageRef — never trust DOM-reflected attributes for id/permissions
+  // because nodes can be replaced between open and item click.
+  var ctxMessageRef    = null;       // the msg object the menu was opened for
+  var ctxAnchorEl      = null;       // the row element (.msg / .msg-cont)
+  var ctxFocusReturnEl = null;       // element to restore focus to on close
+  var ctxIsCoarse      = false;      // last-open: was a touch/long-press?
+
+  function isCoarsePointer() {
+    return window.matchMedia && window.matchMedia('(hover: none)').matches;
+  }
+
+  // Lucide-style icons reused inside menu rows. Inline so the menu doesn't
+  // depend on an external sprite — the iframe is already on a tight cache
+  // window and an extra fetch isn't worth it for ~5 icons.
+  var ICONS = {
+    reply:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>',
+    edit:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+    copy:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    hash:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>',
+    trash:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
+  };
+
+  function buildCtxItems(msg) {
+    var canEdit   = !!(myUserId && msg.author_id === myUserId);
+    var canDelete = canEdit;
+    var isTombstone = msg.content === '[deleted]';
+    var items = [];
+
+    if (!isTombstone) {
+      items.push({ id: 'reply', label: 'Reply in thread', icon: ICONS.reply });
+      if (canEdit) items.push({ id: 'edit', label: 'Edit message', icon: ICONS.edit });
+      items.push({ id: 'copy', label: 'Copy text', icon: ICONS.copy });
+    }
+    items.push({ id: 'copyId', label: 'Copy message ID', icon: ICONS.hash });
+    if (canDelete && !isTombstone) {
+      items.push({ divider: true });
+      items.push({ id: 'delete', label: 'Delete message', icon: ICONS.trash, danger: true });
+    }
+    return items;
+  }
+
+  function renderCtxItems(items) {
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.divider) { html += '<div class="ctx-divider" role="separator"></div>'; continue; }
+      var cls = 'ctx-item' + (it.danger ? ' danger' : '');
+      html += '<button type="button" class="' + cls + '" role="menuitem" data-ctx-id="' + esc(it.id) + '">' +
+              '<span class="ctx-icon" aria-hidden="true">' + it.icon + '</span>' +
+              '<span>' + esc(it.label) + '</span>' +
+              '</button>';
+    }
+    return html;
+  }
+
+  // Place menu near (x, y) but clamp inside the viewport. Skipped on coarse
+  // pointers — there the CSS @media block pins the menu to the bottom edge.
+  function placeCtxMenu(x, y) {
+    if (ctxIsCoarse) return;
+    // Reset any previous bottom-anchored positioning before measuring.
+    ctxMenuEl.style.left = '0px';
+    ctxMenuEl.style.top  = '0px';
+    var rect = ctxMenuEl.getBoundingClientRect();
+    var w = rect.width, h = rect.height;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var px = Math.max(8, Math.min(x, vw - w - 8));
+    var py = Math.max(8, Math.min(y, vh - h - 8));
+    ctxMenuEl.style.left = px + 'px';
+    ctxMenuEl.style.top  = py + 'px';
+  }
+
+  function openContextMenu(msg, anchorEl, x, y, focusReturn) {
+    ctxMessageRef    = msg;
+    ctxAnchorEl      = anchorEl;
+    ctxFocusReturnEl = focusReturn || (anchorEl && anchorEl.querySelector ? anchorEl.querySelector('.more-btn') : null);
+    ctxIsCoarse      = isCoarsePointer();
+
+    var items = buildCtxItems(msg);
+    if (items.length === 0) return;
+
+    ctxMenuEl.innerHTML = renderCtxItems(items);
+    ctxMenuEl.setAttribute('aria-hidden', 'false');
+    ctxBackdropEl.setAttribute('aria-hidden', 'false');
+
+    // Open backdrop first on coarse pointers so the sheet animates in over
+    // the dimmed background; on desktop we skip the dim entirely.
+    if (ctxIsCoarse) {
+      ctxBackdropEl.setAttribute('data-open', 'true');
+    }
+    ctxMenuEl.setAttribute('data-open', 'true');
+
+    if (!ctxIsCoarse) {
+      // Place after data-open flips so the menu has its real layout box.
+      // Wait one rAF for the transition's starting transform to commit before
+      // measuring, otherwise getBoundingClientRect returns the pre-open box
+      // (translateY(-4px) scale(0.98)) and clamping math is off by a few px.
+      requestAnimationFrame(function () { placeCtxMenu(x, y); });
+    }
+
+    // Move keyboard focus into the menu so Tab / arrow keys work.
+    var first = ctxMenuEl.querySelector('.ctx-item');
+    if (first) {
+      try { first.focus({ preventScroll: true }); } catch (_) { first.focus(); }
+    }
+  }
+
+  function closeContextMenu() {
+    if (ctxMenuEl.getAttribute('data-open') !== 'true') return;
+    ctxMenuEl.setAttribute('data-open', 'false');
+    ctxBackdropEl.setAttribute('data-open', 'false');
+    ctxMenuEl.setAttribute('aria-hidden', 'true');
+    ctxBackdropEl.setAttribute('aria-hidden', 'true');
+    var ret = ctxFocusReturnEl;
+    ctxMessageRef = null;
+    ctxAnchorEl = null;
+    ctxFocusReturnEl = null;
+    if (ret && typeof ret.focus === 'function') {
+      try { ret.focus({ preventScroll: true }); } catch (_) { try { ret.focus(); } catch (__) {} }
+    }
+  }
+
+  function handleCtxAction(actionId) {
+    var msg = ctxMessageRef;
+    if (!msg) { closeContextMenu(); return; }
+    // Resolve the live row (may have been re-rendered between open + click).
+    var row = ctxAnchorEl;
+    if (!row || !row.isConnected) {
+      row = document.querySelector('[data-msg-id="' + msg.id + '"]') ||
+            (threadMsgsEl ? threadMsgsEl.querySelector('[data-reply-id="' + msg.id + '"]') : null);
+    }
+    closeContextMenu();
+    switch (actionId) {
+      case 'reply':  openThread(msg); break;
+      case 'edit':   if (row) startEdit(row, msg); break;
+      case 'copy':   copyToClipboard(msg.content || ''); break;
+      case 'copyId': copyToClipboard(msg.id || ''); break;
+      case 'delete': if (row) deleteMsg(row, msg.id); break;
+    }
+  }
+
+  // Clipboard with a degraded fallback. The async API is preferred; in
+  // sandboxed iframes without `clipboard-write` permission it rejects, and
+  // execCommand('copy') against a hidden textarea still works as long as the
+  // call originates from a trusted user-gesture handler (a menu click does).
+  function copyToClipboard(text) {
+    var s = String(text == null ? '' : text);
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = s;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        ta.style.pointerEvents = 'none';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand && document.execCommand('copy');
+        ta.remove();
+        if (!ok) setStatus('Copy not supported in this view.');
+      } catch (_) {
+        setStatus('Copy not supported in this view.');
+      }
+    }
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(s).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  // Menu interaction: clicks (delegated), Escape, outside-click, scroll.
+  ctxMenuEl.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('.ctx-item');
+    if (!btn) return;
+    handleCtxAction(btn.getAttribute('data-ctx-id'));
+  });
+
+  ctxMenuEl.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeContextMenu(); return; }
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp' && ev.key !== 'Home' && ev.key !== 'End') return;
+    ev.preventDefault();
+    var items = Array.prototype.slice.call(ctxMenuEl.querySelectorAll('.ctx-item'));
+    if (items.length === 0) return;
+    var idx = items.indexOf(document.activeElement);
+    if (ev.key === 'Home') idx = 0;
+    else if (ev.key === 'End') idx = items.length - 1;
+    else if (ev.key === 'ArrowDown') idx = (idx < 0 ? 0 : (idx + 1) % items.length);
+    else if (ev.key === 'ArrowUp')   idx = (idx <= 0 ? items.length - 1 : idx - 1);
+    items[idx].focus();
+  });
+
+  ctxBackdropEl.addEventListener('click', closeContextMenu);
+  // Outside-click for the desktop case (no backdrop covering the page).
+  document.addEventListener('mousedown', function (ev) {
+    if (ctxMenuEl.getAttribute('data-open') !== 'true') return;
+    if (ctxMenuEl.contains(ev.target)) return;
+    closeContextMenu();
+  });
+  // Any scroll while open: dismiss to avoid the menu floating away from its
+  // anchor (cheaper than tracking the anchor on every scroll tick).
+  window.addEventListener('scroll', function () { closeContextMenu(); }, true);
+  window.addEventListener('resize', function () { closeContextMenu(); });
+
+  // Long-press detection for coarse pointers. We attach at the message-list
+  // level (event delegation) so adding/removing rows doesn't require
+  // attach/detach bookkeeping. 480ms feels long enough that scroll + tap
+  // gestures don't fire it, short enough that it's not perceptibly sluggish.
+  function attachLongPress(rootEl) {
+    if (!rootEl) return;
+    var pressTimer = null;
+    var startX = 0, startY = 0;
+    var pressedRow = null;
+    var pressedMsg = null;
+    var fired = false;
+
+    function clearTimer() {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    }
+    function reset() {
+      clearTimer();
+      pressedRow = null;
+      pressedMsg = null;
+      fired = false;
+    }
+
+    rootEl.addEventListener('pointerdown', function (ev) {
+      // Only touch / pen — mouse uses contextmenu (handled separately).
+      if (ev.pointerType !== 'touch' && ev.pointerType !== 'pen') return;
+      // Don't trigger on interactive children (avatar buttons, pills, action
+      // bar). Long-pressing the row body itself is the discoverable gesture.
+      if (ev.target.closest('button, a, textarea, input, .reply-pill, .msg-author-avatar')) return;
+      var row = ev.target.closest('[data-msg-id], [data-reply-id]');
+      if (!row) return;
+      var msg = resolveMsgFromRow(row);
+      if (!msg) return;
+      pressedRow = row;
+      pressedMsg = msg;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      fired = false;
+      pressTimer = setTimeout(function () {
+        fired = true;
+        if (navigator.vibrate) { try { navigator.vibrate(8); } catch (_) {} }
+        openContextMenu(pressedMsg, pressedRow, startX, startY, null);
+      }, 480);
+    });
+
+    rootEl.addEventListener('pointermove', function (ev) {
+      if (!pressTimer) return;
+      var dx = ev.clientX - startX, dy = ev.clientY - startY;
+      if (dx * dx + dy * dy > 100) clearTimer(); // >10px movement cancels
+    });
+
+    rootEl.addEventListener('pointerup',     reset);
+    rootEl.addEventListener('pointercancel', reset);
+    rootEl.addEventListener('pointerleave',  reset);
+
+    // If the long-press fired, swallow the synthetic click that follows so
+    // we don't end up activating the avatar button or text selection.
+    rootEl.addEventListener('click', function (ev) {
+      if (fired) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        fired = false;
+      }
+    }, true);
+  }
+
+  // Right-click → same context menu. Attached at the same delegation roots
+  // as long-press; `contextmenu` event is suppressed inside interactive
+  // children where the browser/native menu is more useful (text selection
+  // copy, link inspect).
+  function attachRightClick(rootEl) {
+    if (!rootEl) return;
+    rootEl.addEventListener('contextmenu', function (ev) {
+      if (isCoarsePointer()) return; // touch path uses long-press
+      // Allow native menu over the input field (text-edit affordances) and
+      // over avatar buttons (where the platform might offer "save image").
+      if (ev.target.closest('button, a, textarea, input, img')) return;
+      var row = ev.target.closest('[data-msg-id], [data-reply-id]');
+      if (!row) return;
+      var msg = resolveMsgFromRow(row);
+      if (!msg) return;
+      ev.preventDefault();
+      openContextMenu(msg, row, ev.clientX, ev.clientY, null);
+    });
+  }
+
+  // Reverse-lookup: given a row DOM node, find the corresponding message
+  // object. We keep a per-id WeakMap of payloads attached at append time so
+  // the menu can act on the live snapshot rather than parsing innerHTML.
+  var msgPayloadById = new Map();
+  function rememberPayload(row, msg) {
+    if (!row || !msg) return;
+    var key = row.getAttribute('data-msg-id') || row.getAttribute('data-reply-id');
+    if (key) msgPayloadById.set(key, msg);
+  }
+  function resolveMsgFromRow(row) {
+    var key = row.getAttribute('data-msg-id') || row.getAttribute('data-reply-id');
+    return key ? (msgPayloadById.get(key) || null) : null;
+  }
+
+  // ── Thread reply pill ──────────────────────────────────────────────────────
+  // State lives in the classname (has-unread) rather than a separate child
+  // badge. The whole pill turns accent-colored when there are unread replies;
+  // this is both more legible at a glance and more honest about the
+  // invariant: the pill represents a thread, not two stacked indicators.
+  function replyPillHtml(msg) {
+    var count = msg.reply_count || 0;
+    if (count <= 0) return '';
+    var unread = unreadDelta(msg);
+    var label = count === 1 ? '1 reply' : count + ' replies';
+    var when = msg.last_reply_at ? fmtAgo(msg.last_reply_at) : '';
+    var cls = unread > 0 ? 'reply-pill has-unread' : 'reply-pill';
+    // message-circle: universal threading/chat icon, matches the reply
+    // icon used in the message action bar.
+    var icon =
+      '<span class="reply-icon" aria-hidden="true">' +
+        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>' +
+        '</svg>' +
+      '</span>';
+    return (
+      '<button class="' + cls + '" type="button">' +
+        icon +
+        '<span class="reply-count">' + esc(label) + '</span>' +
+        (when ? '<span class="reply-when">· ' + esc(when) + '</span>' : '') +
+      '</button>'
+    );
+  }
+
+  function fmtAgo(ts) {
+    var diff = Date.now() - ts;
+    if (diff < 60_000) return 'just now';
+    if (diff < 3_600_000) return Math.floor(diff / 60_000) + 'm ago';
+    if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + 'h ago';
+    return fmtDate(ts);
+  }
+
+  function refreshPillFor(msg) {
+    var row = document.querySelector('[data-msg-id="' + msg.id + '"]');
+    if (!row) return;
+    var existing = row.querySelector('.reply-pill');
+    var html = replyPillHtml(msg);
+    if (!existing) {
+      if (!html) return;
+      // Attach into msg-body (or msg-cont root) after the text/edit area
+      var body = row.querySelector('.msg-body') || row;
+      body.insertAdjacentHTML('beforeend', html);
+      var pill = body.querySelector('.reply-pill');
+      if (pill) pill.addEventListener('click', function () { openThread(msg); });
+    } else if (!html) {
+      existing.remove();
+    } else {
+      existing.outerHTML = html;
+      var newPill = row.querySelector('.reply-pill');
+      if (newPill) newPill.addEventListener('click', function () { openThread(msg); });
+    }
+  }
+
+  // ── localStorage unread tracking ───────────────────────────────────────────
+  function lastViewedKey(messageId) { return 'uncorded.threadRead.' + messageId; }
+  function markThreadViewed(messageId, ts) {
+    try { localStorage.setItem(lastViewedKey(messageId), String(ts)); } catch (_) {}
+  }
+  function lastViewed(messageId) {
+    try { return parseInt(localStorage.getItem(lastViewedKey(messageId)) || '0', 10) || 0; } catch (_) { return 0; }
+  }
+  function unreadDelta(rootMsg) {
+    if (!rootMsg.last_reply_at || !rootMsg.reply_count) return 0;
+    var seen = lastViewed(rootMsg.id);
+    return rootMsg.last_reply_at > seen ? rootMsg.reply_count : 0;
+  }
+
+  // Cache root messages by id so pill updates survive after getMessages
+  var rootMsgCache = new Map();
+  function cacheRoot(msg) { rootMsgCache.set(msg.id, msg); }
+  function updateRootCounters(parentId, lastReplyAt) {
+    var m = rootMsgCache.get(parentId);
+    if (!m) return null;
+    m.reply_count = (m.reply_count || 0) + 1;
+    m.last_reply_at = lastReplyAt;
+    return m;
+  }
+
+  // ── Inline edit ────────────────────────────────────────────────────────────
+  function startEdit(el, msg) {
+    el.classList.add('is-editing');
+    var ta = el.querySelector('.edit-textarea');
+    ta.value = msg.content;
+    autoResize(ta);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    function save() {
+      var newContent = ta.value.trim();
+      if (!newContent || newContent === msg.content) { cancelEdit(); return; }
+      request('editMessage', { message_id: msg.id, content: newContent }).then(function (updated) {
+        msg.content = updated.content;
+        msg.edited_at = updated.edited_at;
+        var textEl = el.querySelector('.msg-text');
+        if (textEl) {
+          textEl.innerHTML = esc(updated.content) + '<span class="msg-edited-tag">(edited)</span>';
+        }
+        cancelEdit();
+      }).catch(function (err) {
+        setStatus('Edit failed: ' + err.message);
+        cancelEdit();
+      });
+    }
+
+    function cancelEdit() {
+      el.classList.remove('is-editing');
+      ta.removeEventListener('keydown', onKey);
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
+      autoResize(ta);
+    }
+
+    ta.addEventListener('keydown', onKey);
+  }
+
+  // ── Delete ─────────────────────────────────────────────────────────────────
+  function deleteMsg(el, msgId) {
+    request('deleteMessage', { message_id: msgId }).then(function () {
+      applyTombstone(msgId);
+    }).catch(function (err) {
+      setStatus('Delete failed: ' + err.message);
+    });
+  }
+
+  // ============================================================================
+  // Thread Panel
+  // ============================================================================
+
+  function openThread(rootMsg) {
+    // Leave any in-progress typing scope before switching composers
+    stopTypingIfActive();
+
+    currentThreadId      = rootMsg.id;
+    currentThreadRootMsg = Object.assign({}, rootMsg);
+    threadReplies        = [];
+    pendingThreadReplyIds.clear();
+
+    renderThreadRoot();
+    threadMsgsEl.innerHTML = '';
+    threadTypingEl.innerHTML = '';
+    threadPanel.classList.add('open');
+    threadPanel.setAttribute('aria-hidden', 'false');
+    threadSendBtn.disabled = false;
+
+    // Update URL for deep-linking (best-effort; may fail in sandboxed iframes)
+    try {
+      var url = new URL(window.location.href);
+      url.searchParams.set('thread', rootMsg.id);
+      history.replaceState(null, '', url.toString());
+    } catch (_) {}
+
+    // Tell the backend we're viewing — this triggers viewers.updated fan-out.
+    request('setViewingThread', { message_id: rootMsg.id, viewing: true }).catch(function () {});
+
+    // Load replies
+    loadThreadReplies(rootMsg.id);
+
+    // Mark as viewed (wipe unread badge on this thread's pill)
+    markThreadViewed(rootMsg.id, Date.now());
+    refreshPillFor(rootMsg);
+
+    setTimeout(function () { threadInputEl.focus(); }, 50);
+  }
+
+  function closeThread() {
+    if (!currentThreadId) return;
+    var leavingId = currentThreadId;
+    currentThreadId      = null;
+    currentThreadRootMsg = null;
+    threadReplies        = [];
+    threadPanel.classList.remove('open');
+    threadPanel.setAttribute('aria-hidden', 'true');
+    stopTypingIfActive();
+
+    try {
+      var url = new URL(window.location.href);
+      url.searchParams.delete('thread');
+      history.replaceState(null, '', url.toString());
+    } catch (_) {}
+
+    request('setViewingThread', { message_id: leavingId, viewing: false }).catch(function () {});
+  }
+
+  function renderThreadRoot() {
+    if (!currentThreadRootMsg) {
+      threadRootEl.innerHTML = '';
+      threadRootEl.removeAttribute('data-msg-id');
+      return;
+    }
+    var m = currentThreadRootMsg;
+    var displayName = m.author_name || shortName(m.author_id);
+    var editedTag = m.edited_at ? '<span class="msg-edited-tag">(edited)</span>' : '';
+    var isTombstone = m.content === '[deleted]';
+    var textClass = isTombstone ? 'msg-text is-deleted' : 'msg-text';
+    var textContent = isTombstone ? 'This message was deleted.' : esc(m.content) + editedTag;
+    var avatarMarkup = renderAuthorAvatar(m.author_id, displayName, m.author_avatar, 28);
+    var attHtml = isTombstone ? '' : renderAttachmentsHtml(m.attachments);
+    threadRootEl.setAttribute('data-msg-id', m.id);
+    threadRootEl.innerHTML =
+      avatarMarkup +
+      '<div class="msg-body">' +
+        '<div class="msg-meta">' +
+          '<span class="msg-author">' + esc(displayName) + '</span>' +
+          '<span class="msg-ts">' + fmtTime(m.created_at) + '</span>' +
+        '</div>' +
+        '<div class="' + textClass + '">' + textContent + '</div>' +
+        attHtml +
+      '</div>';
+    rememberPayload(threadRootEl, m);
+    initAudioPlayers(threadRootEl);
+    threadSubEl.textContent = 'from #' + (currentChannelName || '');
+  }
+
+  function loadThreadReplies(messageId) {
+    request('getThreadReplies', { message_id: messageId, limit: 100 }).then(function (replies) {
+      if (currentThreadId !== messageId) return; // panel moved on
+      threadReplies = replies;
+      threadMsgsEl.innerHTML = '';
+      for (var i = 0; i < replies.length; i++) {
+        renderThreadReplyRow(replies[i]);
+      }
+      threadMsgsEl.scrollTop = threadMsgsEl.scrollHeight;
+    }).catch(function (err) {
+      threadMsgsEl.innerHTML = '<div style="padding:16px;color:var(--danger)">Failed to load: ' + esc(err.message) + '</div>';
+    });
+  }
+
+  function renderThreadReplyRow(reply) {
+    var displayName = reply.author_name || shortName(reply.author_id);
+    var el = document.createElement('div');
+    el.className = 'msg';
+    el.setAttribute('data-reply-id', reply.id);
+    if (pendingThreadReplyIds.has(reply.id)) el.classList.add('is-pending');
+    var editedTag = reply.edited_at ? '<span class="msg-edited-tag">(edited)</span>' : '';
+    var isTombstone = reply.content === '[deleted]';
+    var textClass = isTombstone ? 'msg-text is-deleted' : 'msg-text';
+    var textContent = isTombstone ? 'This message was deleted.' : esc(reply.content) + editedTag;
+    var avatarMarkup = renderAuthorAvatar(reply.author_id, displayName, reply.author_avatar, 36);
+    var attHtml = isTombstone ? '' : renderAttachmentsHtml(reply.attachments);
+    el.innerHTML =
+      avatarMarkup +
+      '<div class="msg-body">' +
+        '<div class="msg-meta">' +
+          '<span class="msg-author">' + esc(displayName) + '</span>' +
+          '<span class="msg-ts">' + fmtTime(reply.created_at) + '</span>' +
+        '</div>' +
+        '<div class="' + textClass + '">' + textContent + '</div>' +
+        attHtml +
+      '</div>';
+    rememberPayload(el, reply);
+    initAudioPlayers(el);
+    threadMsgsEl.appendChild(el);
+    threadMsgsEl.scrollTop = threadMsgsEl.scrollHeight;
+  }
+
+  function appendThreadReply(reply) {
+    // Dedupe if we already rendered (e.g. optimistic reply matched by content)
+    if (threadMsgsEl.querySelector('[data-reply-id="' + reply.id + '"]')) return;
+    // If this is our own message that we already rendered optimistically with
+    // a tmp id, reconcile by replacing the pending row.
+    if (reply.author_id === myUserId) {
+      var pendingNode = threadMsgsEl.querySelector('.is-pending[data-pending-content="' + encodeURIComponent(reply.content) + '"]');
+      if (pendingNode) {
+        pendingNode.remove();
+      }
+    }
+    threadReplies.push(reply);
+    renderThreadReplyRow(reply);
+    markThreadViewed(reply.parent_message_id, Date.now());
+  }
+
+  function sendThreadReply() {
+    if (!currentThreadId) return;
+    var content = threadInputEl.value.trim();
+    var hasTray = attachState.thread.length > 0;
+    if (!content && !hasTray) return;
+    var channelId = currentChannelId;
+    var parentId = currentThreadId;
+    waitForUploads('thread').then(function () {
+      if (hasErrors('thread')) {
+        setStatus('Some uploads failed. Remove or retry the failed attachments before sending.');
+        return;
+      }
+      var atts = collectAttachments('thread');
+      if (!content && atts.length === 0) return;
+      threadInputEl.value = '';
+      autoResize(threadInputEl);
+      clearTray('thread');
+      submitThreadReply(content, channelId, parentId, atts);
+    });
+  }
+
+  // Factored from sendThreadReply so failed sends can retry without
+  // re-reading the input (which the user may have moved on from). Snapshots
+  // channelId + parentId at call time so a retry from a stale row still
+  // posts to the original thread, not whichever thread is currently open.
+  // Attachments are snapshotted too — retries replay the same server-issued
+  // filenames (orphan GC will not touch attachments still referenced by an
+  // in-flight retry because the server only sweeps disk minus DB refs).
+  function submitThreadReply(content, channelId, parentId, attachments) {
+    stopTypingIfActive();
+    var atts = attachments || [];
+
+    var tmpId = 'tmp_' + Math.random().toString(36).slice(2);
+    var optimistic = {
+      id: tmpId,
+      channel_id: channelId,
+      author_id: myUserId || '?',
+      author_name: 'You',
+      content: content,
+      created_at: Date.now(),
+      edited_at: null,
+      parent_message_id: parentId,
+    };
+    pendingThreadReplyIds.add(tmpId);
+    var pendingEl = document.createElement('div');
+    pendingEl.className = 'msg is-pending';
+    pendingEl.setAttribute('data-reply-id', tmpId);
+    pendingEl.setAttribute('data-pending-content', encodeURIComponent(content));
+    pendingEl.innerHTML =
+      renderAuthorAvatar(optimistic.author_id, optimistic.author_name, null, 36) +
+      '<div class="msg-body">' +
+        '<div class="msg-meta">' +
+          '<span class="msg-author">' + esc(optimistic.author_name) + '</span>' +
+          '<span class="msg-ts">' + fmtTime(optimistic.created_at) + '</span>' +
+        '</div>' +
+        '<div class="msg-text">' + esc(content) + '</div>' +
+      '</div>';
+    // Only append into the panel if it's still showing the same thread.
+    // Otherwise the optimistic row would land in the wrong (or no) panel.
+    if (currentThreadId === parentId) {
+      threadMsgsEl.appendChild(pendingEl);
+      threadMsgsEl.scrollTop = threadMsgsEl.scrollHeight;
+    }
+
+    var payload = {
+      channel_id: channelId,
+      content: content,
+      parent_message_id: parentId,
+    };
+    if (atts.length > 0) payload.attachments = atts;
+    request('sendMessage', payload).then(function () {
+      pendingThreadReplyIds.delete(tmpId);
+      // The message.created event will arrive and dedupe via matching content.
+      // If it doesn't arrive (e.g. race), remove pending on a short delay.
+      setTimeout(function () {
+        var still = threadMsgsEl.querySelector('[data-reply-id="' + tmpId + '"]');
+        if (still) still.classList.remove('is-pending');
+      }, 100);
+    }).catch(function (err) {
+      pendingThreadReplyIds.delete(tmpId);
+      var el = threadMsgsEl.querySelector('[data-reply-id="' + tmpId + '"]');
+      if (!el) return;
+      el.classList.remove('is-pending');
+      el.classList.add('is-failed');
+      var tx = el.querySelector('.msg-text');
+      if (tx) {
+        var errMsg = (err && err.message) ? err.message : 'unknown error';
+        // Replace text + append a retry pill. textContent first to scrub any
+        // prior content, then DOM-build the retry button (no innerHTML +
+        // string interpolation around err.message).
+        tx.textContent = 'Failed to send: ' + errMsg + ' ';
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'msg-retry';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          // Drop the failed row and resubmit with the original content,
+          // parent, and attachments. submitThreadReply will create a new
+          // optimistic row.
+          el.remove();
+          submitThreadReply(content, channelId, parentId, atts);
+        });
+        tx.appendChild(retry);
+      }
+    });
+  }
+
+  // ── Typing ping (shared by channel composer + thread composer) ────────────
+  // `isThread` must reflect WHICH composer triggered this, not just whether a
+  // thread panel is open. Without it, typing in the channel composer while a
+  // thread panel is visible would incorrectly fire on the thread scope.
+  function typingScopeKey(isThread) {
+    return (currentChannelId || '') + '|' + (isThread ? (currentThreadId || '') : '');
+  }
+
+  function beginTyping(isThread) {
+    if (!currentChannelId) return;
+    if (isThread && !currentThreadId) return;
+    var key = typingScopeKey(isThread);
+    // If we're already pinging a different scope, leave it first so indicators
+    // don't stick on the wrong channel/thread.
+    if (activeTypingScopeKey && activeTypingScopeKey !== key) stopTypingIfActive();
+    activeTypingScopeKey = key;
+    var params = { channel_id: currentChannelId, typing: true };
+    if (isThread) params.thread_id = currentThreadId;
+    request('setTyping', params).catch(function () {});
+
+    if (typingPingTimer) clearInterval(typingPingTimer);
+    typingPingTimer = setInterval(function () {
+      if (activeTypingScopeKey !== key) return;
+      request('setTyping', params).catch(function () {});
+    }, 2_000);
+
+    if (typingStopTimer) clearTimeout(typingStopTimer);
+    typingStopTimer = setTimeout(function () { stopTypingIfActive(); }, 3_000);
+  }
+
+  function stopTypingIfActive() {
+    if (!activeTypingScopeKey) {
+      if (typingPingTimer) { clearInterval(typingPingTimer); typingPingTimer = null; }
+      if (typingStopTimer) { clearTimeout(typingStopTimer); typingStopTimer = null; }
+      return;
+    }
+    var parts = activeTypingScopeKey.split('|');
+    var channelId = parts[0], threadId = parts[1];
+    var params = { channel_id: channelId, typing: false };
+    if (threadId) params.thread_id = threadId;
+    request('setTyping', params).catch(function () {});
+    activeTypingScopeKey = null;
+    if (typingPingTimer) { clearInterval(typingPingTimer); typingPingTimer = null; }
+    if (typingStopTimer) { clearTimeout(typingStopTimer); typingStopTimer = null; }
+  }
+
+  function renderTyping(payload) {
+    var users = (payload && payload.users) || [];
+    // Filter out self — users don't need to see "you are typing"
+    users = users.filter(function (u) { return u.user_id !== myUserId; });
+
+    var scope = payload && payload.scope;
+    if (typeof scope !== 'string') return;
+    // Determine target container
+    if (scope.indexOf('text-channels.thread.') === 0) {
+      // Thread typing — only show if the panel is open for this thread
+      var threadId = scope.split('.')[2];
+      if (currentThreadId !== threadId) return;
+      threadTypingEl.innerHTML = renderTypingLine(users);
+    } else if (scope.indexOf('text-channels.channel.') === 0) {
+      var channelId = scope.split('.')[2];
+      if (currentChannelId !== channelId) return;
+      typingBar.innerHTML = renderTypingLine(users);
+    }
+  }
+
+  function renderTypingLine(users) {
+    if (users.length === 0) return '';
+    var names = users.map(function (u) { return u.display_name || shortName(u.user_id); });
+    var label;
+    if (names.length === 1) label = names[0] + ' is typing';
+    else if (names.length === 2) label = names[0] + ' and ' + names[1] + ' are typing';
+    else label = names.length + ' people are typing';
+    return '<span class="typing-line">' +
+      '<span class="typing-dots"><span></span><span></span><span></span></span>' +
+      '<span>' + esc(label) + '…</span>' +
+    '</span>';
+  }
+
+  function updateViewersCount(payload) {
+    var scope = payload && payload.scope;
+    if (typeof scope !== 'string') return;
+    if (scope.indexOf('text-channels.thread.') !== 0) return;
+    var threadId = scope.split('.')[2];
+    if (currentThreadId !== threadId) return;
+    threadViewerCount = payload.count || 0;
+    threadViewerCountEl.textContent = String(threadViewerCount);
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────────
+  function handleEvent(topic, payload) {
+    if (!payload) return;
+
+    if (topic === 'text-channels.message.created') {
+      if (payload.channel_id !== currentChannelId) return;
+      if (payload.parent_message_id) {
+        // Reply: refresh parent pill on the channel view and, if the panel is
+        // open for that parent, append into the thread panel.
+        var cachedParent = updateRootCounters(payload.parent_message_id, payload.created_at);
+        if (cachedParent) refreshPillFor(cachedParent);
+        if (currentThreadId === payload.parent_message_id) {
+          appendThreadReply(payload);
+        }
+      } else {
+        appendMessage(payload, true);
+      }
+    }
+
+    if (topic === 'text-channels.message.edited') {
+      var row = document.querySelector('[data-msg-id="' + payload.id + '"]');
+      if (row) {
+        var t = row.querySelector('.msg-text');
+        if (t) t.innerHTML = esc(payload.content) + '<span class="msg-edited-tag">(edited)</span>';
+      }
+      // Also update in the thread panel
+      var tr = threadMsgsEl.querySelector('[data-reply-id="' + payload.id + '"] .msg-text');
+      if (tr) tr.innerHTML = esc(payload.content) + '<span class="msg-edited-tag">(edited)</span>';
+    }
+
+    if (topic === 'text-channels.message.deleted') {
+      applyTombstone(payload.id);
+      // If the deleted row is a root that's currently open as a thread, show
+      // a tombstone placeholder in the panel header too.
+      if (payload.id === currentThreadId && currentThreadRootMsg) {
+        currentThreadRootMsg.content = '[deleted]';
+        currentThreadRootMsg.author_id = '[deleted]';
+        renderThreadRoot();
+      }
+    }
+
+    if (topic === 'text-channels.typing.updated') {
+      renderTyping(payload);
+    }
+
+    if (topic === 'text-channels.viewers.updated') {
+      updateViewersCount(payload);
+    }
+
+    if (topic === 'text-channels.channel.updated') {
+      // The shell repaints the panel header from its own SidebarItem snapshot,
+      // but in-iframe state (input placeholder, thread subhead) is owned here.
+      // Refresh those when the channel we're currently viewing is renamed.
+      if (payload.id === currentChannelId && typeof payload.name === 'string') {
+        currentChannelName = payload.name;
+        inputEl.placeholder = 'Message #' + payload.name;
+        if (currentThreadId) {
+          threadSubEl.textContent = 'from #' + payload.name;
+        }
+      }
+    }
+  }
+
+  function applyTombstone(id) {
+    var targets = document.querySelectorAll('[data-msg-id="' + id + '"], [data-reply-id="' + id + '"]');
+    for (var i = 0; i < targets.length; i++) {
+      var node = targets[i];
+      var text = node.querySelector('.msg-text');
+      if (text) {
+        text.className = 'msg-text is-deleted';
+        text.textContent = 'This message was deleted.';
+      }
+      var actions = node.querySelector('.msg-actions');
+      if (actions) actions.remove();
+    }
+  }
+
+  // ── Send ───────────────────────────────────────────────────────────────────
+  function sendMessage() {
+    if (!currentChannelId) return;
+    var content = inputEl.value.trim();
+    var hasTray = attachState.main.length > 0;
+    if (!content && !hasTray) return;
+    var channelId = currentChannelId;
+    // Wait for any in-flight uploads to settle before sending. We intentionally
+    // do not lock the textarea — users can keep typing while uploads complete,
+    // and the snapshot here freezes the content for this submission.
+    waitForUploads('main').then(function () {
+      if (hasErrors('main')) {
+        setStatus('Some uploads failed. Remove or retry the failed attachments before sending.');
+        return;
+      }
+      var atts = collectAttachments('main');
+      if (!content && atts.length === 0) return;
+      inputEl.value = '';
+      autoResize(inputEl);
+      setStatus('');
+
+      var payload = { channel_id: channelId, content: content };
+      if (atts.length > 0) payload.attachments = atts;
+      request('sendMessage', payload).then(function () {
+        clearTray('main');
+      }).catch(function (err) {
+        setStatus('Send failed: ' + err.message);
+        if (content) inputEl.value = content; // restore text; tray stays so user can retry
+      });
+    });
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+
+  inputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+    autoResize(inputEl);
+  });
+
+  inputEl.addEventListener('input', function () {
+    autoResize(inputEl);
+    if (inputEl.value.trim().length > 0) beginTyping(false);
+  });
+  inputEl.addEventListener('blur', function () { stopTypingIfActive(); });
+
+  // ── Thread composer wiring ─────────────────────────────────────────────────
+  threadSendBtn.addEventListener('click', sendThreadReply);
+  threadCloseBtn.addEventListener('click', closeThread);
+  threadInputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendThreadReply();
+    }
+    autoResize(threadInputEl);
+  });
+  threadInputEl.addEventListener('input', function () {
+    autoResize(threadInputEl);
+    if (threadInputEl.value.trim().length > 0) beginTyping(true);
+  });
+  threadInputEl.addEventListener('blur', function () { stopTypingIfActive(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && currentThreadId) closeThread();
+  });
+
+  // ── Auto-resize textarea ───────────────────────────────────────────────────
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  setStatus('Connecting…');
+
+  try {
+    sdk = await createPluginFrontend();
+  } catch (err) {
+    setStatus('Failed to connect: ' + (err && err.message ? err.message : String(err)));
+    return;
+  }
+
+  parseToken(sdk.token);
+  setStatus('');
+  enableInput();
+
+  // ── Avatar click → user card ─────────────────────────────────────────────
+  // Single delegated listener per surface. The `.msg-author-avatar` button
+  // bubbles its click here; we read the data-uc-* attrs and ask the shell
+  // to surface its user card. Stop propagation so the message row's own
+  // hover/edit affordances don't react to the avatar click.
+  function attachAvatarClickHandler(rootEl) {
+    if (!rootEl) return;
+    rootEl.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest && ev.target.closest('.msg-author-avatar');
+      if (!btn) return;
+      ev.stopPropagation();
+      var userId = btn.getAttribute('data-uc-user-id');
+      if (!userId) return;
+      var displayName = btn.getAttribute('data-uc-display-name') || userId;
+      var avatarUrl = btn.getAttribute('data-uc-avatar-url') || null;
+      sdk.platform.userCard.show({
+        userId: userId,
+        displayName: displayName,
+        avatarUrl: avatarUrl,
+      });
+    });
+  }
+  attachAvatarClickHandler(msgList);
+  attachAvatarClickHandler(threadMsgsEl);
+  attachAvatarClickHandler(threadRootEl);
+
+  // Context menu surfaces: right-click on desktop, long-press on touch/pen.
+  // Both delegate at the list root so newly-appended rows are picked up
+  // automatically. The thread root (single message, sticky header) gets its
+  // own attach so the deep-link / opened-thread root is also actionable.
+  attachLongPress(msgList);
+  attachLongPress(threadMsgsEl);
+  attachLongPress(threadRootEl);
+  attachRightClick(msgList);
+  attachRightClick(threadMsgsEl);
+  attachRightClick(threadRootEl);
+
+  // Attachments — pickers, drag-drop, paste, and image-grid → lightbox.
+  wireAttachButton(attachBtn, attachInput, 'main');
+  wireAttachButton(threadAttachBtn, threadAttachInput, 'thread');
+  wireDragDrop();
+  wirePaste();
+  attachImageClickHandler(msgList);
+  attachImageClickHandler(threadMsgsEl);
+  attachImageClickHandler(threadRootEl);
+  attachPreviewClickHandler(msgList);
+  attachPreviewClickHandler(threadMsgsEl);
+  attachPreviewClickHandler(threadRootEl);
+
+  sdk.onNavigate(function (nav) {
+    selectChannel(nav.itemId, nav.itemLabel, '');
+  });
+
+  sdk.subscribe('text-channels.message.created', function (p) { handleEvent('text-channels.message.created', p); });
+  sdk.subscribe('text-channels.message.edited',  function (p) { handleEvent('text-channels.message.edited',  p); });
+  sdk.subscribe('text-channels.message.deleted', function (p) { handleEvent('text-channels.message.deleted', p); });
+  sdk.subscribe('text-channels.typing.updated',  function (p) { handleEvent('text-channels.typing.updated',  p); });
+  sdk.subscribe('text-channels.viewers.updated', function (p) { handleEvent('text-channels.viewers.updated', p); });
+  sdk.subscribe('text-channels.channel.updated', function (p) { handleEvent('text-channels.channel.updated', p); });
+  sdk.subscribe('text-channels.attachments.settings_updated', function (p) { applyAttSettings(p); });
+
+  // Pull current attachment limits so the tray's pre-flight cap matches what
+  // the backend will accept. Without this the frontend rejects on the old
+  // hardcoded default before the file ever reaches the runtime.
+  sdk.request('getAttachmentSettings', {}).then(applyAttSettings).catch(function () {});
+
+  // Deep-link: ?thread=<message_id> opens the panel on load.
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var deepThreadId = params.get('thread');
+    if (deepThreadId) {
+      // We need the root message to open the panel. Wait for loadMessages to
+      // run via selectChannel; hook into rootMsgCache once populated. Poll
+      // briefly, then fall back to a direct lookup.
+      var start = Date.now();
+      var poll = setInterval(function () {
+        var cached = rootMsgCache.get(deepThreadId);
+        if (cached) {
+          clearInterval(poll);
+          openThread(cached);
+        } else if (Date.now() - start > 3_000) {
+          clearInterval(poll);
+          setStatus('Thread unavailable or message not found.');
+          try {
+            var url = new URL(window.location.href);
+            url.searchParams.delete('thread');
+            history.replaceState(null, '', url.toString());
+          } catch (_) {}
+        }
+      }, 150);
+    }
+  } catch (_) {}
+
+})();
+</script>
+</body>
+</html>

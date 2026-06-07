@@ -1,0 +1,11 @@
+-- File attachments (spec-26).
+--
+-- Stored as a JSON array of attachment records on each message row:
+--   [{ filename, original_name, mime, size, width?, height?, duration? }]
+--
+-- The `url` field on the wire is *not* stored — it's a signed, short-lived
+-- value the backend mints fresh on every read (bound to the requesting user).
+-- Storing just the on-disk filename + metadata keeps the DB stable across
+-- runtime restarts (which rotate the signing secret) and tunnel hostname
+-- changes (which would otherwise invalidate any stored absolute URL).
+ALTER TABLE messages ADD COLUMN attachments TEXT;

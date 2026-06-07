@@ -1,0 +1,10 @@
+FROM uncorded-runtime:latest
+# Runtime source changes
+COPY runtime/src/main.ts /app/runtime/src/main.ts
+COPY runtime/src/ws/router.ts /app/runtime/src/ws/router.ts
+# Protocol type changes
+COPY packages/protocol/src/index.ts /app/packages/protocol/src/index.ts
+# text-channels plugin
+COPY plugins/text-channels/backend/index.ts /app/core-plugins/text-channels/backend/index.ts
+COPY plugins/text-channels/manifest.json /app/core-plugins/text-channels/manifest.json
+COPY plugins/text-channels/frontend/index.html /app/core-plugins/text-channels/frontend/index.html

@@ -1,0 +1,1827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Channel</title>
+  <style>
+    :root {
+      --bg:        oklch(0.16  0.004 258);
+      --bg-2:      oklch(0.225 0.004 258);
+      --bg-3:      oklch(0.285 0.006 258);
+      --border:    oklch(1 0 0 / 7%);
+      --text:      oklch(0.97 0 0);
+      --text-2:    oklch(0.70 0 0);
+      --text-3:    oklch(0.48 0 0);
+      --accent:    oklch(0.78 0.06 258);
+      --accent-2:  oklch(0.62 0.10 258);
+      --success:   oklch(0.74 0.13 152);
+      --danger:    oklch(0.72 0.13 22);
+      --warn:      oklch(0.80 0.14 75);
+      --radius:    0.625rem;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      padding: 24px;
+      gap: 16px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .header .icon {
+      width: 32px; height: 32px;
+      border-radius: var(--radius);
+      background: var(--bg-2);
+      display: grid; place-items: center;
+      color: var(--text-2);
+      font-size: 16px;
+    }
+    .header .title { font-size: 16px; font-weight: 600; }
+    .header .sub   { font-size: 12px; color: var(--text-3); }
+
+    .empty-state {
+      flex: 1;
+      display: grid; place-items: center;
+      color: var(--text-3);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow: hidden;
+    }
+
+    /* Connect CTA — disconnected state */
+    .cta {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      text-align: center;
+      padding: 24px;
+    }
+    .cta .headline { font-size: 16px; font-weight: 600; }
+    .cta .sub      { font-size: 13px; color: var(--text-3); max-width: 320px; }
+
+    .btn {
+      font-family: inherit;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer;
+      padding: 10px 20px;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      transition: filter 0.1s, background 0.1s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    /* Inline SVG icons inside buttons have no intrinsic size — without an
+       explicit width/height the browser falls back to its CSS replaced-element
+       default (300×150) and the icon explodes. Same goes for the volume slider
+       icon in the expanded row. */
+    .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .btn:disabled { cursor: not-allowed; opacity: 0.5; }
+    .btn-primary  { background: var(--accent); color: var(--bg); }
+    .btn-primary:not(:disabled):hover { filter: brightness(1.1); }
+    .btn-secondary {
+      background: var(--bg-2); color: var(--text);
+      border-color: var(--border);
+    }
+    .btn-secondary:not(:disabled):hover { background: var(--bg-3); }
+    .btn-danger {
+      background: transparent; color: var(--danger);
+      border-color: color-mix(in oklch, var(--danger) 40%, transparent);
+    }
+    .btn-danger:not(:disabled):hover { background: color-mix(in oklch, var(--danger) 12%, transparent); }
+
+    /* Connected state — roster + actions */
+    .session {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--text-2);
+      align-self: flex-start;
+    }
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--text-3);
+    }
+    .status-dot.connected { background: var(--success); }
+    .status-dot.connecting,
+    .status-dot.reconnecting { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+    .status-dot.failed    { background: var(--danger); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.45; }
+    }
+
+    .roster {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .roster-empty {
+      color: var(--text-3); font-size: 12px;
+      padding: 12px 0;
+      text-align: center;
+    }
+
+    .participant {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      background: var(--bg-2);
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      transition: border-color 0.08s, background 0.08s;
+    }
+    .participant.speaking {
+      border-color: color-mix(in oklch, var(--success) 70%, transparent);
+      background: color-mix(in oklch, var(--success) 8%, var(--bg-2));
+    }
+    .participant.is-local { background: color-mix(in oklch, var(--accent) 8%, var(--bg-2)); }
+
+    .participant-avatar {
+      flex-shrink: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      border-radius: 50%;
+      transition: box-shadow 0.08s;
+      line-height: 0;
+    }
+    .participant-avatar:hover {
+      box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 50%, transparent);
+    }
+    .participant-avatar:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    .name { flex: 1; font-size: 13px; }
+    .name-tag {
+      font-size: 10px;
+      color: var(--text-3);
+      margin-left: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .icon-btn {
+      width: 28px; height: 28px;
+      display: grid; place-items: center;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-2);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .icon-btn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+    .icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+    .icon-btn.muted { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 40%, transparent); }
+    .icon-btn.active { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 50%, transparent); }
+    .icon-btn svg { width: 14px; height: 14px; }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+    .actions .btn { flex: 1; }
+
+    .error-banner {
+      padding: 10px 12px;
+      background: color-mix(in oklch, var(--danger) 10%, var(--bg-2));
+      border: 1px solid color-mix(in oklch, var(--danger) 40%, transparent);
+      border-radius: var(--radius);
+      color: var(--danger);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .cap-warning {
+      padding: 12px;
+      background: color-mix(in oklch, var(--warn) 10%, var(--bg-2));
+      border: 1px solid color-mix(in oklch, var(--warn) 40%, transparent);
+      border-radius: var(--radius);
+      color: var(--text-2);
+      font-size: 12px;
+      text-align: center;
+    }
+    .cap-warning .strong { color: var(--warn); font-weight: 600; }
+
+    /* PR-6 — screen share UI. The slot grid sits above the roster; each
+       `<div data-uc-screen-slot>` is reported to the shell which paints a
+       `<video>` element absolutely-positioned over the slot rect. The
+       slot itself is intentionally empty visually (the shell renders the
+       video on top via portal-overlay); we only paint the chrome
+       (per-tile control overlay). The control overlay sits at z-index 42
+       so it can hover above the shell-painted <video> at z-index 41. */
+    .share-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px;
+      background: color-mix(in oklch, var(--danger) 10%, var(--bg-2));
+      border: 1px solid color-mix(in oklch, var(--danger) 60%, transparent);
+      border-radius: var(--radius);
+      font-size: 12px;
+      color: var(--danger);
+    }
+    .share-bar .pulse {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--danger);
+      animation: pulse 1s ease-in-out infinite;
+    }
+    .share-bar .grow { flex: 1; color: var(--text); font-size: 12px; font-weight: 500; }
+    .share-bar select {
+      font-family: inherit; font-size: 11px;
+      background: var(--bg-3); color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 6px;
+    }
+    .share-bar .stop {
+      border: 1px solid color-mix(in oklch, var(--danger) 50%, transparent);
+      background: color-mix(in oklch, var(--danger) 12%, transparent);
+      color: var(--danger);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px; font-weight: 600;
+      cursor: pointer;
+    }
+    .share-bar .stop:hover { background: color-mix(in oklch, var(--danger) 20%, transparent); }
+
+    .slots {
+      display: grid;
+      gap: 10px;
+      padding: 6px 0 2px;
+      flex: 0 1 auto;
+      max-height: min(38vh, 360px);
+      overflow: hidden;
+    }
+    .slots.count-1 { grid-template-columns: 1fr; }
+    .slots.count-2 { grid-template-columns: 1fr 1fr; }
+    .slots.count-3, .slots.count-4 { grid-template-columns: 1fr 1fr; }
+    @media (min-width: 720px) {
+      .slots.count-3, .slots.count-4 { grid-template-columns: 1fr 1fr; }
+    }
+
+    .slot {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      max-height: min(38vh, 360px);
+      min-height: 120px;
+      background:
+        radial-gradient(circle at 50% 42%, rgba(255,255,255,0.08), transparent 34%),
+        linear-gradient(135deg, #05070a, #111722);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid color-mix(in oklch, var(--border) 78%, white 8%);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+    .slot[data-popped="true"] {
+      background:
+        linear-gradient(135deg, color-mix(in oklch, var(--accent) 12%, var(--bg-2)), var(--bg-2));
+      color: var(--text-2);
+      font-size: 12px;
+    }
+    .slot[data-popped="true"] span {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.32);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .slot[data-paused="true"] .slot-paused {
+      display: flex;
+    }
+    .slot-paused {
+      display: none;
+      position: absolute; inset: 0;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      z-index: 43;
+    }
+    .slot-controls {
+      position: absolute;
+      left: 8px; right: 8px; bottom: 8px;
+      display: flex; align-items: center; gap: 6px;
+      min-height: 34px;
+      padding: 6px 7px 6px 9px;
+      background: linear-gradient(180deg, rgba(7,9,13,0.62), rgba(7,9,13,0.84));
+      border: 1px solid rgba(255,255,255,0.10);
+      backdrop-filter: blur(10px);
+      border-radius: 7px;
+      opacity: 0;
+      transition: opacity 0.12s;
+      z-index: 42;
+      pointer-events: auto;
+    }
+    .slot:hover .slot-controls { opacity: 1; }
+    .slot-controls .label {
+      font-size: 11px;
+      color: var(--text);
+      flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .slot-controls .vol {
+      width: 80px;
+    }
+    .slot-controls button {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: var(--text);
+      width: 26px; height: 26px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: grid; place-items: center;
+      flex: 0 0 auto;
+    }
+    .slot-controls button:hover { background: rgba(255,255,255,0.14); }
+    .slot-controls button.danger {
+      border-color: color-mix(in oklch, var(--danger) 50%, transparent);
+      color: var(--danger);
+    }
+    .slot-controls button svg { width: 12px; height: 12px; }
+
+    .screen-panel {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .screen-panel .slot {
+      flex: 1;
+      min-height: 220px;
+      max-height: none;
+      aspect-ratio: auto;
+    }
+
+    .tray {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 2px 0 4px;
+    }
+    .tray-item {
+      flex: 0 0 auto;
+      width: 96px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--text-2);
+    }
+    .tray-item:hover { background: var(--bg-3); color: var(--text); }
+    .tray-item .who { font-weight: 600; color: var(--text); font-size: 11px; }
+    .tray-item .hint { color: var(--text-3); font-size: 10px; }
+
+    .participant.is-sharing {
+      border-color: var(--danger);
+      box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--danger) 60%, transparent);
+    }
+    .share-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 1px 6px;
+      background: color-mix(in oklch, var(--danger) 18%, transparent);
+      color: var(--danger);
+      font-size: 10px; font-weight: 600;
+      border-radius: 999px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      margin-left: 6px;
+    }
+    .share-badge .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
+    }
+
+    .actions .btn-share { flex: 0 0 auto; min-width: 110px; }
+
+    /* ── Hover affordances ──────────────────────────────────────────────────
+     * Make the participant row pop on hover so the long-press / right-click
+     * affordance has a discoverable hover state. Keyboard focus on the avatar
+     * button bubbles up via :focus-within and pins the same hover state so
+     * keyboard users see the same surface highlight.
+     *
+     * Mobile (`hover: none`) is the production-grade path: the row is calm
+     * by default and long-press surfaces the context menu — no permanent
+     * icons cluttering the row. */
+    @media (hover: hover) {
+      .participant:hover { background: var(--bg-3); }
+      .participant:focus-within { background: var(--bg-3); }
+    }
+    .participant.is-active { background: var(--bg-3); }
+    .slot.is-active .slot-controls { opacity: 1; }
+
+    /* ── Coarse-pointer slot controls ───────────────────────────────────────
+     * Hover doesn't fire on touch, so the slot-controls overlay would never
+     * be reachable on mobile. Pin it visible (with a slight alpha bump on the
+     * background so it stays readable over varied screen-share content) and
+     * raise the volume slider's tap target. Discrete actions still funnel
+     * through the long-press context menu. */
+    @media (hover: none) {
+      .slot-controls {
+        opacity: 1;
+        background: rgba(0, 0, 0, 0.65);
+      }
+      .slot-controls .vol { width: 100%; height: 22px; }
+      .slot-controls button { width: 30px; height: 30px; }
+      /* Suppress text selection on long-press surfaces so the OS selection
+       * UI doesn't fight with our context menu. The label inside the slot
+       * overlay re-enables selection so users can copy publisher names. */
+      .participant, .slot { -webkit-user-select: none; user-select: none; }
+      .slot-controls .label, .name { -webkit-user-select: text; user-select: text; }
+    }
+
+    /* ── Context menu (long-press + right-click) ────────────────────────────
+     * Mirrors the text-channels plugin exactly so users get the same gesture
+     * vocabulary across both surfaces. Singleton appended at body level —
+     * survives full re-renders of the roster / slot grid because the menu is
+     * never inside `root.innerHTML`. Long-press cancels on >10px movement so
+     * a finger sliding to scroll never opens it accidentally; right-click
+     * fires the same menu on desktop. Outside-click / Escape / scroll close. */
+    #vc-context-menu {
+      position: fixed;
+      z-index: 100;
+      min-width: 200px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px;
+      box-shadow: 0 10px 32px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.25);
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      opacity: 0;
+      transform: translateY(-4px) scale(0.98);
+      transform-origin: top left;
+      transition: opacity 0.1s ease-out, transform 0.1s ease-out;
+      pointer-events: none;
+    }
+    #vc-context-menu[data-open="true"] {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
+    }
+    .ctx-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 8px 10px;
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      min-height: 36px;
+      transition: background 0.08s, color 0.08s;
+    }
+    .ctx-item:hover:not(:disabled),
+    .ctx-item:focus-visible {
+      background: color-mix(in oklch, var(--text) 8%, var(--bg-3));
+      outline: none;
+    }
+    .ctx-item:disabled { opacity: 0.45; cursor: not-allowed; }
+    .ctx-item.danger { color: var(--danger); }
+    .ctx-item.danger:hover:not(:disabled),
+    .ctx-item.danger:focus-visible {
+      background: color-mix(in oklch, var(--danger) 14%, transparent);
+    }
+    .ctx-item .ctx-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      color: var(--text-2);
+    }
+    .ctx-item.danger .ctx-icon { color: var(--danger); }
+    .ctx-item .ctx-icon svg { width: 14px; height: 14px; }
+    .ctx-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 3px 4px;
+    }
+    .ctx-label {
+      padding: 6px 10px 2px;
+      font-size: 10px;
+      color: var(--text-3);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    /* Mobile: bottom-anchored sheet so users don't have to land a fingertip
+     * on a tiny floating popover. The backdrop catches taps for dismiss. */
+    #vc-context-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 99;
+      opacity: 0;
+      transition: opacity 0.12s;
+      pointer-events: none;
+    }
+    #vc-context-backdrop[data-open="true"] {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    @media (hover: none) {
+      #vc-context-menu {
+        left: 0 !important;
+        right: 0 !important;
+        top: auto !important;
+        bottom: 0;
+        margin: 0 8px 8px;
+        min-width: 0;
+        border-radius: 14px;
+        padding: 6px;
+        transform: translateY(8px);
+      }
+      #vc-context-menu[data-open="true"] { transform: translateY(0); }
+      .ctx-item { padding: 12px 14px; font-size: 15px; min-height: 44px; }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="empty-state" id="empty-state">Connecting…</div>
+</div>
+
+<!-- Shared context menu (long-press + right-click). Singleton lives at body
+     level so it survives root.innerHTML rebuilds during state pushes. -->
+<div id="vc-context-backdrop" aria-hidden="true"></div>
+<div id="vc-context-menu" role="menu" aria-hidden="true" tabindex="-1"></div>
+
+<script src="/sdk/plugin-frontend.js?v=20260429b"></script>
+<script type="module">
+const { createPluginFrontend, avatarHtml } = window.UncodedPlugin;
+
+(async function () {
+  'use strict';
+
+  const root = document.getElementById('app');
+
+  // ---------------------------------------------------------------------------
+  // Local UI state — pure mirrors of the §3 envelopes plus the navigation
+  // selection. The renderer reads from these on every update; we never branch
+  // off a guessed "is connected" — that comes from `voice.status`.
+  // ---------------------------------------------------------------------------
+
+  let nav = null;                  // { itemId, itemLabel } from sdk.onNavigate
+  let voice = {                    // mirror of platform.voice.state
+    status: 'idle',
+    serverId: null,
+    channelId: null,
+    mic: { available: false, muted: false, serverMuted: false },
+    audioPlaybackBlocked: false,
+  };
+  let participants = [];           // mirror of platform.voice.participants
+  let speakingIds = new Set();     // mirror of platform.voice.active-speakers
+  let transientError = null;       // last platform.voice.error (auto-clear ~6s)
+  let transientErrorTimer = null;
+  let sdk = null;
+
+  // PR-6 — screen share local mirrors. `screenShareSubs` holds the LRU
+  // subscription state pushed from the shell; `screenSharePopouts` mirrors
+  // which trackSids are currently popped out (shell renders the popout
+  // window or fullscreen, this state drives the in-frame placeholder).
+  // `screenShareSlotObservers` keeps the per-slot dispose handles so we can
+  // tear them down when the slot leaves the visible set, before the next
+  // render reuses the placeholder div for a different track.
+  let screenShareSubs = [];
+  let screenSharePopouts = [];
+  const screenShareSlotObservers = new Map(); // slotId -> dispose fn
+  const screenShareKnownSubs = new Set();     // visible trackSids at last render
+
+  function isMobile() {
+    return typeof navigator === 'undefined'
+      || !navigator.mediaDevices
+      || typeof navigator.mediaDevices.getDisplayMedia !== 'function';
+  }
+
+  function getLocalParticipant() {
+    for (var i = 0; i < participants.length; i++) {
+      if (participants[i].isLocal) return participants[i];
+    }
+    return null;
+  }
+
+  function getScreenShareState() {
+    var s = voice && voice.screenShare;
+    if (!s) {
+      return {
+        publishStatus: 'idle',
+        quality: 'balanced',
+        audioShared: false,
+        channelMaxPublishers: 10,
+        channelPublisherCount: 0,
+        e2eeBlocked: false,
+      };
+    }
+    return s;
+  }
+
+  // Compute which subscriptions are "live" (subscribed === true) — those
+  // are the ones the slot grid renders. The rest land in the tray and can
+  // be promoted via subscribeScreenShare(). Order: keep server-supplied
+  // order so swap stability is preserved across pushes.
+  function liveSubscriptions() {
+    var out = [];
+    for (var i = 0; i < screenShareSubs.length; i++) {
+      if (screenShareSubs[i].subscribed) out.push(screenShareSubs[i]);
+    }
+    return out;
+  }
+
+  function traySubscriptions() {
+    var out = [];
+    for (var i = 0; i < screenShareSubs.length; i++) {
+      if (!screenShareSubs[i].subscribed) out.push(screenShareSubs[i]);
+    }
+    return out;
+  }
+
+  function popoutMap() {
+    var m = new Map();
+    for (var i = 0; i < screenSharePopouts.length; i++) {
+      m.set(screenSharePopouts[i].trackSid, screenSharePopouts[i].popped);
+    }
+    return m;
+  }
+
+  function findParticipantById(userId) {
+    for (var i = 0; i < participants.length; i++) {
+      if (participants[i].userId === userId) return participants[i];
+    }
+    return null;
+  }
+
+  function localIsSharing() {
+    return getScreenShareState().publishStatus === 'publishing';
+  }
+
+  function screenSharePanelTrackSid() {
+    if (!nav || typeof nav.itemId !== 'string') return null;
+    var prefix = 'screen-share:';
+    if (nav.itemId.slice(0, prefix.length) !== prefix) return null;
+    return nav.itemId.slice(prefix.length) || null;
+  }
+
+  function findScreenShareSubscription(trackSid) {
+    for (var i = 0; i < screenShareSubs.length; i++) {
+      if (screenShareSubs[i].trackSid === trackSid) return screenShareSubs[i];
+    }
+    return null;
+  }
+
+  function setEmpty(text) {
+    root.innerHTML = '<div class="empty-state">' + escapeHtml(text) + '</div>';
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+
+  // Wraps the SDK avatar primitive in a clickable button that opens the shell
+  // user card. The roster surface uses delegated click handling — see the
+  // attachAvatarClickHandler call below — so the participant card behaves the
+  // same as message-author avatars in the text-channels plugin.
+  function renderParticipantAvatar(p, displayLabel) {
+    var avatarUrl = (p && typeof p.avatarUrl === 'string' && p.avatarUrl.length > 0)
+      ? p.avatarUrl
+      : null;
+    var inner = avatarHtml({
+      userId: p.userId,
+      displayName: displayLabel,
+      avatarUrl: avatarUrl,
+      size: 28,
+      shape: 'circle',
+    });
+    return (
+      '<button type="button" class="participant-avatar"' +
+      ' data-uc-user-id="' + escapeHtml(p.userId) + '"' +
+      ' data-uc-display-name="' + escapeHtml(displayLabel) + '"' +
+      (avatarUrl !== null ? ' data-uc-avatar-url="' + escapeHtml(avatarUrl) + '"' : '') +
+      ' aria-label="' + escapeHtml(displayLabel) + '">' +
+      inner +
+      '</button>'
+    );
+  }
+
+  // Lucide-flavoured inline SVGs — match the shell sidebar voice indicator
+  // visual language (mic / mic-off / phone-off / lock / refresh-cw).
+  const ICONS = {
+    mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="6" height="11" x="9" y="2" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>',
+    micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>',
+    phoneOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-3.33-2.67"/><path d="M5 5a2 2 0 0 0-2-2h-1"/><line x1="22" x2="2" y1="2" y2="22"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>',
+    volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+    monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></svg>',
+    minimize: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></svg>',
+    stopShare: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" x2="19.07" y1="4.93" y2="19.07"/></svg>',
+  };
+
+  // ---------------------------------------------------------------------------
+  // Render — single function called on every state change. Vanilla HTML build,
+  // no diffing; the surface is small enough that full re-render per push is
+  // cheap and keeps the data flow obvious.
+  // ---------------------------------------------------------------------------
+
+  function render() {
+    if (!sdk) {
+      setEmpty('Connecting…');
+      return;
+    }
+    if (!nav) {
+      setEmpty('Select a voice channel from the sidebar.');
+      return;
+    }
+
+    const channelId = nav.itemId;
+    const channelName = nav.itemLabel;
+    const panelTrackSid = screenSharePanelTrackSid();
+    if (panelTrackSid) {
+      const body = sdk.platform.voice.granted
+        ? renderScreenSharePanel(panelTrackSid)
+        : renderCapWarning();
+      root.innerHTML = renderHeader(channelName) + '<div class="body">' + body + '</div>';
+      bindHandlers();
+      return;
+    }
+
+    const isConnectedHere = voice.channelId === channelId &&
+      (voice.status === 'connected' || voice.status === 'reconnecting');
+    const isBusyHere = voice.channelId === channelId && voice.status === 'connecting';
+    const isElsewhere = voice.channelId !== null &&
+      voice.channelId !== channelId &&
+      voice.status !== 'idle' && voice.status !== 'disconnected' && voice.status !== 'failed';
+
+    let body;
+    if (!sdk.platform.voice.granted) {
+      body = renderCapWarning();
+    } else if (isConnectedHere || isBusyHere || (voice.channelId === channelId && voice.status === 'reconnecting')) {
+      body = renderSession(channelName);
+    } else if (isElsewhere) {
+      body = renderElsewhere(channelName);
+    } else {
+      body = renderJoinCta(channelName);
+    }
+
+    root.innerHTML = renderHeader(channelName) + '<div class="body">' + body + '</div>';
+    bindHandlers();
+  }
+
+  function renderHeader(channelName) {
+    return (
+      '<div class="header">' +
+        '<div class="icon">' + ICONS.volume + '</div>' +
+        '<div>' +
+          '<div class="title">' + escapeHtml(channelName) + '</div>' +
+          '<div class="sub">Voice channel</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderCapWarning() {
+    return (
+      '<div class="cap-warning">' +
+        '<div class="strong">Voice unavailable</div>' +
+        '<div>This plugin was not granted the <code>voice.media</code> capability by the server.</div>' +
+      '</div>'
+    );
+  }
+
+  function renderJoinCta(channelName) {
+    const errorRow = transientError
+      ? '<div class="error-banner">' + escapeHtml(transientError.message) + '</div>'
+      : '';
+    return errorRow +
+      '<div class="cta">' +
+        '<div class="headline">Join ' + escapeHtml(channelName) + '?</div>' +
+        '<div class="sub">You’ll be able to talk and hear other participants in this voice channel.</div>' +
+        '<button class="btn btn-primary" data-action="connect">' + ICONS.mic + 'Join voice</button>' +
+      '</div>';
+  }
+
+  function renderElsewhere(channelName) {
+    return (
+      '<div class="cta">' +
+        '<div class="headline">You’re already in voice</div>' +
+        '<div class="sub">Leave your current voice channel before joining ' + escapeHtml(channelName) + '.</div>' +
+        '<div style="display:flex; gap:8px;">' +
+          '<button class="btn btn-secondary" data-action="switch">Switch to this channel</button>' +
+          '<button class="btn btn-danger" data-action="leave">' + ICONS.phoneOff + 'Leave</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderScreenSharePanel(trackSid) {
+    var entry = findScreenShareSubscription(trackSid);
+    if (!entry) {
+      return (
+        '<div class="screen-panel">' +
+          '<div class="cta">' +
+            '<div class="headline">Screen share unavailable</div>' +
+            '<div class="sub">The stream may have ended or is no longer subscribed.</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+    var p = findParticipantById(entry.userId);
+    var label = p && p.name && p.name.length > 0 ? p.name : 'Screen share';
+    var slotId = 'panel-slot-' + entry.trackSid;
+    return (
+      '<div class="screen-panel">' +
+        '<div class="slot screen-panel-slot" ' +
+          'data-uc-screen-slot="' + escapeHtml(slotId) + '" ' +
+          'data-uc-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+          'data-popped="false" ' +
+          'data-paused="' + (entry.streamPaused ? 'true' : 'false') + '">' +
+          '<div class="slot-paused" data-action="resume-stream" data-track-sid="' + escapeHtml(entry.trackSid) + '">' +
+            'Stream paused â€” click to resume' +
+          '</div>' +
+          renderSlotControls(entry, label, false, true) +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderSession(channelName) {
+    const statusText = voice.status === 'reconnecting' ? 'Reconnecting'
+      : voice.status === 'connecting' ? 'Connecting'
+      : voice.status === 'failed' ? 'Failed'
+      : 'Connected';
+    const statusClass = voice.status;
+
+    let errorRow = '';
+    if (voice.status === 'failed' && voice.error) {
+      errorRow = '<div class="error-banner">' +
+        escapeHtml(voice.error.message) +
+        '</div>';
+    } else if (transientError) {
+      errorRow = '<div class="error-banner">' + escapeHtml(transientError.message) + '</div>';
+    }
+
+    // Browser autoplay-block CTA is rendered shell-side (see
+    // apps/website/src/components/audio-blocked-banner.tsx). A button rendered
+    // here cannot satisfy iOS Safari's user-activation requirement for
+    // audioContext.resume() — the click event fires in this cross-origin
+    // sandboxed iframe and postMessage does not propagate activation to the
+    // shell. The shell renders its own banner whose click handler runs
+    // synchronously in the shell document, which is the only context the
+    // browser accepts for unblocking playback.
+
+    const muteDisabled = voice.mic.serverMuted || !voice.mic.available || voice.status !== 'connected';
+    const muteIcon = (voice.mic.serverMuted) ? ICONS.lock
+      : (voice.mic.muted || !voice.mic.available) ? ICONS.micOff
+      : ICONS.mic;
+    const muteLabel = voice.mic.serverMuted ? 'Locked by server'
+      : voice.mic.muted ? 'Unmute' : 'Mute';
+    const mutedClass = (voice.mic.muted || voice.mic.serverMuted || !voice.mic.available) ? ' muted' : '';
+
+    return (
+      '<div class="session">' +
+        '<span class="status-pill">' +
+          '<span class="status-dot ' + statusClass + '"></span>' +
+          escapeHtml(statusText) + ' · #' + escapeHtml(channelName) +
+        '</span>' +
+        renderShareBar() +
+        errorRow +
+        renderSlotsGrid() +
+        renderTray() +
+        '<div class="roster">' + renderRoster(false) + '</div>' +
+        '<div class="actions">' +
+          renderShareButton() +
+          '<button class="btn btn-secondary' + mutedClass + '" data-action="toggle-mute"' +
+            (muteDisabled ? ' disabled' : '') +
+            ' aria-label="' + muteLabel + '" title="' + muteLabel + '">' +
+            muteIcon +
+            (voice.mic.muted ? 'Unmute' : voice.mic.serverMuted ? 'Locked' : 'Mute') +
+          '</button>' +
+          '<button class="btn btn-danger" data-action="leave">' + ICONS.phoneOff + 'Leave</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  // PR-6 — persistent "You are sharing" indicator. Privacy-critical: renders
+  // whenever the local publish status is `publishing`, cannot be hidden by
+  // the user without stopping the share. Also surfaces the live quality
+  // dropdown so the publisher can swap presets without leaving the panel.
+  function renderShareBar() {
+    if (!localIsSharing()) return '';
+    const ss = getScreenShareState();
+    const audioBadge = ss.audioShared ? ' · Audio shared' : '';
+    return (
+      '<div class="share-bar" role="status" aria-live="polite">' +
+        '<span class="pulse" aria-hidden="true"></span>' +
+        '<span class="grow">You are sharing your screen' + escapeHtml(audioBadge) + '</span>' +
+        '<select data-action="set-quality" aria-label="Screen share quality">' +
+          '<option value="balanced"' + (ss.quality === 'balanced' ? ' selected' : '') + '>Balanced (1080p30)</option>' +
+          '<option value="smooth"' + (ss.quality === 'smooth' ? ' selected' : '') + '>Smooth (720p60)</option>' +
+          '<option value="sharp"' + (ss.quality === 'sharp' ? ' selected' : '') + '>Sharp (1080p30)</option>' +
+          '<option value="source"' + (ss.quality === 'source' ? ' selected' : '') + '>Source (1080p60)</option>' +
+        '</select>' +
+        '<button class="stop" data-action="stop-share">Stop sharing</button>' +
+      '</div>'
+    );
+  }
+
+  // PR-6 — Share button. Disabled states cover every refusal the shell
+  // could produce, so the click never fires a request that's guaranteed
+  // to fail. The shell remains the source of truth — server-side cap and
+  // permission failures still surface as `screen_share_*` errors.
+  function renderShareButton() {
+    if (!sdk.platform.voice.screenShareGranted) return '';
+    if (isMobile()) return '';
+    const ss = getScreenShareState();
+    if (ss.e2eeBlocked) {
+      // Hide the button on E2EE channels; the cap-warning slot in the
+      // share bar copy does the explaining job.
+      return '';
+    }
+    const sharing = localIsSharing();
+    const starting = ss.publishStatus === 'starting' || ss.publishStatus === 'stopping';
+    const atCap =
+      !sharing &&
+      ss.channelMaxPublishers > 0 &&
+      ss.channelPublisherCount >= ss.channelMaxPublishers;
+    const disabled = starting || atCap || voice.status !== 'connected';
+    const label = sharing
+      ? 'Stop sharing'
+      : starting
+        ? (ss.publishStatus === 'starting' ? 'Starting…' : 'Stopping…')
+        : 'Share screen';
+    const action = sharing ? 'stop-share' : 'start-share';
+    const tooltip = atCap
+      ? 'Channel is at the screen-share limit (' + ss.channelMaxPublishers + ' publishers)'
+      : label;
+    return (
+      '<button class="btn btn-secondary btn-share" data-action="' + action + '"' +
+        (disabled ? ' disabled' : '') +
+        ' title="' + escapeHtml(tooltip) + '">' +
+        ICONS.monitor + escapeHtml(label) +
+      '</button>'
+    );
+  }
+
+  // Slot grid — paint up to 4 placeholder rectangles. The shell observes
+  // the rect via SDK observeScreenSlot and projects the <video> over it
+  // on its z-stack layer above the iframe. Empty when nothing is live.
+  function renderSlotsGrid() {
+    var live = liveSubscriptions();
+    if (live.length === 0) return '';
+    var popped = popoutMap();
+    var n = Math.min(live.length, 4);
+    var html = '<div class="slots count-' + n + '">';
+    for (var i = 0; i < n; i++) {
+      var entry = live[i];
+      var isPopped = popped.get(entry.trackSid) === true;
+      var p = findParticipantById(entry.userId);
+      var label = p && p.name && p.name.length > 0 ? p.name : 'Member';
+      var slotId = 'slot-' + entry.trackSid;
+      html +=
+        '<div class="slot" ' +
+          'data-uc-screen-slot="' + escapeHtml(slotId) + '" ' +
+          'data-uc-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+          'data-popped="' + (isPopped ? 'true' : 'false') + '" ' +
+          'data-paused="' + (entry.streamPaused ? 'true' : 'false') + '">' +
+          (isPopped
+            ? (
+              '<span>Watching expanded</span>' +
+              renderSlotControls(entry, label, isPopped, false)
+            )
+            : (
+              '<div class="slot-paused" data-action="resume-stream" data-track-sid="' + escapeHtml(entry.trackSid) + '">' +
+                'Stream paused — click to resume' +
+              '</div>' +
+              renderSlotControls(entry, label, isPopped, false)
+            )) +
+        '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderSlotControls(entry, label, isPopped, inScreenPanel) {
+    var modGranted = sdk.platform.voice.moderationGranted;
+    var vol = Math.max(0, Math.min(100, Number.isFinite(entry.volumePctClient) ? entry.volumePctClient : 100));
+    return (
+      '<div class="slot-controls">' +
+        '<span class="label">' + escapeHtml(label) + '</span>' +
+        '<input type="range" class="vol" min="0" max="100" value="' + vol + '" ' +
+          'data-action="set-volume" data-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+          'aria-label="Audio volume">' +
+        (inScreenPanel ? '' :
+          '<button data-action="' + (isPopped ? 'dock' : 'popout') + '" ' +
+            'data-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+            'aria-label="' + (isPopped ? 'Dock' : 'Popout') + '" ' +
+            'title="' + (isPopped ? 'Dock' : 'Popout') + '">' +
+            (isPopped ? ICONS.minimize : ICONS.expand) +
+          '</button>') +
+        '<button data-action="unsubscribe" data-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+          'aria-label="Move to tray" title="Move to tray">' +
+          ICONS.stopShare +
+        '</button>' +
+        (modGranted
+          ? '<button class="danger" data-action="admin-stop" ' +
+            'data-track-sid="' + escapeHtml(entry.trackSid) + '" ' +
+            'data-user-id="' + escapeHtml(entry.userId) + '" ' +
+            'aria-label="Stop their share" title="Stop their share">' +
+              ICONS.phoneOff +
+            '</button>'
+          : '') +
+      '</div>'
+    );
+  }
+
+  // Tray — only renders when there are MORE than 4 sharers (≤ 4 fit in
+  // the grid, no point in dead pixels under it). Click swaps a tray
+  // entry into the grid; the shell handles LRU eviction of the oldest
+  // active subscription atomically with audio.
+  function renderTray() {
+    var tray = traySubscriptions();
+    var totalSharers = liveSubscriptions().length + tray.length;
+    if (totalSharers <= 4) return '';
+    if (tray.length === 0) return '';
+    var html = '<div class="tray" role="list">';
+    for (var i = 0; i < tray.length; i++) {
+      var entry = tray[i];
+      var p = findParticipantById(entry.userId);
+      var label = p && p.name && p.name.length > 0 ? p.name : 'Member';
+      html +=
+        '<button class="tray-item" data-action="subscribe" ' +
+          'data-track-sid="' + escapeHtml(entry.trackSid) + '">' +
+          '<div class="who">' + escapeHtml(label) + '</div>' +
+          '<div class="hint">Click to view</div>' +
+        '</button>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // Roster — compact informational list. Per-user volume/mute controls live
+  // in the shell sidebar (see VoiceIndicator + nav-sidebar-sections); the
+  // iframe panel itself is reserved for future screen-share content, so we
+  // intentionally don't render interactive participant controls here.
+  function renderRoster(_unused) {
+    if (participants.length === 0) {
+      return '<div class="roster-empty">No participants yet.</div>';
+    }
+    return participants.map(function (p) {
+      const speaking = speakingIds.has(p.userId) ? ' speaking' : '';
+      const local = p.isLocal ? ' is-local' : '';
+      // PR-6 — privacy-critical persistent indicator. Local user gets the
+      // red border/badge whenever they're publishing; remote users get it
+      // when their snapshot reports a non-empty `screenSharePublications`
+      // (server-supplied, not a client guess).
+      const sharing = isParticipantSharing(p) ? ' is-sharing' : '';
+      const tag = p.isLocal ? '<span class="name-tag">You</span>' : '';
+      const shareTag = isParticipantSharing(p)
+        ? '<span class="share-badge"><span class="dot" aria-hidden="true"></span>Sharing</span>'
+        : '';
+      const muteHint = !p.micPublished ? ICONS.micOff
+        : p.micMuted ? ICONS.micOff
+        : '';
+      const displayLabel = (p.name && p.name.length > 0)
+        ? p.name
+        : 'Member ' + String(p.identity || '').slice(0, 8);
+
+      return (
+        '<div class="participant' + speaking + local + sharing + '"' +
+          ' data-uc-participant-id="' + escapeHtml(p.userId) + '">' +
+          renderParticipantAvatar(p, displayLabel) +
+          '<div class="name">' + escapeHtml(displayLabel) + tag + shareTag + '</div>' +
+          (muteHint ? '<div class="icon-btn muted" aria-hidden="true">' + muteHint + '</div>' : '') +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function isParticipantSharing(p) {
+    if (p.isLocal) return localIsSharing();
+    var pubs = p && p.screenSharePublications;
+    return Array.isArray(pubs) && pubs.length > 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Action wiring — every interactive element calls into the SDK voice API.
+  // No livekit-client, no getUserMedia, no Room references — those are shell
+  // concerns. Every click maps to one §4 request.
+  // ---------------------------------------------------------------------------
+
+  function bindHandlers() {
+    root.querySelectorAll('[data-action]').forEach(function (el) {
+      // Range inputs and select elements drive their actions through
+      // `input`/`change` events; everything else falls back to click.
+      var tag = el.tagName;
+      if (tag === 'INPUT' && el.type === 'range') {
+        el.addEventListener('input', onAction);
+      } else if (tag === 'SELECT') {
+        el.addEventListener('change', onAction);
+      } else {
+        el.addEventListener('click', onAction);
+      }
+    });
+    reconcileScreenSlotObservers();
+  }
+
+  // After every render, walk the live `[data-uc-screen-slot]` elements and
+  // make sure the SDK observer is attached for each visible slot. Slots that
+  // disappeared since the last render get their observers disposed so the
+  // shell drops the overlay; new slots register on their first rAF tick.
+  // Idempotent — re-attaching to the same slotId/trackSid pair is a no-op
+  // because the SDK helper dedupes via the postMessage path.
+  function reconcileScreenSlotObservers() {
+    if (!sdk || !sdk.platform || !sdk.platform.voice) return;
+    var slotEls = root.querySelectorAll('[data-uc-screen-slot]');
+    var nextIds = new Set();
+    for (var i = 0; i < slotEls.length; i++) {
+      var el = slotEls[i];
+      var slotId = el.getAttribute('data-uc-screen-slot');
+      var trackSid = el.getAttribute('data-uc-track-sid');
+      if (!slotId || !trackSid) continue;
+      nextIds.add(slotId);
+      var existing = screenShareSlotObservers.get(slotId);
+      // Re-attach when the underlying DOM element changed (full innerHTML
+      // re-render replaces nodes even when slotId is stable). The old
+      // observer holds a detached element whose getBoundingClientRect is
+      // 0×0 and whose ResizeObserver never fires, so the shell paints a
+      // zero-sized <video>. Compare by identity to detect the swap.
+      if (existing && existing.el === el) continue;
+      if (existing && typeof existing.dispose === 'function') {
+        try { existing.dispose(); } catch (_e) { /* swallow */ }
+      }
+      try {
+        var handle = sdk.platform.voice.observeScreenSlot(el, trackSid, slotId);
+        screenShareSlotObservers.set(slotId, { el: el, dispose: handle });
+      } catch (err) {
+        // SDK older than 1.1 shouldn't reach here (cap-warning gate
+        // handles that), but log defensively.
+        // eslint-disable-next-line no-console
+        console.warn('[voice-channels] observeScreenSlot failed', err);
+      }
+    }
+    // Tear down observers whose slot is no longer rendered.
+    screenShareSlotObservers.forEach(function (entry, slotId) {
+      if (nextIds.has(slotId)) return;
+      try {
+        if (entry && typeof entry.dispose === 'function') entry.dispose();
+      } catch (_e) { /* swallow */ }
+      screenShareSlotObservers.delete(slotId);
+    });
+  }
+
+  // Surgical CSS-class toggle for `.speaking` on existing roster nodes.
+  // ActiveSpeakers fires up to 5×/sec while a participant is talking; doing
+  // a full innerHTML rebuild on each tick wipes the slot placeholders, which
+  // forces the SDK observer to dispose+re-register — that round-trip
+  // unmounts and remounts the shell `<video>` overlay, so any receiver
+  // whose own mic picks up the share's audio (echo loop) saw their watched
+  // tile flicker disconnect/reconnect 5×/sec. Apply class changes in place
+  // instead; the DOM and the screen-slot observers stay put.
+  function applySpeakingStates() {
+    var nodes = root.querySelectorAll('.participant[data-uc-participant-id]');
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      var id = node.getAttribute('data-uc-participant-id');
+      var shouldSpeak = id !== null && speakingIds.has(id);
+      if (node.classList.contains('speaking') !== shouldSpeak) {
+        node.classList.toggle('speaking', shouldSpeak);
+      }
+    }
+  }
+
+  // Single delegated listener on the persistent root — survives full
+  // re-renders so we don't need to re-bind on every state push.
+  root.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('.participant-avatar');
+    if (!btn || !sdk) return;
+    ev.stopPropagation();
+    var userId = btn.getAttribute('data-uc-user-id');
+    if (!userId) return;
+    var displayName = btn.getAttribute('data-uc-display-name') || userId;
+    var avatarUrl = btn.getAttribute('data-uc-avatar-url');
+    sdk.platform.userCard.show({
+      userId: userId,
+      displayName: displayName,
+      ...(avatarUrl ? { avatarUrl: avatarUrl } : {}),
+    });
+  });
+
+  function onAction(ev) {
+    const target = ev.currentTarget;
+    const action = target.getAttribute('data-action');
+    if (!sdk || !nav) return;
+    const trackSid = target.getAttribute('data-track-sid');
+    switch (action) {
+      case 'connect':
+        sdk.platform.voice.connect({ channelId: nav.itemId, channelName: nav.itemLabel });
+        break;
+      case 'switch':
+        // Sequential: shell handles cancel-and-replace via attemptId, so a
+        // second connect supersedes the first. We send disconnect first to be
+        // explicit about user intent (failed-state retry would otherwise also
+        // dispatch into a fresh attempt).
+        sdk.platform.voice.disconnect();
+        sdk.platform.voice.connect({ channelId: nav.itemId, channelName: nav.itemLabel });
+        break;
+      case 'leave':
+        sdk.platform.voice.disconnect();
+        break;
+      case 'toggle-mute':
+        sdk.platform.voice.setMicMuted(!voice.mic.muted);
+        break;
+      // ---------------------------------------------------------------------
+      // PR-6 — screen share. Every action below maps 1:1 to a §4 request.
+      // Audio toggle is collected by the shell-side picker (web: native
+      // browser dialog; Electron: shell modal), so we don't pass it here.
+      // Quality preset: the shell defaults to `balanced`; the dropdown drives
+      // live swaps via `setScreenShareQuality`.
+      // ---------------------------------------------------------------------
+      case 'start-share':
+        // Shell + picker decide audio + sourceId. We just request a default
+        // quality. `audio: undefined` lets the picker default per-platform.
+        sdk.platform.voice.startScreenShare({
+          audio: false,
+          quality: getScreenShareState().quality || 'balanced',
+        });
+        break;
+      case 'stop-share':
+        sdk.platform.voice.stopScreenShare();
+        break;
+      case 'set-quality':
+        sdk.platform.voice.setScreenShareQuality(target.value);
+        break;
+      case 'subscribe':
+        if (trackSid) sdk.platform.voice.subscribeScreenShare(trackSid);
+        break;
+      case 'unsubscribe':
+        if (trackSid) sdk.platform.voice.unsubscribeScreenShare(trackSid);
+        break;
+      case 'popout':
+        if (trackSid && sdk.platform.panels && typeof sdk.platform.panels.open === 'function') {
+          var entry = findScreenShareSubscription(trackSid);
+          var p = entry ? findParticipantById(entry.userId) : null;
+          var label = p && p.name && p.name.length > 0 ? p.name + ' screen share' : 'Screen share';
+          sdk.platform.panels.open({
+            itemId: 'screen-share:' + trackSid,
+            itemLabel: label,
+            itemIcon: 'monitor',
+            placement: 'beside-current',
+            mode: 'reuse-or-create',
+          });
+        }
+        break;
+      case 'dock':
+        if (trackSid) sdk.platform.voice.dockScreenShare(trackSid);
+        break;
+      case 'focus-panel':
+        if (sdk.platform.panels && typeof sdk.platform.panels.focusCurrent === 'function') {
+          sdk.platform.panels.focusCurrent();
+        }
+        break;
+      case 'set-volume':
+        if (trackSid) {
+          var pct = Number(target.value);
+          if (Number.isFinite(pct)) sdk.platform.voice.setScreenShareVolume(trackSid, pct);
+        }
+        break;
+      case 'resume-stream':
+        // Click-to-resume on a dynacast-paused stream is just re-asserting
+        // the subscription. The shell calls setSubscribed(true) again,
+        // which prompts LiveKit to resume layer streaming.
+        if (trackSid) sdk.platform.voice.subscribeScreenShare(trackSid);
+        break;
+      case 'admin-stop': {
+        if (!sdk.platform.voice.moderationGranted) return;
+        var userId = target.getAttribute('data-user-id');
+        var channelId = voice.channelId || (nav && screenSharePanelTrackSid() === null ? nav.itemId : null);
+        if (!userId || !channelId) return;
+        // Lightweight confirm — server enforces the permission too, so this
+        // is just a guard against accidental clicks.
+        var ok = typeof window.confirm === 'function'
+          ? window.confirm('Stop this user’s screen share?')
+          : true;
+        if (!ok) return;
+        sdk.platform.voice.adminStopScreenShare({
+          channelId: channelId,
+          userId: userId,
+          reason: 'admin-stop',
+        });
+        break;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Context menu — long-press (touch / pen) and right-click (desktop). Mirrors
+  // the text-channels plugin so users get the same gesture vocabulary on both
+  // surfaces. Singleton appended at body level; survives full root.innerHTML
+  // rebuilds because the menu is never inside `#app`.
+  //
+  // Reliability: backdrop click + Escape + scroll + resize all close the menu
+  // so it never floats orphaned over a state change.
+  //
+  // Security: every menu item maps to an existing SDK call that the runtime
+  // already capability-checks (moderation, screen-share, voice). The menu is
+  // a UI shortcut, not a privilege boundary.
+  //
+  // Performance: one delegated pointerdown / contextmenu listener per surface
+  // (the app root); no per-row attach/detach as the roster re-renders.
+  // ---------------------------------------------------------------------------
+
+  const ctxMenuEl     = document.getElementById('vc-context-menu');
+  const ctxBackdropEl = document.getElementById('vc-context-backdrop');
+  let ctxAnchorEl     = null;
+  let ctxFocusReturnEl = null;
+  let ctxItemsRef     = [];      // bound action closures for the open menu
+  let ctxIsCoarse     = false;
+
+  // Lucide-flavoured glyphs used inside menu items. Kept inline so the menu
+  // has zero asset dependencies and renders on first paint.
+  const CTX_ICON = {
+    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/></svg>',
+    minimize: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></svg>',
+    eyeOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>',
+    stopCircle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6"/></svg>',
+  };
+
+  function escAttr(s) { return escapeHtml(String(s == null ? '' : s)); }
+
+  function isCoarsePointer() {
+    return typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
+  }
+
+  function renderCtxItems(items) {
+    return items.map(function (it, i) {
+      if (it.divider) return '<div class="ctx-divider" role="separator"></div>';
+      if (it.label && !it.onClick) {
+        return '<div class="ctx-label">' + escapeHtml(it.label) + '</div>';
+      }
+      const cls = 'ctx-item' + (it.danger ? ' danger' : '');
+      const dis = it.disabled ? ' disabled' : '';
+      const icon = it.icon
+        ? '<span class="ctx-icon" aria-hidden="true">' + it.icon + '</span>'
+        : '';
+      return (
+        '<button type="button" class="' + cls + '"' + dis +
+          ' role="menuitem" data-ctx-idx="' + i + '">' +
+          icon +
+          '<span>' + escapeHtml(it.label) + '</span>' +
+        '</button>'
+      );
+    }).join('');
+  }
+
+  function placeCtxMenu(x, y) {
+    // Clamp the menu to the viewport. Measurement happens AFTER data-open
+    // so the menu has its real size; entrance transition's starting transform
+    // is committed by waiting one rAF before this runs.
+    const r = ctxMenuEl.getBoundingClientRect();
+    const w = r.width || 220;
+    const h = r.height || 200;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const nx = Math.max(8, Math.min(x, vw - w - 8));
+    const ny = Math.max(8, Math.min(y, vh - h - 8));
+    ctxMenuEl.style.left = nx + 'px';
+    ctxMenuEl.style.top = ny + 'px';
+  }
+
+  function openContextMenu(items, anchorEl, x, y, focusReturn) {
+    if (!items || items.length === 0) return;
+    ctxAnchorEl = anchorEl || null;
+    ctxFocusReturnEl = focusReturn || null;
+    ctxItemsRef = items.slice();
+    ctxIsCoarse = isCoarsePointer();
+
+    ctxMenuEl.innerHTML = renderCtxItems(items);
+    ctxMenuEl.setAttribute('aria-hidden', 'false');
+    ctxBackdropEl.setAttribute('aria-hidden', 'false');
+    if (anchorEl && anchorEl.classList) anchorEl.classList.add('is-active');
+
+    if (ctxIsCoarse) ctxBackdropEl.setAttribute('data-open', 'true');
+    ctxMenuEl.setAttribute('data-open', 'true');
+
+    if (!ctxIsCoarse) {
+      requestAnimationFrame(function () { placeCtxMenu(x, y); });
+    }
+
+    const first = ctxMenuEl.querySelector('.ctx-item:not(:disabled)');
+    if (first) {
+      try { first.focus({ preventScroll: true }); } catch (_) { first.focus(); }
+    }
+  }
+
+  function closeContextMenu() {
+    if (ctxMenuEl.getAttribute('data-open') !== 'true') return;
+    ctxMenuEl.setAttribute('data-open', 'false');
+    ctxBackdropEl.setAttribute('data-open', 'false');
+    ctxMenuEl.setAttribute('aria-hidden', 'true');
+    ctxBackdropEl.setAttribute('aria-hidden', 'true');
+    if (ctxAnchorEl && ctxAnchorEl.classList) ctxAnchorEl.classList.remove('is-active');
+    const ret = ctxFocusReturnEl;
+    ctxAnchorEl = null;
+    ctxFocusReturnEl = null;
+    ctxItemsRef = [];
+    if (ret && typeof ret.focus === 'function') {
+      try { ret.focus({ preventScroll: true }); } catch (_) { try { ret.focus(); } catch (__) {} }
+    }
+  }
+
+  ctxMenuEl.addEventListener('click', function (ev) {
+    const btn = ev.target && ev.target.closest && ev.target.closest('.ctx-item');
+    if (!btn || btn.disabled) return;
+    const idx = parseInt(btn.getAttribute('data-ctx-idx') || '-1', 10);
+    const item = ctxItemsRef[idx];
+    closeContextMenu();
+    if (item && typeof item.onClick === 'function') {
+      try { item.onClick(); } catch (err) { /* swallow — actions report via SDK */ }
+    }
+  });
+
+  ctxMenuEl.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeContextMenu(); return; }
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp' && ev.key !== 'Home' && ev.key !== 'End') return;
+    ev.preventDefault();
+    const items = Array.prototype.slice.call(ctxMenuEl.querySelectorAll('.ctx-item:not(:disabled)'));
+    if (items.length === 0) return;
+    let idx = items.indexOf(document.activeElement);
+    if (ev.key === 'Home') idx = 0;
+    else if (ev.key === 'End') idx = items.length - 1;
+    else if (ev.key === 'ArrowDown') idx = (idx < 0 ? 0 : (idx + 1) % items.length);
+    else if (ev.key === 'ArrowUp')   idx = (idx <= 0 ? items.length - 1 : idx - 1);
+    items[idx].focus();
+  });
+
+  ctxBackdropEl.addEventListener('click', closeContextMenu);
+  document.addEventListener('mousedown', function (ev) {
+    if (ctxMenuEl.getAttribute('data-open') !== 'true') return;
+    if (ctxMenuEl.contains(ev.target)) return;
+    closeContextMenu();
+  });
+  window.addEventListener('scroll', function () { closeContextMenu(); }, true);
+  window.addEventListener('resize', function () { closeContextMenu(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && ctxMenuEl.getAttribute('data-open') === 'true') {
+      ev.preventDefault();
+      closeContextMenu();
+    }
+  });
+
+  // Build menu items for the participant row context. View profile mirrors
+  // the avatar tap; Copy ID is a power-user affordance for moderators
+  // surfacing IDs they can paste into shell admin tools.
+  function buildParticipantCtxItems(p) {
+    const items = [];
+    const displayName = (p && p.name && p.name.length > 0)
+      ? p.name
+      : ('Member ' + String((p && p.identity) || '').slice(0, 8));
+    if (p && p.userId) {
+      items.push({
+        label: 'View profile',
+        icon: CTX_ICON.user,
+        onClick: function () {
+          const args = { userId: p.userId, displayName: displayName };
+          if (p.avatarUrl) args.avatarUrl = p.avatarUrl;
+          sdk.platform.userCard.show(args);
+        },
+      });
+      items.push({
+        label: 'Copy user ID',
+        icon: CTX_ICON.copy,
+        onClick: function () { copyToClipboard(p.userId); },
+      });
+    }
+    return items;
+  }
+
+  // Build menu items for a screen-share slot. Volume is intentionally NOT in
+  // the menu — it's a continuous control and lives in the inline overlay
+  // (always-visible on coarse pointers via the @media (hover: none) block).
+  function buildSlotCtxItems(entry, p) {
+    const items = [];
+    if (!entry) return items;
+    const popped = popoutMap();
+    const isPopped = popped.get(entry.trackSid) === true;
+    items.push({
+      label: isPopped ? 'Dock back into panel' : 'Pop out',
+      icon: isPopped ? CTX_ICON.minimize : CTX_ICON.expand,
+      onClick: function () {
+        if (isPopped) sdk.platform.voice.dockScreenShare(entry.trackSid);
+        else sdk.platform.voice.popoutScreenShare(entry.trackSid);
+      },
+    });
+    items.push({
+      label: 'Move to tray',
+      icon: CTX_ICON.eyeOff,
+      onClick: function () {
+        sdk.platform.voice.unsubscribeScreenShare(entry.trackSid);
+      },
+    });
+    if (sdk.platform.voice.moderationGranted && entry.userId) {
+      items.push({ divider: true });
+      items.push({
+        label: 'Stop their share',
+        icon: CTX_ICON.stopCircle,
+        danger: true,
+        onClick: function () {
+          if (!nav) return;
+          const ok = typeof window.confirm === 'function'
+            ? window.confirm('Stop this user’s screen share?')
+            : true;
+          if (!ok) return;
+          sdk.platform.voice.adminStopScreenShare({
+            channelId: nav.itemId,
+            userId: entry.userId,
+            reason: 'admin-stop',
+          });
+        },
+      });
+    }
+    return items;
+  }
+
+  // Clipboard with a degraded fallback for sandboxed iframes that haven't
+  // been granted clipboard-write. The async API is preferred; execCommand
+  // still works as long as we run from a user gesture (a menu click is one).
+  function copyToClipboard(text) {
+    const s = String(text == null ? '' : text);
+    function fallback() {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = s;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        ta.style.pointerEvents = 'none';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand && document.execCommand('copy');
+        ta.remove();
+        if (!ok) { /* surface nothing — copy is a low-stakes nicety here */ }
+      } catch (_) { /* swallow */ }
+    }
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(s).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  // Resolve a long-pressed/right-clicked DOM node to its (items, anchor)
+  // pair. Returns null if the node isn't an actionable surface (input,
+  // existing button, etc.) so the gesture handler bails cleanly.
+  function resolveCtxTarget(target) {
+    if (!target || !target.closest) return null;
+    // Skip presses on interactive children — they own click semantics.
+    if (target.closest('button, a, input, textarea, select, [contenteditable="true"]')) {
+      // Allow the slot itself even if the slot-controls overlay (which has
+      // buttons) is the immediate ancestor — long-pressing the tile body
+      // should still open the menu. We detect this by checking if the
+      // closest button is INSIDE a slot-controls bar AND the press began on
+      // the slot frame itself rather than the button.
+      const btn = target.closest('button, a, input, textarea, select');
+      if (!btn || !btn.closest('.slot-controls')) return null;
+      // The press hit a slot-controls button — let its own handler run.
+      return null;
+    }
+    const slot = target.closest('.slot[data-uc-track-sid]');
+    if (slot) {
+      const sid = slot.getAttribute('data-uc-track-sid');
+      const subs = screenShareSubs;
+      let entry = null;
+      for (let i = 0; i < subs.length; i++) {
+        if (subs[i].trackSid === sid) { entry = subs[i]; break; }
+      }
+      if (!entry) return null;
+      const p = findParticipantById(entry.userId);
+      const items = buildSlotCtxItems(entry, p);
+      if (items.length === 0) return null;
+      return { items: items, anchor: slot };
+    }
+    const part = target.closest('.participant[data-uc-participant-id]');
+    if (part) {
+      const userId = part.getAttribute('data-uc-participant-id');
+      const p = findParticipantById(userId);
+      if (!p) return null;
+      const items = buildParticipantCtxItems(p);
+      if (items.length === 0) return null;
+      return { items: items, anchor: part };
+    }
+    return null;
+  }
+
+  // Long-press detection. 480ms matches the text-channels plugin and the
+  // shell's context-gesture.ts; >10px movement cancels (drag/scroll intent).
+  // Single delegated handler at root — survives every render() rebuild.
+  function attachVoiceLongPress(rootEl) {
+    if (!rootEl) return;
+    let pressTimer = null;
+    let startX = 0, startY = 0;
+    let pressedAnchor = null;
+    let pressedItems = null;
+    let fired = false;
+
+    function clearTimer() {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    }
+    function reset() {
+      clearTimer();
+      pressedAnchor = null;
+      pressedItems = null;
+      fired = false;
+    }
+
+    rootEl.addEventListener('pointerdown', function (ev) {
+      if (ev.pointerType !== 'touch' && ev.pointerType !== 'pen') return;
+      const resolved = resolveCtxTarget(ev.target);
+      if (!resolved) return;
+      pressedAnchor = resolved.anchor;
+      pressedItems = resolved.items;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      fired = false;
+      pressTimer = setTimeout(function () {
+        fired = true;
+        if (navigator.vibrate) { try { navigator.vibrate(8); } catch (_) {} }
+        openContextMenu(pressedItems, pressedAnchor, startX, startY, null);
+      }, 480);
+    });
+
+    rootEl.addEventListener('pointermove', function (ev) {
+      if (!pressTimer) return;
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      if (dx * dx + dy * dy > 100) clearTimer(); // >10px movement cancels
+    });
+
+    rootEl.addEventListener('pointerup', reset);
+    rootEl.addEventListener('pointercancel', reset);
+    rootEl.addEventListener('pointerleave', reset);
+
+    // Swallow the synthetic click that follows a long-press fire so the row
+    // doesn't also trigger its avatar-click handler under the menu.
+    rootEl.addEventListener('click', function (ev) {
+      if (fired) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        fired = false;
+      }
+    }, true);
+
+    rootEl.addEventListener('contextmenu', function (ev) {
+      if (isCoarsePointer()) return; // touch path uses long-press
+      const resolved = resolveCtxTarget(ev.target);
+      if (!resolved) return;
+      ev.preventDefault();
+      openContextMenu(resolved.items, resolved.anchor, ev.clientX, ev.clientY, null);
+    });
+  }
+
+  attachVoiceLongPress(root);
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+
+  setEmpty('Connecting…');
+  try {
+    sdk = await createPluginFrontend();
+  } catch (err) {
+    setEmpty('Failed to connect: ' + (err && err.message ? err.message : String(err)));
+    return;
+  }
+
+  sdk.onNavigate(function (n) {
+    nav = n;
+    var panelTrackSid = screenSharePanelTrackSid();
+    if (panelTrackSid) sdk.platform.voice.subscribeScreenShare(panelTrackSid);
+    render();
+  });
+
+  // The shell repaints the panel header from its own SidebarItem snapshot,
+  // but the voice body (titles, join CTA, status line) renders from
+  // nav.itemLabel — refresh it locally when the open channel is renamed.
+  sdk.subscribe('voice-channels.channel.updated', function (p) {
+    if (!p || !nav || p.id !== nav.itemId) return;
+    if (typeof p.name !== 'string') return;
+    nav = { itemId: nav.itemId, itemLabel: p.name };
+    render();
+  });
+
+  sdk.platform.voice.onState(function (state) {
+    voice = state;
+    render();
+  });
+
+  sdk.platform.voice.onParticipants(function (list) {
+    participants = list;
+    render();
+  });
+
+  sdk.platform.voice.onActiveSpeakers(function (ids) {
+    speakingIds = new Set(ids);
+    // Skip the full render — see applySpeakingStates() comment for the
+    // echo-loop bug this avoids. The next state/participants/screen-share
+    // envelope still triggers a full render and re-applies the class via
+    // renderRoster, so initial paint and post-roster-change paint are
+    // unaffected.
+    applySpeakingStates();
+  });
+
+  sdk.platform.voice.onError(function (err) {
+    transientError = err;
+    if (transientErrorTimer !== null) clearTimeout(transientErrorTimer);
+    transientErrorTimer = setTimeout(function () {
+      transientError = null;
+      transientErrorTimer = null;
+      render();
+    }, 6_000);
+    render();
+  });
+
+  // PR-6 — screen-share envelopes. The shell pushes these on every LRU swap,
+  // dynacast pause/resume, or subscriber volume change. Re-render on each;
+  // the slot grid + tray come straight off `screenShareSubs`. The popout map
+  // drives the in-frame "Watching in popout" placeholder.
+  if (typeof sdk.platform.voice.onScreenShareSubscriptions === 'function') {
+    sdk.platform.voice.onScreenShareSubscriptions(function (list) {
+      screenShareSubs = Array.isArray(list) ? list : [];
+      // Track which trackSids are currently visible — used by future
+      // diagnostic overlays. Not load-bearing today; cheap to maintain.
+      screenShareKnownSubs.clear();
+      for (var i = 0; i < screenShareSubs.length; i++) {
+        screenShareKnownSubs.add(screenShareSubs[i].trackSid);
+      }
+      render();
+    });
+  }
+  if (typeof sdk.platform.voice.onScreenSharePopouts === 'function') {
+    sdk.platform.voice.onScreenSharePopouts(function (list) {
+      screenSharePopouts = Array.isArray(list) ? list : [];
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

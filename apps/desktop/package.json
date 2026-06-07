@@ -1,0 +1,27 @@
+{
+  "name": "@uncorded/desktop",
+  "version": "0.0.26",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "predev": "tsc -p tsconfig.build.json",
+    "dev": "electron .",
+    "dev:watch": "node scripts/dev-watch.js",
+    "build": "tsc -p tsconfig.build.json && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "^1.2.0",
+    "@uncorded/electron-bridge": "workspace:*",
+    "cross-fetch": "^4.0.0",
+    "electron-updater": "^6.0.0",
+    "zod": "^4.3.6"
+  }
+}

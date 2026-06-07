@@ -1,0 +1,12 @@
+node_modules
+.git
+dev-data/
+**/*.test.ts
+**/__fixtures__/
+.claude/
+apps/
+.env*
+docker/
+scripts/
+*.md
+.gitignore

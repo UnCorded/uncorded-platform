@@ -1,0 +1,29 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+bun.lockb
+*.lock
+# Bun 1.2+ writes a text lockfile (bun.lock). Bun docs recommend committing
+# it for reproducible installs; the runtime Dockerfile COPYs it for the
+# `bun install --frozen-lockfile` step. Force-include to override *.lock.
+!bun.lock
+.DS_Store
+Thumbs.db
+out/
+release/
+*.tsbuildinfo
+.claude/settings.local.json
+dev-data/
+.claude/worktrees/
+worktrees/
+
+# Downloaded by apps/desktop/scripts/download-cosign.cjs at build time. We
+# don't check in the binary because (a) ~50 MiB per platform is a lot for a
+# git repo, and (b) the pinned version lives in the script, so re-downloads
+# are reproducible.
+apps/desktop/resources/cosign/

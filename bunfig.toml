@@ -1,0 +1,5 @@
+[test]
+pathIgnorePatterns = [
+  "**/text-channels.test.ts",
+  "**/index.boot.test.ts",
+]

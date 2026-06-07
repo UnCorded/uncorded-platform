@@ -1,0 +1,323 @@
+# Builds and signs the UnCorded server runtime image, then publishes it to
+# GHCR. Companion to release.yml (which handles the desktop installer).
+#
+# Per Phase 01 §10 (decisions.md O4):
+#   - Image is built once, amd64-only (Phase 1 audience is homelab + gaming;
+#     arm64 is a Phase 2+ question per reference_release_pipeline memory).
+#   - Image is signed with cosign using a long-lived Ed25519 keypair stored in
+#     Bitwarden + mirrored to COSIGN_PRIVATE_KEY + COSIGN_PASSWORD secrets.
+#   - Image is pushed to ghcr.io/uncorded/runtime:<version>. The :latest tag
+#     is updated only when `tag_latest=true` is selected at dispatch — keeps
+#     the "draft first, promote manually" pattern from the desktop pipeline.
+#   - Workflow_dispatch only. The runtime version is provided as a required
+#     input and baked into the image as RUNTIME_VERSION (entrypoint reads it
+#     and surfaces it in /health, /ready, heartbeat, and update-state).
+#
+# **Required GitHub Actions secrets** (one-time setup, see runbook in
+# reference_release_pipeline.md):
+#   - COSIGN_PRIVATE_KEY  (cosign.key contents from `cosign generate-key-pair`)
+#   - COSIGN_PASSWORD     (the password protecting cosign.key)
+#   - LIVEKIT_SHA256_AMD64  (LiveKit binary checksum for the pinned version)
+#   - RELEASES_PAT        (fine-grained PAT with contents:write on
+#                          UnCorded/releases — same secret the desktop pipeline
+#                          uses to push installers; reused here so the runtime
+#                          stream creates its draft GitHub Release on the
+#                          public releases repo. The built-in GITHUB_TOKEN is
+#                          scoped to the current (private) repo and can't write
+#                          across repos.)
+#
+# **Org-level prerequisites** (one-time, see runbook):
+#   - GHCR enabled for the org with package admin permissions for this repo.
+#   - GITHUB_TOKEN given write access to packages via the workflow's
+#     permissions block below — no extra PAT needed for the image push.
+#   - UnCorded/releases must be public — installed desktop apps fetch the
+#     runtime release listing anonymously to discover new versions.
+
+name: release-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Runtime version to publish (semver, no 'v' prefix). Example: 0.1.0"
+        required: true
+        type: string
+      tag_latest:
+        description: "Also tag this image as :latest (promotes it to the rolling pointer self-hosters' update checks resolve against). Leave OFF for release-candidate / beta builds."
+        required: true
+        type: boolean
+        default: false
+      livekit_sha256_amd64:
+        description: "Optional override for LIVEKIT_SHA256_AMD64. Falls back to repo secret of same name."
+        required: false
+        type: string
+      release_notes:
+        description: "Operator-facing changelog appended to the GitHub Release body (markdown). Leave blank to publish with only the auto-generated image + verification block."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  # GITHUB_TOKEN needs `packages: write` to push to ghcr.io. Keeping
+  # `contents: read` minimal — the workflow doesn't push commits, doesn't
+  # tag, and doesn't create GitHub Releases (unlike desktop release.yml,
+  # the runtime artifact lives in the registry, not GitHub Releases).
+  contents: read
+  packages: write
+  # id-token:write would be required for sigstore keyless signing. We use
+  # keyed cosign instead (per O4.2), so the OIDC token is unused — but
+  # leaving the line documented makes the future migration path obvious.
+  # id-token: write
+
+jobs:
+  build-and-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version input
+        # Catches typos like `v0.1.0` or `0.1` before we waste a 10-minute
+        # build. Matches semver MAJOR.MINOR.PATCH with optional pre-release
+        # (e.g. 0.1.0, 0.1.0-rc.1, 0.1.0-beta.3).
+        run: |
+          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version '${{ inputs.version }}'. Expected semver MAJOR.MINOR.PATCH[-prerelease], no 'v' prefix." >&2
+            exit 1
+          fi
+          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+        id: validate
+
+      - uses: actions/checkout@v4
+
+      - name: Verify cosign pubkey sync
+        # Mirror check: runtime/src/signing/cosign-pubkey.ts and
+        # apps/desktop/src/runtime-orchestrator.ts must embed the same PEM.
+        # release-desktop.yml runs the same script — duplicating it here so
+        # runtime releases fail fast on drift instead of producing an image
+        # the desktop client refuses to verify.
+        run: node scripts/check-cosign-pubkey-sync.cjs
+
+      - name: Resolve LiveKit checksum
+        id: livekit
+        # The Dockerfile refuses to build without a LIVEKIT_SHA256_AMD64 build-arg
+        # (per docker/Dockerfile lines 49-51). Default to the repo secret for
+        # routine releases; allow workflow input override when bumping LiveKit
+        # in the same release that publishes the new runtime.
+        run: |
+          if [ -n "${{ inputs.livekit_sha256_amd64 }}" ]; then
+            echo "sha=${{ inputs.livekit_sha256_amd64 }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ secrets.LIVEKIT_SHA256_AMD64 }}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -z "$(grep '^sha=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" ]; then
+            echo "::error::LIVEKIT_SHA256_AMD64 not provided via input or repo secret. Find it via: curl -L https://github.com/livekit/livekit/releases/download/v1.11.0/checksums.txt" >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          # `github.actor` works for both manual dispatch (the human who
+          # clicked Run) and scheduled triggers. GITHUB_TOKEN has packages:write
+          # via the permissions block above.
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        # Always tag with the immutable version. Only tag :latest when the
+        # operator opted in — promotes "draft first, promote manually" from
+        # the desktop pipeline into the runtime stream.
+        run: |
+          IMAGE="ghcr.io/uncorded/runtime"
+          TAGS="${IMAGE}:${{ inputs.version }}"
+          if [ "${{ inputs.tag_latest }}" = "true" ]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+          fi
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "primary=${IMAGE}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push runtime image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Bake the version into the image so the entrypoint can surface it
+          # in /health, heartbeat, and update-state. Without this, the runtime
+          # would log "0.0.0-dev" forever (the Dockerfile default).
+          build-args: |
+            RUNTIME_VERSION=${{ inputs.version }}
+            LIVEKIT_SHA256_AMD64=${{ steps.livekit.outputs.sha }}
+          # GitHub Actions cache for layer reuse. Speeds up incremental builds
+          # — especially the bun install layer and the LiveKit download stage.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          # Pin a known-good cosign release. Bumping is a deliberate PR — we
+          # never want a transient cosign upgrade to silently change our
+          # signature format. Check sigstore/cosign releases when bumping.
+          cosign-release: "v2.4.1"
+
+      - name: Sign image with cosign
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        # Sign by digest (immutable) — `--key env://COSIGN_PRIVATE_KEY` reads
+        # the PEM from the env var. Cosign uploads the signature to the
+        # registry as an OCI artifact tagged `<image>:sha256-<digest>.sig`.
+        # The orchestrator (desktop) later fetches it to extract the payload
+        # + signature it passes to the container as RUNTIME_IMAGE_* envs.
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${{ steps.tags.outputs.image }}"
+          REF="${IMAGE}@${DIGEST}"
+          echo "Signing $REF"
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$REF"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        id: sign
+
+      - name: Verify signature (sanity check)
+        # Pull down the signature we just pushed and verify it against the
+        # public key shipped in the runtime source. If this fails, our
+        # embedded pubkey doesn't match the signing key and the next runtime
+        # boot would exit 40 — better to catch in CI than in production.
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${{ steps.tags.outputs.image }}"
+          REF="${IMAGE}@${DIGEST}"
+
+          # Extract pubkey via the shared extractor (same anchored regex as
+          # scripts/check-cosign-pubkey-sync.cjs). An earlier inline node -e
+          # block matched the EXAMPLE PEM in cosign-pubkey.ts's docstring
+          # instead of the real export, so cosign got a `// MFkw...` payload
+          # and failed PEM decoding (run 25612804749). Sharing the script
+          # keeps the two consumers from drifting again.
+          node scripts/extract-cosign-pubkey.cjs > /tmp/cosign.pub
+
+          if [ ! -s /tmp/cosign.pub ]; then
+            echo "::warning::Embedded cosign pubkey is empty. Skipping verification — this image will fail signature verification at boot if the orchestrator supplies signature envs. Generate a key and update runtime/src/signing/cosign-pubkey.ts before treating this release as production-ready."
+            exit 0
+          fi
+
+          cosign verify --key /tmp/cosign.pub "$REF"
+
+      - name: Publish draft GitHub Release on UnCorded/releases
+        # The orchestrator's check-for-update flow discovers new runtime
+        # versions by listing releases on `UnCorded/releases` (public). The
+        # image lives in GHCR but the *discovery* surface is GitHub Releases
+        # — same as the desktop pipeline, same draft-first promote-manual
+        # contract. Tag name is `runtime-X.Y.Z` to match the prefix that
+        # `apps/desktop/src/runtime-releases.ts` filters on; desktop release
+        # tags (`vX.Y.Z`) are silently ignored by that filter so the two
+        # streams coexist on one repo without cross-talk.
+        #
+        # We always create as a draft. Promotion to published is a human
+        # click on the release page, identical to desktop. While the release
+        # is a draft, anonymous API listings exclude it — installed clients
+        # cannot see the new version until you Publish.
+        #
+        # `--prerelease` flips automatically for any version with a `-`
+        # suffix (rc / beta / dev). The channel logic in runtime-releases.ts
+        # ALSO filters by version-string suffix, so this flag is purely
+        # informational for the GitHub Release UI — but we set it correctly
+        # for clarity.
+        env:
+          # GH_TOKEN: cross-repo write requires RELEASES_PAT. The built-in
+          # GITHUB_TOKEN is scoped to this (private) platform repo.
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          # Pass release_notes through an env var rather than inline `${{ }}`
+          # interpolation — multiline inputs would otherwise risk breaking
+          # the YAML or shell quoting depending on their contents.
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+        run: |
+          VERSION="${{ inputs.version }}"
+          TAG="runtime-${VERSION}"
+          IMAGE_REF="${{ steps.tags.outputs.primary }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          DIGEST_REF="${{ steps.tags.outputs.image }}@${DIGEST}"
+
+          PRERELEASE_FLAG=""
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Body: operator-facing block + optional release-notes input.
+          # Single brace-group so every line stays indented at the YAML
+          # block-scalar level. Earlier draft used a `cat <<'BODY_HEADER'`
+          # heredoc whose body sat at column 0, which terminated the YAML
+          # `run: |` block early and made the workflow unparseable
+          # (`workflow_dispatch trigger missing` from the API). Indented
+          # echos keep the YAML happy and give us the same literal output.
+          BODY_FILE="$(mktemp)"
+          {
+            echo "## Runtime image"
+            echo ""
+            echo "- **Image**: \`${IMAGE_REF}\`"
+            echo "- **Digest**: \`${DIGEST}\`"
+            echo "- **Tagged \`:latest\`**: \`${{ inputs.tag_latest }}\`"
+            echo "- **Signature**: cosign Ed25519, verifies against \`runtime/src/signing/cosign-pubkey.ts\`"
+            echo ""
+            echo "### Verify locally"
+            echo ""
+            echo '```sh'
+            echo "docker pull ${IMAGE_REF}"
+            echo "cosign verify --key cosign.pub ${DIGEST_REF}"
+            echo '```'
+            echo ""
+          } > "$BODY_FILE"
+
+          if [ -n "$RELEASE_NOTES_INPUT" ]; then
+            echo "## Notes" >> "$BODY_FILE"
+            echo "" >> "$BODY_FILE"
+            printf '%s\n' "$RELEASE_NOTES_INPUT" >> "$BODY_FILE"
+          fi
+
+          # Refuse to clobber an existing release on the same tag — bail
+          # rather than silently re-creating with different content. Forces
+          # the operator to delete the old draft first if they intended to.
+          if gh release view "$TAG" --repo UnCorded/releases >/dev/null 2>&1; then
+            echo "::error::Release '$TAG' already exists on UnCorded/releases. Delete it first if you intended to recreate it." >&2
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            --repo UnCorded/releases \
+            --draft \
+            $PRERELEASE_FLAG \
+            --title "Runtime ${VERSION}" \
+            --notes-file "$BODY_FILE"
+
+          # Capture the URL for the summary step.
+          RELEASE_URL="$(gh release view "$TAG" --repo UnCorded/releases --json url --jq .url)"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+        id: publish
+
+      - name: Summary
+        run: |
+          echo "## Runtime release ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image**: \`${{ steps.tags.outputs.primary }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tagged \\\`:latest\\\`**: \`${{ inputs.tag_latest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Signed**: yes (cosign Ed25519, key pinned in runtime/src/signing/cosign-pubkey.ts)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Draft release**: ${{ steps.publish.outputs.release_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Operator next steps" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Smoke-test: \`docker pull ${{ steps.tags.outputs.primary }} && docker run --rm ${{ steps.tags.outputs.primary }} echo ok\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Verify signature locally: \`cosign verify --key cosign.pub ${{ steps.tags.outputs.primary }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "3. **Open the draft release**, review the notes, click **Publish release**. Until you publish, no installed client sees this version." >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.tag_latest }}" != "true" ]; then
+            echo "4. When ready to promote to all self-hosters, re-run this workflow with \`tag_latest=true\` (and bump the version), OR retag the existing image manually: \`docker buildx imagetools create -t ${{ steps.tags.outputs.image }}:latest ${{ steps.tags.outputs.primary }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "4. \`:latest\` updated — once the GitHub Release is published, desktop orchestrators on the \`stable\` channel will see the update on next poll." >> "$GITHUB_STEP_SUMMARY"
+          fi

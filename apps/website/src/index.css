@@ -1,0 +1,516 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --animate-update-pulse: update-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Default to dark mode for UnCorded */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* Kobalte collapsible height animation */
+@keyframes collapsible-open {
+  from { height: 0; overflow: hidden; }
+  to { height: var(--kb-collapsible-content-height); overflow: hidden; }
+}
+
+@keyframes collapsible-close {
+  from { height: var(--kb-collapsible-content-height); overflow: hidden; }
+  to { height: 0; overflow: hidden; }
+}
+
+[data-collapsible-content][data-expanded] {
+  animation: collapsible-open 200ms ease-out;
+}
+
+[data-collapsible-content][data-closed] {
+  animation: collapsible-close 200ms ease-out;
+}
+
+* {
+  border-color: var(--border);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+@keyframes update-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+@keyframes auth-float {
+  0%, 100% { transform: translateY(0px) rotate(-0.3deg); }
+  50% { transform: translateY(-12px) rotate(0.3deg); }
+}
+
+@keyframes auth-badge-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Auth-page showcase: 16s narrated tour loop ─────────────────────────────
+   Driven by `showcase-cycle` synced 16s animations on each element. Phase
+   boundaries: 0-25% server pick · 25-50% channel drag · 50-75% workspace
+   save · 75-100% mobile preview. Fragment timings stay aligned by sharing
+   the same animation-duration. */
+
+@keyframes showcase-cursor {
+  0%   { left: -8%;  top: 80%;  opacity: 0; }
+  3%   { opacity: 1; }
+  10%  { left: 18%;  top: 40%; }   /* hover Gaming Hub server row */
+  18%  { left: 18%;  top: 40%; }
+  28%  { left: 22%;  top: 60%; }   /* hover # general channel */
+  35%  { left: 22%;  top: 60%; }
+  42%  { left: 60%;  top: 75%; }   /* drag into main panel */
+  50%  { left: 60%;  top: 75%; }
+  62%  { left: 92%;  top: 18%; }   /* save workspace */
+  70%  { left: 92%;  top: 18%; }
+  80%  { left: 50%;  top: 50%; opacity: 0.6; }
+  92%  { left: 50%;  top: 50%; opacity: 0; }
+  100% { left: 50%;  top: 50%; opacity: 0; }
+}
+
+/* Sidebar: no-server list visible, then fades to server-active state */
+@keyframes showcase-no-server {
+  0%, 12%   { opacity: 1; }
+  18%, 100% { opacity: 0; pointer-events: none; }
+}
+@keyframes showcase-with-server {
+  0%, 18%   { opacity: 0; pointer-events: none; }
+  22%, 100% { opacity: 1; }
+}
+
+/* Server row that the cursor "clicks" — pulses then settles */
+@keyframes showcase-server-row-highlight {
+  0%, 6%   { background: transparent; }
+  12%, 16% { background: color-mix(in oklch, var(--sidebar-primary) 18%, transparent); }
+  18%, 100% { background: transparent; }
+}
+
+/* Channel "general" — picked up at 28-42%, fades to ghost */
+@keyframes showcase-channel-pickup {
+  0%, 26%   { transform: scale(1); opacity: 1; }
+  30%, 38%  { transform: scale(1.04); opacity: 0.85; }
+  42%, 100% { transform: scale(1); opacity: 1; }
+}
+
+/* Drag ghost following the cursor between 28% and 50% */
+@keyframes showcase-ghost {
+  0%, 28%   { opacity: 0; transform: scale(0.85); }
+  32%       { opacity: 0.85; transform: scale(1); }
+  46%       { opacity: 0.85; transform: scale(1); }
+  50%, 100% { opacity: 0; transform: scale(0.85); }
+}
+
+/* Empty main panel "select a channel" hint, fades when content arrives */
+@keyframes showcase-empty-panel {
+  0%, 30%   { opacity: 1; }
+  38%, 100% { opacity: 0; }
+}
+
+/* Channel content (header + input) — fades in at 38% */
+@keyframes showcase-channel-content {
+  0%, 38%   { opacity: 0; }
+  44%, 100% { opacity: 1; }
+}
+
+/* Three message rows stream in sequentially */
+@keyframes showcase-msg-1 {
+  0%, 42%   { opacity: 0; transform: translateY(6px); }
+  47%, 100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes showcase-msg-2 {
+  0%, 46%   { opacity: 0; transform: translateY(6px); }
+  51%, 100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes showcase-msg-3 {
+  0%, 50%   { opacity: 0; transform: translateY(6px); }
+  55%, 100% { opacity: 1; transform: translateY(0); }
+}
+
+/* Save toast: slides in 60-72%, exits at 76% */
+@keyframes showcase-toast {
+  0%, 60%   { opacity: 0; transform: translateY(8px); }
+  64%, 74%  { opacity: 1; transform: translateY(0); }
+  78%, 100% { opacity: 0; transform: translateY(-4px); }
+}
+
+/* Workspace tabs grow at 66% */
+@keyframes showcase-workspace-tabs {
+  0%, 64%   { opacity: 0; transform: scaleX(0.6); transform-origin: left; }
+  70%, 100% { opacity: 1; transform: scaleX(1); }
+}
+
+/* Mobile preview: a phone overlay scales in over the desktop view at 76%,
+   showing the same workspace synced across devices, then fades back out
+   for the loop hand-off. */
+@keyframes showcase-mobile-overlay {
+  0%, 74%   { opacity: 0; transform: translateY(12px) scale(0.92); pointer-events: none; }
+  82%, 92%  { opacity: 1; transform: translateY(0) scale(1); }
+  98%, 100% { opacity: 0; transform: translateY(-6px) scale(0.96); }
+}
+
+/* Synced badge that pulses while the phone is on stage */
+@keyframes showcase-mobile-sync-pulse {
+  0%, 80%   { transform: scale(1); opacity: 0.9; }
+  86%      { transform: scale(1.15); opacity: 1; }
+  92%, 100% { transform: scale(1); opacity: 0.9; }
+}
+
+/* Cinematic shell — old-CRT-TV shutdown / bootup for the runtime restart
+   flow. Driven by `data-cinematic` set from `stores/cinematic.ts`.
+
+   Modeled on the classic CRT power-off effect (cf. francescostella's
+   "TV switch off" pen): the picture compresses vertically into a single
+   bright electron-beam line that lingers for a beat, then collapses
+   horizontally to a point and fades to black. No glitch frames — those
+   read as rendering bugs, not intent.
+
+   Critical: `will-change` and `transform-origin` are scoped to the active
+   animation states only. A non-`none` `transform` (or `will-change:
+   transform`) creates a containing block for every fixed-positioned
+   descendant — including `<PortalContainer>` (z-40 fixed iframes) which
+   computes its iframe clip-path from `SidebarInset`'s
+   `getBoundingClientRect()`. If the shell stayed will-change-promoted at
+   idle, that rect would keep returning the post-animation transformed
+   bounds and the iframe clip would never resettle. Returning to `auto`
+   between cycles releases descendants back to the viewport's containing
+   block. The `cinematic.ts` driver also dispatches a synthetic `resize`
+   after each open/close so any cached layout (PortalContainer's clip,
+   ResizeObserver consumers, panel splits) re-measures cleanly. */
+.cinematic-shell[data-cinematic="idle"] {
+  /* Default visible state. No transform, no will-change — descendants
+     positioned: fixed are anchored to the viewport, not this element. */
+  transform: none;
+  filter: none;
+  opacity: 1;
+  will-change: auto;
+}
+.cinematic-shell[data-cinematic="closing"] {
+  transform-origin: 50% 50%;
+  will-change: transform, filter, opacity;
+  /* Three keyframes, two easings — francescostella's pen formula.
+     Phase 1 (0% → 60%): ease-out-quint gives a fast vertical squish
+     that decelerates as it approaches the bright line. Phase 2
+     (60% → 100%) uses an in-keyframe ease-in-quint so the line lingers
+     for a beat, then SNAPS down to the bright point. The combination
+     is what gives the original CodePen its hallmark smooth-then-snap
+     feel. */
+  animation: cinematic-crt-shutdown 750ms cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+.cinematic-shell[data-cinematic="open"] {
+  /* Hold the shutdown end state — collapsed point, invisible. No
+     will-change here: the install window can sit on this state for
+     many seconds, and we don't want fixed descendants pinned to a
+     scaled-to-zero containing block the whole time. */
+  transform: scale(0, 0.0001);
+  filter: brightness(0);
+  opacity: 0;
+  will-change: auto;
+}
+.cinematic-shell[data-cinematic="opening"] {
+  transform-origin: 50% 50%;
+  will-change: transform, filter, opacity;
+  /* Mirror of the shutdown: starts with the snappy bright-point-to-line
+     phase (in-keyframe ease-out-quint), then the slow line-to-picture
+     expand under ease-in-quint outer easing. */
+  animation: cinematic-crt-bootup 750ms cubic-bezier(0.755, 0.05, 0.855, 0.06) forwards;
+}
+
+@keyframes cinematic-crt-shutdown {
+  /* Picture starts at rest. */
+  0% {
+    transform: scale(1, 1) translate3d(0, 0, 0);
+    filter: brightness(1);
+    opacity: 1;
+  }
+  /* 60% — picture has compressed into a bright horizontal line.
+     The slight horizontal stretch (1.3x on X) is the deflection-circuit
+     "pull" as the high-voltage rail collapses. Brightness 10 boosts
+     the white text into a clear bright strip. */
+  60% {
+    transform: scale(1.3, 0.001) translate3d(0, 0, 0);
+    filter: brightness(10);
+    opacity: 1;
+  }
+  /* 100% — line collapses to a bright point and cuts to black.
+     The animation-timing-function override here is the key trick:
+     the OUTER easing (ease-out-quint) handles 0→60%, then this
+     inner ease-in-quint takes over for 60→100% so the collapse
+     accelerates toward the cut. brightness(50) makes the final
+     point flash before the opacity drop. */
+  100% {
+    animation-timing-function: cubic-bezier(0.755, 0.05, 0.855, 0.06);
+    transform: scale(0, 0.0001) translate3d(0, 0, 0);
+    filter: brightness(50);
+    opacity: 1;
+  }
+}
+
+@keyframes cinematic-crt-bootup {
+  /* Black point — invisible. */
+  0% {
+    transform: scale(0, 0.0001) translate3d(0, 0, 0);
+    filter: brightness(50);
+    opacity: 1;
+  }
+  /* 40% — point has rapidly expanded horizontally to a bright line
+     under the outer ease-in-quint. */
+  40% {
+    transform: scale(1.3, 0.001) translate3d(0, 0, 0);
+    filter: brightness(10);
+    opacity: 1;
+  }
+  /* 100% — line expands vertically into the full picture, with the
+     in-keyframe ease-out-quint giving the smooth decelerating expand
+     that mirrors the shutdown's smooth squish. */
+  100% {
+    animation-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+    transform: scale(1, 1) translate3d(0, 0, 0);
+    filter: brightness(1);
+    opacity: 1;
+  }
+}
+
+/* Cinematic backdrop — sits between the cinematic-shell and the
+   PostUpdateOverlay. Fades in alongside the close so the screen visibly
+   darkens behind the collapsing workspace (otherwise the body's dark
+   color is identical to the workspace background and the close looks
+   like the chrome just falls off into nothing), persists through the
+   install window, then fades out alongside the bootup expand on Continue
+   so the workspace reveals through clearing darkness. z-[150] sits above
+   PortalContainer (z-40), DragCaptureRoot (z-48), CenterDropOverlay
+   (z-46), ScreenShareOverlay (z-41) — and below the PostUpdateOverlay
+   (z-[200]) which carries the spinner/success/failed card on top. */
+.cinematic-backdrop {
+  transition: opacity 500ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cinematic-backdrop[data-cinematic="idle"]    { opacity: 0; pointer-events: none; }
+.cinematic-backdrop[data-cinematic="closing"] { opacity: 1; pointer-events: none; }
+.cinematic-backdrop[data-cinematic="open"]    { opacity: 1; pointer-events: none; }
+.cinematic-backdrop[data-cinematic="opening"] { opacity: 0; pointer-events: none; }
+
+/* PDF.js viewer host inside FilePreviewOverlay. Each rendered page sits on
+   a white card with a soft drop shadow against the dark backdrop, matching
+   how a printed page would feel. Placeholders use the same chrome so layout
+   doesn't shift when canvases swap in. */
+.pdf-viewer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  /* `overflow-anchor: none` stops Chromium from trying to restore scroll
+     position when canvases swap in/out, which causes visible page jumps
+     under fast scrolling. */
+  overflow-anchor: none;
+}
+.pdf-page-placeholder {
+  background: #fafafa;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px oklch(0 0 0 / 0.35);
+  position: relative;
+  overflow: hidden;
+  /* The `.pdf-viewer` parent is a flex column. Without `flex-shrink: 0`
+     the placeholders collapse to fit the viewport, leaving only the
+     bottom slice of each rendered canvas visible. */
+  flex: 0 0 auto;
+}
+.pdf-page-placeholder:not(.is-rendered)::after {
+  /* Subtle shimmer so users know something is coming. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    oklch(0 0 0 / 0.04) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  animation: pdf-placeholder-shimmer 1.4s linear infinite;
+}
+@keyframes pdf-placeholder-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.pdf-page-canvas {
+  display: block;
+  /* Cancel the placeholder shimmer once the canvas is in. */
+  position: relative;
+}
+
+/* Markdown body rendered inside FilePreviewOverlay (innerHTML from marked +
+   DOMPurify). Minimal opinionated styling — DOMPurify already strips scripts
+   and other dangerous tags, so we only need to make the output legible. */
+.md-body {
+  color: oklch(1 0 0 / 0.88);
+  line-height: 1.6;
+  font-size: 15px;
+}
+.md-body h1 { font-size: 1.85em; font-weight: 700; margin: 1.4em 0 0.6em; line-height: 1.25; }
+.md-body h2 { font-size: 1.45em; font-weight: 700; margin: 1.3em 0 0.5em; line-height: 1.3; }
+.md-body h3 { font-size: 1.2em;  font-weight: 600; margin: 1.2em 0 0.4em; }
+.md-body h4 { font-size: 1.05em; font-weight: 600; margin: 1.1em 0 0.4em; }
+.md-body h5,
+.md-body h6 { font-size: 1em;    font-weight: 600; margin: 1em 0 0.3em; }
+.md-body p { margin: 0.6em 0; }
+.md-body a { color: oklch(0.78 0.13 235); text-decoration: underline; }
+.md-body strong { font-weight: 700; }
+.md-body em { font-style: italic; }
+.md-body ul,
+.md-body ol { margin: 0.6em 0; padding-left: 1.6em; }
+.md-body ul { list-style: disc; }
+.md-body ol { list-style: decimal; }
+.md-body li { margin: 0.25em 0; }
+.md-body li > p { margin: 0.25em 0; }
+.md-body blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 0.9em;
+  border-left: 3px solid oklch(1 0 0 / 0.2);
+  color: oklch(1 0 0 / 0.7);
+}
+.md-body code {
+  background: oklch(1 0 0 / 0.08);
+  border: 1px solid oklch(1 0 0 / 0.1);
+  border-radius: 4px;
+  padding: 0.08em 0.32em;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.md-body pre {
+  background: oklch(1 0 0 / 0.04);
+  border: 1px solid oklch(1 0 0 / 0.1);
+  border-radius: 6px;
+  padding: 0.8em 1em;
+  margin: 0.8em 0;
+  overflow-x: auto;
+  font-size: 0.88em;
+  line-height: 1.5;
+}
+.md-body pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+.md-body hr {
+  border: 0;
+  border-top: 1px solid oklch(1 0 0 / 0.12);
+  margin: 1.4em 0;
+}
+.md-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 0.5em 0;
+}
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 0.92em;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid oklch(1 0 0 / 0.12);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.md-body th {
+  background: oklch(1 0 0 / 0.04);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Honor system motion preference: no animation, just instant state flip. */
+  .cinematic-shell,
+  .cinematic-backdrop { transition: none; animation: none; }
+  .cinematic-shell[data-cinematic="closing"],
+  .cinematic-shell[data-cinematic="open"] {
+    transform: none;
+    filter: none;
+    opacity: 0;
+    will-change: auto;
+  }
+  .cinematic-shell[data-cinematic="opening"] {
+    transform: none;
+    filter: none;
+    opacity: 1;
+    will-change: auto;
+  }
+}

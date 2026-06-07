@@ -1,0 +1,51 @@
+{
+  "name": "voice-channels",
+  "version": "0.1.0",
+  "api_version": "^1.0",
+  "author": "UnCorded",
+  "description": "Voice + screenshare channels backed by the runtime's bundled LiveKit SFU.",
+  "license": "MIT",
+  "type": "core",
+  "icon": "Volume2",
+  "backend": {
+    "entry": "backend/index.ts"
+  },
+  "frontend": {
+    "entry": "frontend/index.html"
+  },
+  "runtime_capabilities": ["voice.media", "voice.screen_share", "voice.moderation"],
+  "managed_services": ["livekit"],
+  "permissions": [
+    "data.sql:self",
+    "voice.tokens:self",
+    "events.publish:voice-channels.*",
+    "events.subscribe:voice-channels.*",
+    "events.subscribe:core.category.*",
+    "events.subscribe:runtime.voice.*",
+    "broadcast.clients"
+  ],
+  "public_schema": {
+    "channels": {
+      "columns": ["id", "name", "created_at", "category_id", "position", "max_participants", "bitrate_kbps", "e2ee"],
+      "description": "All voice channels in this server."
+    }
+  },
+  "sidebar": {
+    "contributes": true,
+    "section": "Voice",
+    "refresh_on": [
+      "voice-channels.channel.created",
+      "voice-channels.channel.updated",
+      "voice-channels.channel.deleted",
+      "voice-channels.voice.participant.joined",
+      "voice-channels.voice.participant.left",
+      "voice-channels.voice.room.destroyed"
+    ]
+  },
+  "dependencies": {},
+  "resources": {
+    "memory_mb": 64,
+    "cpu_weight": 512,
+    "disk_mb": 64
+  }
+}

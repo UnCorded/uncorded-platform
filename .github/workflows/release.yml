@@ -1,0 +1,119 @@
+# Builds the desktop installer matrix and publishes to GitHub Releases as a
+# DRAFT — the release must be manually promoted to "published" before
+# electron-updater clients see it. Keeps bad builds from auto-going-live.
+#
+# Triggered by manual workflow_dispatch only. Tag pushes do NOT trigger this
+# workflow — GitHub creates the tag automatically when a draft release is
+# Published, and we don't want that click to rebuild + reupload artifacts.
+# The built-in GITHUB_TOKEN has `contents: write` via the permissions block
+# below, which is all electron-builder needs to upload artifacts.
+#
+# v0.0.1 ships unsigned on Windows (SmartScreen acceptable for Phase 1
+# homelab audience) and without macOS builds entirely (notarization deferred
+# — see apps/desktop/electron-builder.yml `mac:` block).
+
+name: release
+
+on:
+  # workflow_dispatch only. Our release flow is: dispatch -> build + upload
+  # to a draft -> human clicks Publish. The tag is created AT publish time
+  # by GitHub's release UI, which would re-trigger this workflow and
+  # duplicate the build if we kept a `push: tags` trigger. See the runbook
+  # in the reference_release_pipeline memory.
+  workflow_dispatch:
+
+permissions:
+  # Downgraded from write. All write activity goes through RELEASES_PAT to
+  # a different repo; GITHUB_TOKEN only needs read for actions/checkout.
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS excluded until notarization is wired up. Re-add `macos-latest`
+        # once the `mac:` block in electron-builder.yml is uncommented.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Pin electron + electron-builder caches into the workspace so a single
+    # actions/cache path works identically on Linux and Windows. The default
+    # locations differ (~/.cache vs %LOCALAPPDATA%) which would need per-OS
+    # branching.
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Cache bun's install cache keyed on bun.lock. Repeat runs re-use the
+      # resolved tarballs instead of re-fetching them — biggest win on
+      # Windows where install went from 1m 8s cold -> ~20s warm.
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      # Cache the prebuilt Electron binary (~250 MB) plus electron-builder's
+      # own tool cache (7zip, nsis, appimage). Keyed on apps/desktop/
+      # package.json so an Electron version bump invalidates cleanly.
+      - name: Cache electron-builder
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.cache/electron
+            ${{ github.workspace }}/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('apps/desktop/package.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Typecheck + reducer tests are OS-agnostic (pure TypeScript, pure
+      # reducers). Running both once on Linux is enough; an OS-specific TS
+      # regression would still get caught by "Compile TypeScript" below,
+      # which runs on every matrix leg.
+      - name: Typecheck
+        if: matrix.os == 'ubuntu-latest'
+        run: bun run typecheck
+
+      - name: Test (desktop)
+        if: matrix.os == 'ubuntu-latest'
+        run: bun test src/auto-update.test.ts
+        working-directory: apps/desktop
+
+      # Download the per-platform cosign binary into apps/desktop/resources/
+      # so electron-builder's `extraResources` block can pick it up. cosign
+      # runs on the host (not inside the runtime container) to verify each
+      # pulled runtime image, so it has to ship with the installer rather
+      # than be assumed-on-PATH on the operator's machine. The downloader
+      # only fetches the host's own native binary — fine because each matrix
+      # leg builds for one OS at a time.
+      - name: Download cosign
+        run: node scripts/download-cosign.cjs
+        working-directory: apps/desktop
+
+      # Split `bun run build` (tsc + electron-builder) into two steps so we
+      # can pass --publish always to electron-builder without changing the
+      # package.json build script — local dev never inadvertently uploads.
+      - name: Compile TypeScript
+        run: bunx tsc -p tsconfig.build.json
+        working-directory: apps/desktop
+
+      # GH_TOKEN is the RELEASES_PAT secret (fine-grained PAT with
+      # contents:write on UnCorded/releases). The built-in GITHUB_TOKEN is
+      # scoped to the CURRENT repo (platform) and can't upload assets to a
+      # different repo, so we can't use it here.
+      - name: Build + publish installer
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+        run: bunx electron-builder --publish always
+        working-directory: apps/desktop

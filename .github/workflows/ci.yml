@@ -1,0 +1,120 @@
+# Pull-request / push validation. Runs the normal merge gates: typecheck,
+# lint, the test suites that need no external services, the Central suite
+# against a throwaway Postgres, and the website production build.
+#
+# This is deliberately NOT a release workflow — it builds nothing for
+# distribution and pushes nowhere. release.yml (desktop installers) and
+# release-runtime.yml (server image) stay workflow_dispatch-only and are
+# untouched by this file.
+
+name: ci
+
+on:
+  # Every PR, regardless of target branch.
+  pull_request:
+  # Direct pushes to main (e.g. squash-merges land here). PR branches are
+  # already covered by `pull_request`, so we don't also list them under
+  # `push` — that would double-run CI on every PR commit.
+  push:
+    branches: [main]
+
+# A newer commit on the same ref makes the in-flight run obsolete. Cancel it
+# instead of paying for both.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Read-only: CI validates, it never writes back to the repo.
+  contents: read
+
+jobs:
+  # Service-free gates: typecheck, lint, the package/runtime/website/desktop
+  # test suites, and the website build. None of these touch Postgres, so they
+  # run on a bare runner with no service container.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Re-use resolved tarballs across runs, keyed on the lockfile. Mirrors
+      # the cache step in release.yml.
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      # Service-free test suites. The trailing slashes matter: `bun test`
+      # treats positional args as path-SUBSTRING filters, so a bare `plugins`
+      # would also match apps/central/src/routes/plugins.test.ts (which needs
+      # Postgres) and fail here. `plugins/` only matches the top-level
+      # plugins/ directory. apps/central is intentionally excluded — it runs
+      # in the `central-tests` job below with a database available.
+      - name: Test (packages, runtime, plugins, desktop, website)
+        run: bun test packages/ runtime/ plugins/ apps/desktop/ apps/website/
+
+      - name: Build website
+        run: bun run build:website
+
+  # Central API suite. Needs Postgres, so we attach a service container that
+  # matches the connection contract the tests default to: host=localhost
+  # port=5432 user=postgres password=postgres (see apps/central/src/db.ts and
+  # test-helpers.ts). Same image + credentials as docker/docker-compose.test.yml
+  # — that compose file is the local equivalent of this service.
+  central-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # Don't start the job's steps until Postgres answers — the suite
+        # creates/drops its own uncorded_central_test DB on the first test.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Runs `bun test apps/central` with DATABASE_URL pointed at the service.
+      # The suite's own DB defaults (localhost:5432, postgres/postgres) line up
+      # with the container above, so no extra env wiring is needed.
+      - name: Test (Central)
+        run: bun run test:central
