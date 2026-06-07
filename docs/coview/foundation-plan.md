@@ -126,6 +126,7 @@ A slot tagged `origin: "gated"` says "this value requires authorization," but it
 - **Semantic misclassification outside the schema.** The registry (§3.4) defends *known* surfaces and slots. If first-party chrome puts a sensitive string into a slot the registry models as `public`, or into an unmodeled surface that is allowed to carry host-provided text, the runtime has no way to know the string is sensitive. Closing this fully requires modeling every sensitive surface in the registry; until then, **arbitrary semantic misclassification in first-party chrome remains out of scope**. Fail-closed defaults (unmodeled surfaces not mirrored; values runtime-resolved wherever the runtime owns them) shrink the surface but do not eliminate it.
 - **Side channels from layout, existence, position, or size.** These must be modeled explicitly. Gated values may preserve host-measured size; secret values must use synthetic geometry, and the strongest form can omit the placeholder entirely.
 - **Viewer screenshots.** Once authorized state renders in a viewer's browser, the viewer can capture pixels.
+- **Transport compromise.** The byte-level "does not cross this viewer's wire" guarantee assumes normal per-viewer WebSocket/TLS transport isolation. CoView does not add end-to-end encryption in this foundation pass; E2E encryption remains a non-goal in §8.
 
 ---
 
@@ -161,34 +162,63 @@ Two distinct guarantees, deliberately separated:
 
 ### 3.3 Policy and resource references
 
-For any `gated` slot, the runtime needs enough semantic information to answer "what permission rule controls this exact value?" The canonical slot therefore carries:
+For any `gated` slot, the runtime needs enough semantic information to answer "what permission rule controls this exact value?" These references are closed protocol types, not arbitrary strings, so typos fail at typecheck time and runtime resolver switches can be exhaustive.
 
 ```ts
-type CoViewSlot = {
+type PolicyRef =
+  | "server.name"
+  | "channel.name"
+  | "member.display_name"
+  | "permission.action"
+  | "external.browser.title";
+
+type SlotOrigin = "public" | "gated" | "secret" | "local";
+type SlotKind = "text" | "image" | "icon" | "count" | "chrome" | "external";
+
+type ResourceRef =
+  | { kind: "server"; serverId: string }
+  | { kind: "channel"; channelId: string }
+  | { kind: "member"; userId: string }
+  | { kind: "permission"; permission: string }
+  | { kind: "panel"; panelId: string };
+
+type CoViewSlotBase = {
   id: string;
-  kind: "text" | "image" | "icon" | "count" | "chrome" | "external";
-  origin: "public" | "gated" | "secret" | "local";
-  policyRef?: string;
-  resourceRef?: string;
+  kind: SlotKind;
   placeholderShape?: "synthetic" | "preserve-host-rect" | "absent";
-  value?: unknown;
 };
+
+// Canonical host-to-runtime slots. Never forwarded to viewers as-is.
+type CoViewSlotCanonical =
+  | (CoViewSlotBase & { origin: "public"; value: unknown })
+  | (CoViewSlotBase & { origin: "gated"; policyRef: PolicyRef; resourceRef: ResourceRef; value?: unknown })
+  | (CoViewSlotBase & { origin: "secret"; placeholderShape: "synthetic" | "absent" })
+  | (CoViewSlotBase & { origin: "local" });
+
+// Runtime-projected slots. This is the only slot shape a viewer connection may receive.
+type CoViewSlotProjected =
+  | (CoViewSlotBase & { origin: "public"; value: unknown })
+  | (CoViewSlotBase & { origin: "gated"; value: unknown })
+  | (CoViewSlotBase & { origin: "gated"; withheld: true; placeholderShape: "synthetic" | "preserve-host-rect" | "absent" })
+  | (CoViewSlotBase & { origin: "secret"; placeholderShape: "synthetic" | "absent" });
 ```
+
+The absence of a `value` member on `origin: "secret"` in both `CoViewSlotCanonical` and `CoViewSlotProjected` is the structural guarantee. The absence of a `local` member in `CoViewSlotProjected` is the wire guarantee: local slots never reach viewers. A viewer frame must never reuse the canonical type.
 
 Examples:
 
 | `policyRef` | `resourceRef` | Runtime interpretation |
 |---|---|---|
-| `server.name` | server id | Public or server-member-visible server metadata. |
-| `channel.name` | channel id | Resolve against the viewer's ability to read that channel. |
-| `member.display_name` | user id | Resolve against the viewer's ability to see that member in this server/context. |
-| `permission.action` | `core.members.manage` | Resolve against a concrete Core Module permission. |
-| `external.browser.title` | panel id | External surface metadata; default withheld unless explicitly modeled. |
-| `host.local.placeholder` | local affordance id | Host-only affordance; dropped before viewer projection. |
+| `server.name` | `{ kind:"server", serverId }` | Public or server-member-visible server metadata. |
+| `channel.name` | `{ kind:"channel", channelId }` | Resolve against the viewer's ability to read that channel in the current server. |
+| `member.display_name` | `{ kind:"member", userId }` | Resolve against the viewer's ability to see that member in this server/context. |
+| `permission.action` | `{ kind:"permission", permission:"core.members.manage" }` | Resolve against a concrete Core Module permission. |
+| `external.browser.title` | `{ kind:"panel", panelId }` | External surface metadata; default withheld unless explicitly modeled. |
 
 Rules:
 
 - `gated` slots without a recognized `policyRef` / `resourceRef` are malformed and rejected.
+- All `policyRef` evaluation is scoped to the **current server context of the CoView session**. A `resourceRef` pointing at another server is malformed for V1; cross-server CoView requires explicit future design.
 - Producer-supplied policy refs are **claims**, not grants. The runtime evaluates them through its own roles, membership, plugin adapters, and render-mode rules.
 - `secret` slots do not carry a value and do not need an authorization rule, because no viewer can ever receive the value.
 - Every slot is validated against the **surface schema registry (§3.4)** before projection. The registry — not the producer — decides which slot ids exist on a surface and each slot's required origin; a producer can neither invent slots nor widen exposure.
@@ -204,12 +234,13 @@ type SurfaceType = "shell.breadcrumb" | "panel.header" | "external.browser" | /*
 
 type SlotSchema = {
   slotId: string;                 // exact id allowed on this surface
-  kind: CoViewSlot["kind"];       // required wire kind
+  kind: SlotKind;                 // required wire kind
   origin: SlotOrigin;             // REQUIRED origin — the producer cannot widen it
-  policyRef?: string;             // required ref name for gated slots
-  resourceRefShape?: string;      // e.g. "channelId" | "userId" | "permission.action"
+  policyRef?: PolicyRef;          // required ref name for gated slots
+  resourceRefShape?: ResourceRef["kind"]; // e.g. "channel" | "member" | "permission"
   placeholderShape: "synthetic" | "preserve-host-rect" | "absent";
-  producerValueAllowed: boolean;  // may the producer supply the value at all?
+  producerValueAllowed?: boolean; // default false; producer values are opt-in only
+  sizeLeakAccepted?: true;        // required when gated/secret uses preserve-host-rect
 };
 
 type SurfaceSchema = {
@@ -223,13 +254,13 @@ The registry says, for example:
 ```text
 shell.breadcrumb:
   slot channel_name  → { kind: text, origin: gated, policyRef: channel.name,
-                          resourceRefShape: channelId, placeholderShape: synthetic,
+                          resourceRefShape: channel, placeholderShape: synthetic,
                           producerValueAllowed: false }   # runtime resolves the value
   slot route_segment → { kind: text, origin: public, producerValueAllowed: true }
 panel.header:
   slot title         → { kind: text,   origin: public, producerValueAllowed: true }
   slot admin_action  → { kind: chrome, origin: gated,  policyRef: permission.action,
-                          resourceRefShape: "core.permissions.manage", ... }
+                          resourceRefShape: permission, ... }
 external.browser:
   slot title         → { kind: external, origin: gated, placeholderShape: synthetic,
                           producerValueAllowed: false }   # external surface, withheld by default
@@ -242,11 +273,18 @@ external.browser:
 - A claimed origin **wider** than the schema requires (schema says `gated`/`secret`, producer claims `public`) → reject. The producer can never *widen* a slot's exposure.
 - A `gated` slot **missing the required `policyRef` / `resourceRef` shape** → reject.
 - A **value present on a `secret` slot**, or a value present where `producerValueAllowed: false` → reject.
+- A **`local` slot present in any runtime-received frame** → reject. The producer should drop local slots at source; runtime rejection catches producer bugs rather than hiding them.
 - A value whose **shape does not match** the declared `kind` → reject.
+- A `gated` / `secret` slot using `placeholderShape: "preserve-host-rect"` without `sizeLeakAccepted: true` and a reviewer-visible justification in the schema comment → reject at schema-definition/test time. Synthetic or absent geometry is the default.
+- A surface type introduced by a newer producer but unknown to the runtime registry → reject as `unsupported` for the viewer and log a version/skew diagnostic. Rolling deploys must fail closed.
 
 **Producer claims are validated, not trusted.** The producer may *classify within the narrow rules the registry allows* — choose which registered slot is present, and supply a value only where `producerValueAllowed: true` — but it cannot invent slots, cannot relabel a registered `gated`/`secret` slot as `public`, and cannot mark a sensitive surface's value public. There is no "whatever the producer says is public": `public` means **this exact slot id on this exact surface is a known-safe public field**, per the registry.
 
 **Prefer runtime-resolved values over host-provided values.** For values the runtime already owns — channel names, member display names, permission/role labels, server settings — the schema sets `producerValueAllowed: false` and the host sends only the `resourceRef`. The runtime then **resolves the real value for each authorized viewer** (and withholds for the rest). This is strictly stronger than "host sent the value, runtime withholds it": the value never leaves the host for unauthorized viewers, and a buggy host cannot forge or leak it because it never sends one. Host-provided values are reserved for genuinely host-local chrome the runtime cannot resolve (the host's own shared input, a plugin label with no runtime adapter) — and only where the registry marks that exact slot safe.
+
+**Resolution failures are visible but fail closed.** Transient authorization uncertainty (role lookup error, stale member state, permission cache miss) withholds for that viewer and emits a diagnostic. A missing resolver/adapter for a registered `policyRef` is a deployment or registry bug: withhold the value for all viewers, log a session-level error, and expose an `unsupported` placeholder rather than silently behaving as a permanent blank. A deleted or mismatched `resourceRef` withholds and logs a resource diagnostic.
+
+**Registry changes are protocol changes.** Adding a surface type, slot id, `PolicyRef`, or resolver is a protocol PR subject to security review and regression tests. New registry entries must include origin, placeholder shape, producer-value policy, resolver behavior, and cache invalidation rules. Unknown registry versions fail closed as unsupported until the runtime understands them.
 
 ### 3.5 Where resolution happens — runtime-authoritative per-viewer projection
 
@@ -260,7 +298,7 @@ canonical state ──(runtime, per viewer, per frame)──▶ viewer-specific 
    local   → never present (dropped at producer)
 ```
 
-This means `WsCoViewState` is no longer forwarded "as-is." The broadcast path changes from one-blob-to-all to **resolve-then-send-per-viewer** (or, for efficiency, resolve-per-entitlement-class then send-per-class — see §10).
+This means `WsCoViewState` is no longer forwarded "as-is." The broadcast path changes from one-blob-to-all to **resolve-then-send-per-viewer** (or, for efficiency, resolve-per-entitlement-class then send-per-class — see §3.10).
 
 ### 3.6 Authorization source
 
@@ -268,6 +306,18 @@ Per-slot `gated` authorization is answered by the **runtime's existing authority
 
 - `as-host`: viewers may see the host's **layout and chrome structure** and may receive host-visible chrome affordances only when the relevant slot policy says the value is render-only chrome. It must never mean "send host-authorized data to the viewer." Gated data resolution still uses the viewer's own authority unless the value is explicitly public.
 - `as-viewer`: gated chrome slots resolve against **each viewer's own** permissions.
+
+Decision matrix:
+
+| Slot / surface | `as-host` viewer | `as-viewer` viewer |
+|---|---|---|
+| Public route/panel structure | Same host layout/chrome structure for all viewers. | Same shareable structure, rendered in viewer-relative mode where applicable. |
+| Gated channel name | Resolve against the viewer's own channel-read permission. | Resolve against the viewer's own channel-read permission. |
+| Gated admin action chrome | Resolve against the viewer's own `core.permissions.manage` (or concrete policy). | Resolve against the viewer's own `core.permissions.manage` (or concrete policy). |
+| Secret field | Placeholder only; no value exists. | Placeholder only; no value exists. |
+| External browser/plugin/live media region | External placeholder by design. | External placeholder by design. |
+
+The critical rule: **render mode controls layout/chrome presentation, not data authorization scope**. No viewer receives a gated value by borrowing the host's permissions.
 
 Crucially: **plugin record data (messages, member lists, attachments) is never a slot value of any origin.** It is not CoView state at all. It is fetched by the viewer's own plugin frontend under the viewer's JWT (spec-27 door 2). Slots model *shell chrome*, not plugin content. This keeps the boundary the spec already defends.
 
@@ -306,6 +356,18 @@ Resolving every slot per viewer at cursor frame rates would be wasteful and is u
 
 Consequence: a typical active session re-resolves slot values only when a gated value actually changes (rare), pays per-viewer cost on the slot-value lane alone, and runs cursor/pen at full rate with no authorization work. This keeps the per-viewer model inside spec-27's performance budgets (<150 ms host→viewer p95; cursor <80 ms). The lane separation must be designed into the protocol from CV-FOUND-1, not retrofitted.
 
+The first cache key must include every dimension that can change a viewer's projection:
+
+- current session id and render mode (`as-host` / `as-viewer`),
+- current server id (all V1 policy evaluation is server-scoped),
+- member id plus role-set/version for that server,
+- ban/kick/session-membership state,
+- CoView visibility membership (public blacklist or private whitelist),
+- resource-specific entitlement versions for all `resourceRef`s present in the slot-value lane (for example channel ACL version for channel-name slots),
+- resolver/registry version for the surface schema.
+
+Under-specifying this key is a data leak; over-specifying it is a performance miss. CV-FOUND-2 owns both the cache and tests proving viewers with different relevant entitlements cannot share a projection.
+
 ---
 
 ## 4. Security invariants
@@ -316,10 +378,11 @@ These are the acceptance criteria for "production CoView." Each is testable.
 2. **Secret values are structurally unrepresentable.** The viewer-facing state type has **no field** that can carry a `secret` slot's value. The producer has **no code path** that serializes a secret value. This is a type-system + serializer property, not a runtime check that could be bypassed.
 3. **Runtime authorization is authoritative.** Per-viewer slot resolution is computed in the runtime from the runtime's own authority (roles/permissions/render-mode/plugin adapters), never trusting a producer-supplied "this viewer may see X" hint.
 4. **Stale permissions fail closed.** If a viewer's entitlement for a gated slot is revoked (role change, removal from whitelist, ban), the next projection withholds it; on any uncertainty (auth lookup error, race) the runtime **withholds** rather than includes. Mirrors spec-27's mid-session revoke cascade (`host_permission_revoked`, `no_longer_invited`).
-5. **Malformed / over-budget frames are rejected, not truncated.** A frame exceeding `STATE_DIFF_BYTES_MAX` (16 KB) or `EVENT_PAYLOAD_BYTES_MAX` (4 KB), or failing structural validation (unknown slot kind, missing origin, `gated` without a recognized policy/resource ref, value present on a `secret` slot), is **rejected whole** with a typed error. Never silently clipped. (Spec-27 §Bounds and Limits already mandates this; we extend it to structural validation.)
-6. **Viewers cannot mutate host state.** The only viewer→server frames accepted are the allowed annotation/control frames (`co-view.cursor`, `co-view.pen.*`, `join/leave/snapshot.req`). No mutation IPC exists; a `secret`/`gated` value never round-trips from a viewer. (Spec-27: mutation channel "closed by construction.")
-7. **No client-side-only privacy.** Removing/disabling the viewer-side redaction UI must not expose any protected value, because protection is enforced before the bytes reach the viewer. Client-side markers may *drive* a slot's origin classification, but the *enforcement* is server-side projection + structural typing.
-8. **Shape leaks are intentional or absent.** `gated` slots may preserve host-measured geometry for layout parity. `secret` slots must use synthetic geometry or be absent; they never carry real value length or real measured content box unless the surface explicitly accepts that existence leak.
+5. **Resolution failures fail closed and are observable.** Transient auth uncertainty withholds. Missing resolvers/adapters for registered policies produce a session-level diagnostic plus an `unsupported` placeholder. Deleted or cross-server resources withhold and log. None of these paths include the protected value.
+6. **Malformed / over-budget frames are rejected, not truncated.** A frame exceeding `STATE_DIFF_BYTES_MAX` (16 KB) or `EVENT_PAYLOAD_BYTES_MAX` (4 KB), or failing structural validation (unknown slot kind, missing origin, `local` on the wire, `gated` without a recognized policy/resource ref, value present on a `secret` slot), is **rejected whole** with a typed error. Never silently clipped. (Spec-27 §Bounds and Limits already mandates this; we extend it to structural validation.)
+7. **Viewers cannot mutate host state.** The only viewer→server frames accepted are the allowed annotation/control frames (`co-view.cursor`, `co-view.pen.*`, `join/leave/snapshot.req`). No mutation IPC exists; a `secret`/`gated` value never round-trips from a viewer. (Spec-27: mutation channel "closed by construction.")
+8. **No client-side-only privacy.** Removing/disabling the viewer-side redaction UI must not expose any protected value, because protection is enforced before the bytes reach the viewer. Client-side markers may *drive* a slot's origin classification, but the *enforcement* is server-side projection + structural typing.
+9. **Shape leaks are intentional or absent.** `gated` slots may preserve host-measured geometry for layout parity only when the registry explicitly accepts the leak. `secret` slots must use synthetic geometry or be absent; they never carry real value length or real measured content box unless the surface explicitly accepts that existence leak.
 
 Supporting invariants carried over from spec-27 (kept, not re-derived here): cross-session frame isolation, anti-spoof member color from server meta, audit is metadata-only, pen/cursor rate caps reject-not-truncate.
 
@@ -338,7 +401,7 @@ Supporting invariants carried over from spec-27 (kept, not re-derived here): cro
 
 **The slice spans, minimally:**
 
-1. **Surface substrate type + registry entry** (`packages/protocol`): a typed `CoViewSurface` / `CoViewSlot { id, kind, origin, policyRef?, resourceRef?, placeholderShape?, value? }` model, the **viewer-facing** variant where `secret` slots cannot carry a value, **and the registered `SurfaceSchema` for `shell.breadcrumb` + `panel.header`** (the allowlist of slot ids / origins / refs the runtime validates against). Replace/augment the opaque `CoViewStateDiff` for these surfaces only (others stay on the legacy opaque path behind a flag — see PR sequence).
+1. **Surface substrate type + registry entry** (`packages/protocol`): typed `CoViewSurface`, `CoViewSlotCanonical`, `CoViewSlotProjected`, `PolicyRef`, `ResourceRef`, and the **registered `SurfaceSchema` for `shell.breadcrumb` + `panel.header`** (the allowlist of slot ids / origins / refs the runtime validates against). Replace/augment the opaque `CoViewStateDiff` for these surfaces only (others stay on the legacy opaque path behind a flag — see PR sequence).
 2. **Producer classification** (`apps/website/src/co-view/`): emit the breadcrumb surface as registered slots, derived from existing `data-uc-coview` markers + a small origin map. Drop `local` at source; never serialize `secret` values; for the gated slot, emit the `resourceRef` only (no value).
 3. **Runtime validation + per-viewer resolution** (`runtime/src/co-view/state-handlers.ts`): replace `broadcastToViewers` for this surface with a path that first **validates the surface against the registry (§3.4)** (reject unknown slots, widened origins, value-on-secret, disallowed producer values), then `resolveForViewer(session, member, canonicalSurface)` projects per viewer — consulting `rolesEngine` / plugin adapters + render mode and **resolving the gated slot's value from its `resourceRef`** for authorized viewers only.
 4. **Viewer renderer** (`apps/website/src/co-view/viewer-overlay.tsx`): render the resolved breadcrumb surface; gated-withheld → placeholder; secret → placeholder by construction.
@@ -355,10 +418,10 @@ Each PR is independently reviewable and ships its own security tests. The legacy
 | PR | Scope | Proves |
 |---|---|---|
 | **CV-FOUND-0** (this) | This planning doc. No engine code. | Design alignment; trust-boundary thesis agreed. |
-| **CV-FOUND-1** | Protocol: introduce `CoViewSurface` / `CoViewSlot` / `SlotOrigin` types, `policyRef` / `resourceRef`, placeholder-shape metadata, the **surface schema registry** (allowlisted surface types + slot schemas), explicit viewer limitation states (§3.9), the separated update lanes (§3.10), and the viewer-facing variant where `secret` is unrepresentable. Zod schemas reject malformed frames and value-bearing secrets. **Additive** — opaque `CoViewStateDiff` untouched. | The wire can express structure + origin + authority + a registry; secret is structurally absent in the viewer type; intentional gaps have explicit states. |
+| **CV-FOUND-1** | Protocol: introduce `CoViewSurface` / discriminated `CoViewSlotCanonical` / `CoViewSlotProjected` / `SlotOrigin` / `PolicyRef` / `ResourceRef` types, placeholder-shape metadata, the **surface schema registry** (allowlisted surface types + slot schemas), explicit viewer limitation states (§3.9), the separated update lanes (§3.10), and the viewer-facing variant where `secret` is unrepresentable. Zod schemas reject malformed frames, local-origin wire frames, value-bearing secrets, and `preserve-host-rect` without explicit `sizeLeakAccepted`; schema/defaulting treats missing `producerValueAllowed` as `false`. **Additive** — opaque `CoViewStateDiff` untouched. | The wire can express structure + origin + authority + a registry; secret is structurally absent in the viewer type; intentional gaps have explicit states. |
 | **CV-FOUND-2** | Runtime: registry-backed structural validation (reject unknown surface/slot, missing origin, **widened origin**, gated-without-policy, value-on-secret, **disallowed producer value**, over-budget) + `resolveForViewer()` projection + the first **entitlement-class projection cache**. Unit tests prove gated withholding, runtime-resolved values, cache-key separation, and cache invalidation against representative runtime policies. **No producer wiring yet.** | Per-viewer withholding + registry validation + fail-closed work in isolation, with the production performance shape active before any real-surface end-to-end slice. |
-| **CV-FOUND-3** | Producer: classify the **breadcrumb/panel-header** surface into registered slots; emit `resourceRef` (not value) for runtime-resolved gated slots; drop `local`; never emit `secret` values. Serializer tests prove local drops and secret values never serialize. Behind `coview_surface_v2` per-surface flag. | Host emits the substrate for one surface without making the producer the privacy boundary. |
-| **CV-FOUND-4** | Runtime broadcast path: route the v2 surface through `resolveForViewer` per viewer (others stay legacy). Viewer renderer renders resolved surface incl. withheld/secret placeholders and the first explicit `withheld` / `external` / `unsupported` limitation states. Add the end-to-end byte-capture test. | **End-to-end vertical slice** for one surface; protected bytes never reach an unauthorized viewer; absent content reads as intentional, not broken. |
+| **CV-FOUND-3** | Producer: classify the **breadcrumb/panel-header** surface into registered slots; emit `resourceRef` (not value) for runtime-resolved gated slots; drop `local`; never emit `secret` values. Serializer tests prove local drops and secret values never serialize, and at least one integration test pipes the producer's serialized output through the CV-FOUND-2 registry validator before any broadcast wiring exists. Behind `coview_surface_v2` per-surface flag. | Host emits valid substrate for one surface without making the producer the privacy boundary. |
+| **CV-FOUND-4** | Runtime broadcast path: route the v2 surface through `resolveForViewer` per viewer (others stay legacy). Viewer renderer renders resolved surface incl. withheld/secret placeholders and the first explicit `withheld` / `external` / `unsupported` limitation states. Join snapshots and gap-recovery `snapshot.res` run through the same projection path as live state. Add end-to-end byte-capture tests for live and snapshot parity. | **End-to-end vertical slice** for one surface; protected bytes never reach an unauthorized viewer; absent content reads as intentional, not broken. |
 | **CV-FOUND-5** | Permission-change and cache-invalidation hardening: stale permission fail-closed, entitlement-class cache invalidation, snapshot projection parity. | The invariants in §4 stay true under role/member/permission changes. |
 | **CV-FOUND-6** | Migrate remaining surfaces (modals, popovers, inputs, tabs, scroll, panel visibility) to slots; retire the opaque path + the producer-side-only redaction as the *boundary*; keep markers as origin hints. | Whole shell on the substrate; producer-authoritative privacy removed. |
 
@@ -370,14 +433,19 @@ CV-FOUND-1 through -2 are reviewable with zero UI. CV-FOUND-4 is the first PR th
 
 ## 7. Test strategy
 
-- **Structural / type-level:** a compile-time assertion (type test) that the viewer-facing state type has no field able to carry a `secret` value. A serializer unit test that, given a surface with a `secret` slot, the produced frame has no value field for it under any input.
+- **Structural / type-level:** compile-time assertions (type tests) that the viewer-facing state type has no field able to carry a `secret` value and no member for `local`. A serializer unit test that, given a surface with a `secret` slot, the produced frame has no value field for it under any input.
 - **Surface schema registry:** assert unknown surface types and unknown slot ids reject; assert a producer claim that **widens** a registered `gated` / `secret` slot to `public` rejects; assert a host-supplied value on a `producerValueAllowed: false` slot rejects; assert `public` is honored only for registry-allowlisted slot ids.
+- **Local-origin rejection:** assert any runtime-received frame carrying `origin: "local"` rejects whole. Silent dropping is allowed only in the producer serializer before the frame is sent.
 - **Policy/reference + runtime resolution:** assert `gated` slots require recognized `policyRef` / `resourceRef`, reject unknown policies, reject resource ids the runtime cannot evaluate, and fail closed on auth lookup errors; assert a `producerValueAllowed: false` gated slot's value is **resolved by the runtime from `resourceRef`** for authorized viewers and never read from the producer.
+- **Server-scope enforcement:** assert `resourceRef`s from a different server reject/withhold with a diagnostic; V1 policy resolution is scoped to the CoView session's current server.
+- **Resolver failure observability:** assert auth uncertainty withholds; missing resolver/adapter yields a session-level diagnostic and `unsupported` placeholder; deleted resources withhold and log.
+- **Producer-validator integration:** CV-FOUND-3 pipes the real breadcrumb/panel-header producer output through the CV-FOUND-2 registry validator, catching producer/schema drift before broadcast integration.
 - **Per-viewer withholding (the headline test):** spin a session with host + two viewers (one authorized for the gated slot's real policy/resource, one not). Drive a canonical frame containing the gated value. Capture the **exact bytes** delivered to each viewer connection (via the runtime's `sendToConnection` seam already mocked in `handlers.test.ts`). Assert: authorized viewer's bytes contain the value; unauthorized viewer's bytes contain the placeholder and **do not** contain the value substring.
 - **Fail-closed on stale permission:** revoke the gated entitlement mid-session; assert the next projection withholds; assert an injected auth-lookup error withholds (not includes).
 - **Reject-not-truncate:** over-budget frame (>16 KB) and malformed frame (value on a secret slot, unknown slot kind, missing origin, gated slot missing policy/resource refs) each rejected whole with a typed error; nothing partial broadcast.
 - **Snapshot parity:** join-time `current_state_snapshot` and gap-recovery `snapshot.res` pass through the same projection path as live state; a value withheld live is also withheld in snapshots.
 - **Shape-leak checks:** secret placeholders use synthetic geometry or absence according to `placeholderShape`; they never carry real value length or real measured content size.
+- **Size-leak acceptance:** assert any gated/secret slot using `preserve-host-rect` has `sizeLeakAccepted: true` and a schema-level justification; otherwise schema validation fails.
 - **No viewer mutation:** assert no accepted viewer→server frame can carry a state value back to the host; only cursor/pen/lifecycle frames accepted (extends existing state-handlers tests).
 - **Regression guard for the boundary:** a test enumerating allowed slot kinds that fails if a new kind is added without an origin rule (the executable form of spec-27's allowlist test, now origin-aware).
 - **Every implementation PR carries its own security tests:** CV-FOUND-1 validates schemas, CV-FOUND-2 validates resolver withholding, CV-FOUND-3 validates producer serialization, CV-FOUND-4 validates end-to-end bytes, CV-FOUND-5 validates invalidation/snapshot parity.
