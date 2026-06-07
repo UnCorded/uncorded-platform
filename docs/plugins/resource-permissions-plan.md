@@ -214,8 +214,9 @@ Inheritance rules:
 - Inheritance is resolved at evaluation time against the **current** parent ACL, so a parent
   revocation propagates to children without rewriting child rows. (This makes parent ACL version a
   cache-key input for child evaluations — see §11.)
-- Depth is bounded; cycles are rejected at create time. A pathological depth limit (e.g. 16) keeps
-  resolution cost bounded and is a registry constant, not per-plugin.
+- Depth is bounded; cycles are rejected at create time. V1 uses a maximum parent-chain depth of
+  **16**. The depth limit keeps resolution cost, cache-key size, and parent-version vectors bounded
+  and is a registry constant, not per-plugin.
 
 This is what lets a "photo inherits album read permission" be declared once. The family-album plugin
 never writes a per-photo ACL for the common case.
@@ -273,6 +274,10 @@ Actions are **not** a strict hierarchy by default. `admin` does not imply `read`
 says so; this avoids surprising "admin can always see content" leaks for resources where management
 and content visibility are intentionally separate. The registry may declare implications explicitly
 (e.g. `edit ⇒ read`) per resource type.
+
+`comment` means the viewer is authorized to comment; this layer only answers that authorization
+question. Actual write execution remains a separate, explicitly designed system (§3), so granting
+`comment` does not add a viewer mutation path to CoView.
 
 ### 5.2 Plugin-defined actions (typed and registered)
 
@@ -474,18 +479,17 @@ so CoView can map resolver output to projected output without a translation laye
 type ViewerContext = {
   userId: string;
   serverId: string;
-  // resolved lazily by the resolver, but carried for cache-key construction:
-  roleIds?: number[];
-  isOwner?: boolean;
-  isBanned?: boolean;
 };
 ```
 
-The resolver, not the caller, is authoritative for `roleIds`/`isOwner`/`isBanned`; values passed in
-are hints for cache-key construction and are re-verified. The current `RolesEngine` is a single-role
-model (`getRole(userId)` returns one effective role), so V1 serializes `roleIds` as a one-item
-canonical set. The list shape is reserved for future multi-role/group support and keeps this plan
-aligned with CoView's entitlement-class vocabulary.
+Authorization-affecting facts are not caller-supplied. The resolver derives role, owner, ban, and
+resource-membership facts from authoritative runtime sources before making a decision. Callers may
+pass a separate prefetch/cache-key hint in future implementations, but that hint must never be used
+for an allow/deny fast path until the resolver has re-derived or version-validated the same facts.
+The current `RolesEngine` is a single-role model (`getRole(userId)` returns one effective role), so
+V1 serializes role membership as a one-item canonical set when building entitlement-class keys. The
+list shape is reserved for future multi-role/group support and keeps this plan aligned with CoView's
+entitlement-class vocabulary.
 
 ### 7.3 Plugin adapter interface
 
@@ -566,6 +570,7 @@ platform.resources.define({
   parentType: "album",
   actions: ["read", "comment", "download", "admin"],
   inheritableActions: ["read", "comment"],
+  producerValueAllowed: false,
   valueSlots: {
     pixels:  { policy: "photo.read" },
     caption: { policy: "photo.read" },
@@ -593,6 +598,10 @@ await platform.resources.revoke(albumRef, { kind: "user", userId: sarahId }, "re
 // it is for UI affordances only. The wire boundary is still runtime-enforced.
 const canRead = await platform.resources.check(viewerId, photoRef, "read");
 ```
+
+> Security note: `platform.resources.check` is for UI affordances only. A plugin may use it to decide
+> whether to show local hints, but it is not a security boundary. Runtime resolver checks still gate
+> CoView projection and any future server-side action execution.
 
 ### 8.2 Frontend: resource-provenanced render primitives
 
@@ -781,6 +790,14 @@ Per CoView's update lanes (foundation-plan §4.8), hover/focus/scroll/cursor fra
 change and therefore trigger **zero** resolver calls. The resolver is consulted only on value-content
 or value-metadata changes, or on a version bump. A 30 Hz cursor stream must never touch the ACL store.
 
+### 11.5 Adapter call fan-out is bounded
+
+Cache misses after a resource ACL version bump can otherwise fan out into many parallel
+`resolveValue` adapter IPC calls during a large CoView session. RP-FOUND-8 must define and test a
+per-plugin/per-server concurrency bound for adapter value materialization, plus request coalescing
+for identical `(resourceRef, slot, valueVersion)` misses. This keeps a mass invalidation from turning
+one permission change into an unbounded plugin IPC storm.
+
 ---
 
 ## 12. PR Sequence
@@ -798,8 +815,8 @@ CV-FOUND-7 (CoView's plugin SDK primitives), since CV-FOUND-7 consumes this reso
 | **RP-FOUND-3** | ACL resolver: precedence (§6.4), inheritance (§6.5), role/everyone/owner expansion via `RolesEngine`, ban short-circuit, fail-closed paths, `assertGrantSafe`-style delegated-grant guard. Pure decision engine + exhaustive unit tests. | `viewer + resourceRef + action → decision` is correct, deny-wins, and fail-closed. |
 | **RP-FOUND-4** | SDK backend APIs: `resources.define/create/grant/revoke/check` over IPC, plugin adapter (`describe` + authorized `resolveValue` materialization) interface, capability declaration to use them. Tests prove a `producerValueAllowed: false` slot's viewer value comes from the adapter path, not the host render frame. | Plugins can declare and govern resources through the SDK; checks pass through to the runtime resolver only, and protected values have a runtime-controlled source. |
 | **RP-FOUND-5** | SDK frontend primitives: `ResourceText`/`ResourceImage`/`ResourceIcon`/`ResourceValue` emitting gated `CoViewValueRef`s; literal render when CoView inactive. | A plugin renders resource-backed UI once; provenance travels for projection. |
-| **RP-FOUND-6** | Demo family-album-style plugin or fixture exercising define → create → inherit → grant → render, with a resolver integration test (Billy sees, Sarah withheld). | The end-to-end model holds on a realistic plugin without a second CoView UI. |
-| **RP-FOUND-7** | CoView integration: CoView's projection path calls the resolver for `pluginResource` refs; version stamps feed the entitlement-class cache. (Coordinates with CV-FOUND-7.) | CoView projects plugin values per viewer through this authority. |
+| **RP-FOUND-6** | Demo family-album-style plugin or fixture exercising define → create → inherit → grant → render, with a resolver integration test (Billy sees, Sarah withheld). Blocking prerequisite for RP-FOUND-7. | The end-to-end model holds on a realistic plugin without a second CoView UI. |
+| **RP-FOUND-7** | CoView integration: CoView's projection path calls the resolver for `pluginResource` refs; version stamps feed the entitlement-class cache. (Coordinates with CV-FOUND-7.) Requires RP-FOUND-6's fixture to be green. | CoView projects plugin values per viewer through this authority. |
 | **RP-FOUND-8** | Hardening/perf/invalidation: entitlement-class cache, version-bump invalidation wired to `PermissionChangedEvent`, ban/revocation/stale tests, projection benchmark at fixed viewer × class counts, zero-resolver-work assertion for interaction frames. | Revocation/ban fail closed; interaction frames do no auth work; cache sharing is safe and narrow. |
 
 ---
@@ -838,6 +855,13 @@ CV-FOUND-7 (CoView's plugin SDK primitives), since CV-FOUND-7 consumes this reso
    owners. Owners may receive explicit management powers by registry policy, but reading protected
    plugin content should require an explicit ACL/role grant. This is safer for CoView because
    host-owner status alone should not cause private plugin values to project as visible.
+8. **Time-limited grants.** Does V1 support `expiresAt` on ACL rows? If not, expiry is explicitly
+   deferred to post-V1 and RP-FOUND-2 must document the migration path. Delegated `share` grants are
+   the likely first use case for temporary access.
+9. **Adapter isolation and audit enforcement.** Which adapter trust mitigations are V1 requirements:
+   process isolation, capability gating, metadata-only audit logs for `resolveValue`, value/version
+   stamps, and/or content-addressing for imported assets? The answer determines whether the adapter
+   boundary is trusted by enforcement or only by convention.
 
 ---
 
