@@ -135,7 +135,7 @@ A slot tagged `origin: "gated"` says "this value requires authorization," but it
 
 Replace the opaque `Record<string, unknown>` state with a **content-free structure model**: a tree of **surfaces** (shell regions, panels, chrome) each containing typed **slots**. A slot describes a *place where a value goes*, the value's **origin**, and, for protected values, the **authority reference** the runtime uses to decide who may see it. The structure (which panels exist, where, what shape) is freely shareable; the *values* are governed by origin plus policy.
 
-```
+```text
 Surface (e.g. panel "L1", modal "m2", breadcrumb)
  └─ Slot { id, kind, origin, policyRef?, resourceRef?, placeholderShape?, value? }
 ```
@@ -220,7 +220,7 @@ type SurfaceSchema = {
 
 The registry says, for example:
 
-```
+```text
 shell.breadcrumb:
   slot channel_name  → { kind: text, origin: gated, policyRef: channel.name,
                           resourceRefShape: channelId, placeholderShape: synthetic,
@@ -252,7 +252,7 @@ external.browser:
 
 The producer emits a **single canonical frame** describing the surface tree with slots tagged by origin. The runtime holds the canonical state and, **for each viewer**, computes a **projection**:
 
-```
+```text
 canonical state ──(runtime, per viewer, per frame)──▶ viewer-specific resolved frame
    public  → copied
    gated   → value included iff runtime authorizes (viewer, policyRef, resourceRef); else placeholder
@@ -389,7 +389,7 @@ Verification gates per repo discipline: `bun test` and `bun typecheck` clean bef
 
 - **Per-viewer resolution cost.** Resolving every frame per viewer at 30 Hz × up to 50 viewers is more CPU than forward-the-blob. The mitigation is the **update-lane separation + entitlement-class caching in §3.9** — it must be designed into the protocol from CV-FOUND-1, not retrofitted. Measure against spec-27 perf budgets (<150 ms host→viewer p95).
 - **Snapshot path must also project.** `WsCoViewJoinAck.current_state_snapshot` and gap-recovery `snapshot.res` must run through the same per-viewer resolution — otherwise the join path leaks what the live path withholds. Call out explicitly in CV-FOUND-4.
-- **Producer remains a classifier, but not the grant authority.** A buggy producer can still mislabel a `secret` as `public`. The structural guarantee covers *secret values that are correctly classified*, and `policyRef` / `resourceRef` lets the runtime validate many gated claims, but semantic mislabeling remains a producer bug. Mitigation: keep input values fail-closed (default `secret`/`gated`, opt into `public`), require policy refs for gated values, and lint/test the origin map. This matches spec-27's "fail closed" posture and is the honest limit of the boundary (spec-27 §What we do not defend against: a malicious host deceives their own viewers).
+- **Producer remains a classifier, but not the grant authority.** For registered surfaces and slots (§3.4), the producer cannot widen a protected slot to `public`: the runtime rejects unknown slots, wrong origins, missing policy refs, and disallowed producer values. The remaining mislabeling risk is limited to unregistered / unmodeled surfaces and slots that are not yet covered by the registry guarantee during the migration to CV-FOUND-6. Mitigation for that migration window: keep input values fail-closed (default `secret`/`gated`, opt into `public` only through the registry), require policy refs for gated values, and lint/test the origin map. This matches spec-27's "fail closed" posture and is the honest limit of the boundary until all sensitive shell surfaces are modeled.
 - **Two privacy vocabularies during migration.** Legacy `redactions` (panel/plugin/selector) and new slot origins coexist until CV-FOUND-6. Keep `redactions` as a coarse surface-level gate that *maps onto* origins; don't let them diverge.
 
 ---
