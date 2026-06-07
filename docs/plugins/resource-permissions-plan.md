@@ -229,6 +229,12 @@ A resource has two distinct surfaces, and the distinction is load-bearing:
 | **Metadata** | existence, `resourceType`, child count, structural shape, layout box | Governed by the registry; *may* be exposed to non-readers if the schema accepts the leak (§6 of CoView plan — `preserve-host-rect`, count leaks). Default: existence/count **not** leaked. |
 | **Protected value content** | album title text, photo pixels, caption, document body | Gated by `read` (or a finer value-level `policyRef`). Default: **withheld** from non-readers. |
 
+The existence/count decision is not cosmetic: it determines whether an unauthorized viewer sees
+fourteen message-shaped placeholders, a stable synthetic skeleton, or a single hidden-content state.
+Default V1 behavior is **synthetic/no count leak** unless a resource type explicitly accepts
+existence/count leakage in its schema. This must be resolved for the first CoView text-channel slice
+before CV-FOUND-4 ships, not deferred to visual polish.
+
 A **value slot** is a named data-bearing field on a resource that the SDK can bind a render value to.
 The registry maps each slot to a `policyRef`:
 
@@ -287,9 +293,11 @@ Resource permissions **compose with** the role engine; they do not bypass it:
 
 - A grant may target a **role** ("everyone with role `family`"), in which case role membership is
   resolved through the existing `RolesEngine`.
-- Owner bypass and level hierarchy continue to apply at the server level — a server owner can be made
-  an implicit `admin` on plugin resources by registry policy, but this is an explicit registry
-  decision, not a silent backdoor, because CoView leaks would otherwise follow from it.
+- Owner bypass and level hierarchy continue to apply at the server level for server-level permission
+  management. They do **not** imply plugin resource `read` in V1. A server owner may receive
+  resource-management powers only through explicit ACL or explicit registry policy, and content
+  `read` still requires an explicit resource grant. This avoids surprising CoView leaks where a
+  server owner sees private plugin content merely because they own the server.
 - Named server permissions (e.g. a plugin's `family-album.manage`) can still gate *plugin-wide*
   operations; resource ACLs gate *per-resource* ones. Both can be required.
 
@@ -514,6 +522,15 @@ frontend may render the literal value locally, but the CoView render tree carrie
 `resourceRef` + slot. The real value sent to an authorized viewer comes from the runtime-controlled
 adapter path, not from Dad's browser.
 
+The adapter is still a **trusted plugin-runtime boundary**, not a proof system. If a malicious or
+buggy plugin returns Sarah's photo bytes for `photoId=img-001`, the runtime can verify that the
+viewer is authorized for `img-001`, but it cannot semantically prove the returned bytes are the
+correct bytes for that id. Mitigations belong in the implementation plan: plugin process isolation,
+adapter capability gating, metadata-only audit logs for `resolveValue` calls, value/version stamps,
+and optional future content-addressing or checksum validation for imported assets. This is why
+registry-owned ACLs are necessary but not sufficient; plugin adapters remain part of the trusted
+computing base for plugin-owned content.
+
 ### 7.4 CoView consumes these APIs
 
 CoView's projection path (foundation-plan §4.6) replaces "resolve values per entitlement class" with
@@ -617,6 +634,13 @@ plugin author they look like ordinary components:
 - The author writes their UI **once**. Buttons mirror as controls; resource slots project as values.
   There is no second CoView component tree. This is the central product requirement.
 
+For image/canvas-like content, "resource-provenanced" means the projected value is materialized from a
+registered value slot through the runtime adapter or platform storage path. A plugin cannot make
+arbitrary frontend pixels safe by wrapping them in `ResourceImage` with a made-up `resourceRef`: the
+runtime validates the registered resource type, slot, action, and value source. Unknown pixels,
+external URLs, raw canvas buffers, and values not produced by the registered adapter path are
+unprovenanced and withheld for unauthorized viewers.
+
 ### 8.3 The family-album walkthrough
 
 1. Dad's plugin calls `platform.resources.define` for `album` and `photo` at boot.
@@ -683,17 +707,21 @@ per-viewer value/action decision for plugin slots.
 7. **Unprovenanced plugin data cannot be safely projected.** If a value carries no `resourceRef`,
    this layer does not invent one; the consumer withholds. Provenance is required for visibility, not
    assumed.
-8. **No protected byte crosses an unauthorized viewer's wire.** The resolver returns `withheld` *before*
+8. **Adapters are trusted value providers, not authorization authorities.** The runtime decides whether
+   a viewer may receive a value; the plugin adapter supplies the value after authorization. Adapter
+   calls must be capability-gated, audited by metadata, versioned, and isolated because the runtime
+   cannot prove plugin-returned bytes are semantically correct for a resource id.
+9. **No protected byte crosses an unauthorized viewer's wire.** The resolver returns `withheld` *before*
    the value is serialized toward a viewer. Client-side redaction is not the boundary (CoView plan §5.4).
-9. **Secret slots are unrepresentable on the viewer wire.** A slot classified secret (credentials,
+10. **Secret slots are unrepresentable on the viewer wire.** A slot classified secret (credentials,
    tokens) is never carried as a resolvable value; it resolves only to a placeholder or absent, mirroring
    CoView's `origin: "secret"` (foundation-plan §4.3). The resolver has no path that returns a secret
    value to a viewer.
-10. **Authorization uncertainty withholds.** Resolver errors, deleted resources, version it cannot
+11. **Authorization uncertainty withholds.** Resolver errors, deleted resources, version it cannot
     reconcile, banned principal → withhold, log a diagnostic, never fall open.
-11. **Delegated grants cannot escalate.** `share` is bounded by the granter's own held actions
+12. **Delegated grants cannot escalate.** `share` is bounded by the granter's own held actions
     (§6.7), mirroring `assertGrantSafe`.
-12. **Action authority is separate from visibility.** `canPluginResourceAction` is evaluated
+13. **Action authority is separate from visibility.** `canPluginResourceAction` is evaluated
     independently of `canReadPluginResource`; seeing a value (or a control) never implies the right to
     mutate it. This layer answers the question but executes nothing.
 
@@ -778,22 +806,24 @@ CV-FOUND-7 (CoView's plugin SDK primitives), since CV-FOUND-7 consumes this reso
 
 ## 13. Open Questions
 
-1. **Persistence location.** Do plugin resource ACLs live in core (`core.db`, alongside roles) so the
+1. **Persistence location — blocking before RP-FOUND-2.** Do plugin resource ACLs live in core (`core.db`, alongside roles) so the
    runtime resolver can read them without an IPC round-trip per check, or in the plugin's own SQLite
    with the runtime reading via adapter? Core-owned ACLs make the resolver fast and authoritative;
    plugin-owned ACLs keep data local to the plugin but add IPC latency and a trust question. Leaning
    core-owned ACL rows keyed by `(serverId, pluginSlug, resourceType, resourceId)`, plugin-owned
-   *content*. Needs a decision before RP-FOUND-2.
+   *content*. This is not optional implementation detail: RP-FOUND-2 must not start until this is
+   decided, because the resolver/cache design depends on whether ACL rows are locally readable.
 2. **Role/group integration depth.** Do we expose plugin-defined groups, or only reuse server roles
    for `role` principals? Reusing server roles is simpler and consistent; plugin-defined groups may be
    needed for "the kids" that does not map to a server role.
 3. **Custom action naming + collision.** Confirm the namespacing rule (`pluginSlug:action`) and
    whether base action names can be shadowed/redefined per resource type (proposed: no — base actions
    are reserved).
-4. **Existence / count leakage.** For an unauthorized viewer, may CoView reveal that a resource
+4. **Existence / count leakage — blocking before CV-FOUND-4.** For an unauthorized viewer, may CoView reveal that a resource
    exists or how many children it has (row count, photo count)? CoView plan §11.1 asks the same about
    message counts. Default here: existence/count **not** leaked unless the slot/registry accepts the
-   leak (mirrors `preserve-host-rect`). Confirm per resource type.
+   leak (mirrors `preserve-host-rect`). The first text-channel viewer slice needs this answered before
+   it renders unauthorized placeholders.
 5. **Inheritance semantics edge cases.** Re-parenting a resource (move photo to another album) — does
    it re-evaluate against the new parent immediately (yes, by version bump) and should it ever be
    blocked if it would broaden access? Also: multi-parent resources (a photo in two albums) — out of
@@ -804,10 +834,10 @@ CV-FOUND-7 (CoView's plugin SDK primitives), since CV-FOUND-7 consumes this reso
    runtime-governed `external.metadata.read`-style resource, or require import into a plugin resource
    first? CoView plan §4.4 already reserves `external.metadata.read`; this layer should define how a
    plugin opts external content into a `resourceRef`.
-7. **Owner bypass for resources.** Should a server owner implicitly hold `admin`/`read` on all plugin
-   resources (operational convenience) or must even owners be explicitly granted (stronger privacy,
-   matches CoView's deliberate `co-view.host` default-off stance)? This is a product call with CoView
-   leak consequences (§5.3).
+7. **Owner bypass for resources.** Recommendation for V1: no implicit content `read` bypass for server
+   owners. Owners may receive explicit management powers by registry policy, but reading protected
+   plugin content should require an explicit ACL/role grant. This is safer for CoView because
+   host-owner status alone should not cause private plugin values to project as visible.
 
 ---
 
