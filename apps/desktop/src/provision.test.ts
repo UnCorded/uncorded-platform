@@ -16,6 +16,15 @@ const realNodeFs = { ..._realNodeFs };
 const realNodeFsp = { ..._realNodeFsp };
 const realNodeOs = { ..._realNodeOs };
 
+// Capture the real ./docker surface too. We mock it below for provision's own
+// tests, and Bun's mock.module is process-global: on platforms where it does
+// not auto-reset between files (Linux CI), the stripped mock would otherwise
+// leak into docker.test.ts. afterAll restores the genuine module. (docker.ts
+// only imports child_process/node:fs/docker-pull-api — no electron — so loading
+// it here is side-effect free.)
+import * as _realDocker from "./docker";
+const realDocker = { ..._realDocker };
+
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
@@ -215,6 +224,7 @@ afterAll(async () => {
     mock.module("node:fs", () => realNodeFs),
     mock.module("node:fs/promises", () => realNodeFsp),
     mock.module("node:os", () => realNodeOs),
+    mock.module("./docker", () => realDocker),
   ]);
 });
 

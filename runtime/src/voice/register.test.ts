@@ -214,9 +214,16 @@ function setupFs(label: string, pluginSlug: string): FsHarness {
   const manifest = validManifest(pluginSlug);
   manifest.managed_services = ["livekit"];
   writeFileSync(join(pluginDir, "manifest.json"), JSON.stringify(manifest));
+  // Stay alive after the ready handshake. A real plugin backend is a
+  // long-lived process; a fixture that exits immediately trips the subprocess
+  // crash/respawn loop (subprocess.ts handleExit → respawn → onRespawn
+  // re-claim in main.ts), so the supervisor records extra claims. That race is
+  // invisible on Windows but surfaces on Linux CI, where the respawn timer can
+  // fire before the test's claim-count assertion. Keeping the process alive
+  // (killed by the harness on shutdown) makes claim() fire exactly once.
   writeFileSync(
     join(pluginDir, "backend", "index.ts"),
-    `process.stdout.write("IPC:" + JSON.stringify({ type: "ready" }) + "\\n");`,
+    `process.stdout.write("IPC:" + JSON.stringify({ type: "ready" }) + "\\n");\nsetInterval(() => {}, 1 << 30);`,
   );
   mkdirSync(join(dataDir, "plugins", pluginSlug), { recursive: true });
 

@@ -1,4 +1,4 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, setDefaultTimeout } from "bun:test";
 import { SubprocessManager } from "./subprocess";
 import {
   createRestartTracker,
@@ -17,7 +17,21 @@ import { resolve } from "path";
 const FIXTURES_DIR = resolve(import.meta.dir, "__fixtures__");
 const DATA_DIR = "/tmp/uncorded-test";
 const API_VERSION = "1.0.0";
-const SHORT_TIMEOUT = 2000; // 2s for tests
+// These tests spawn real Bun subprocesses and wait on the IPC ready handshake +
+// first message. Under load on a 2-core Ubuntu CI runner a cold subprocess
+// cold-start can intermittently blow past Bun's 5s default per-test timeout
+// (observed: a spawn still mid-handshake when the test was killed at 5000ms),
+// which flipped these green-on-Windows tests red on CI. Raise the per-file
+// budget so a slow-but-valid spawn completes instead of racing the deadline.
+// The success path still resolves the instant the child reports ready, so this
+// only adds headroom — it never slows a healthy run.
+setDefaultTimeout(20_000);
+
+// Ready-handshake budget for spawn() in these tests. Must comfortably exceed
+// worst-case cold-start (and stay under the per-test budget above) so a slow
+// spawn resolves result.ok=true rather than expiring. The one test that asserts
+// timeout/crash behavior sets its own explicit short budget inline.
+const SHORT_TIMEOUT = 15000; // 15s (was 2s — too tight for cold-start under CI load)
 
 // ---------------------------------------------------------------------------
 // RestartTracker (pure unit tests)

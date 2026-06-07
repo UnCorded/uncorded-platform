@@ -1,7 +1,18 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+// secret-store.ts resolves the legacy migration root via os.homedir(). The
+// migration test redirects that root by setting process.env.HOME/USERPROFILE,
+// but Bun's os.homedir() on Linux does not reflect a mutated HOME (it resolves
+// from the passwd database), so the test only passed on Windows. Mock homedir
+// directly — driven by `homedirOverride` — so the test is deterministic on
+// every platform. Defaulting the override to the per-test scratch dir also
+// keeps every test hermetic (migration never touches the real user home).
+import * as _realOs from "os";
+const realOs = { ..._realOs };
+let homedirOverride: string | null = null;
 
 const osSecrets = new Map<string, string>();
 let packaged = false;
@@ -63,7 +74,16 @@ beforeAll(async () => {
     Entry: MockEntry,
   }));
 
+  await mock.module("os", () => ({
+    ...realOs,
+    homedir: () => homedirOverride ?? realOs.homedir(),
+  }));
+
   secretStoreModule = await import("./secret-store");
+});
+
+afterAll(async () => {
+  await mock.module("os", () => realOs);
 });
 
 beforeEach(() => {
@@ -72,6 +92,9 @@ beforeEach(() => {
   osSecrets.clear();
   scratchRoot = mkdtempSync(path.join(tmpdir(), "uncorded-secret-store-"));
   userDataDir = scratchRoot;
+  // Hermetic default: legacy-home scans resolve under the scratch dir, never
+  // the real user home. Tests that exercise home-based migration override this.
+  homedirOverride = scratchRoot;
 });
 
 afterEach(() => {
@@ -145,18 +168,9 @@ describe("secret migrations", () => {
       "utf8",
     );
 
-    const originalHome = process.env["HOME"];
-    const originalUserProfile = process.env["USERPROFILE"];
-    process.env["HOME"] = homeDir;
-    process.env["USERPROFILE"] = homeDir;
-    try {
-      secretStoreModule.migrateSecrets();
-    } finally {
-      if (originalHome === undefined) delete process.env["HOME"];
-      else process.env["HOME"] = originalHome;
-      if (originalUserProfile === undefined) delete process.env["USERPROFILE"];
-      else process.env["USERPROFILE"] = originalUserProfile;
-    }
+    // Redirect os.homedir() (mocked in beforeAll) at the legacy home root.
+    homedirOverride = homeDir;
+    secretStoreModule.migrateSecrets();
 
     expect(secretStoreModule.getSecret("tunnel:srv_abc")).toBe("legacy-token");
     expect(existsSync(path.join(volumePath, "config", "tunnel.json"))).toBe(false);

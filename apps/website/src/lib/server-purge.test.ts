@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
 // server-purge hard-imports the ws disconnect/abortReconnect pair, the
 // servers store, and the feedback helper — all of them side-effectful at
@@ -12,19 +12,48 @@ const showInlineStatus = mock<(msg: string, severity: "info" | "warning" | "erro
 
 let purgeModule: typeof import("./server-purge");
 
+// Held at module scope so afterAll can restore the genuine modules. The
+// ...real spread keeps the surface complete for files that load while these
+// mocks are live, but the *overridden* members (e.g. a no-op showInlineStatus)
+// still bleed into feedback.test.ts on platforms where Bun's process-global
+// mock.module does not auto-reset between files (Linux CI). Restoring undoes
+// that leak.
+let realServers: typeof import("@/stores/servers");
+let realFeedback: typeof import("@/lib/feedback");
+let realWs: typeof import("@/lib/ws");
+
 beforeAll(async () => {
-  // Import the real servers store BEFORE mocking it so other test files that
+  // Import the real modules BEFORE mocking them so other test files that
   // load later (e.g. stores/servers.test.ts) still see a complete module
   // surface. Bun's mock.module replaces the module globally for the process;
   // without the ...real spread, subsequent imports get `{ removeServer }`
   // with no `loadServers`/`servers`/etc, and unrelated tests fail.
-  const realServers = await import("@/stores/servers");
-  const realFeedback = await import("@/lib/feedback");
-  const realWs = await import("@/lib/ws");
+  realServers = await import("@/stores/servers");
+  realFeedback = await import("@/lib/feedback");
+  realWs = await import("@/lib/ws");
   await mock.module("@/lib/ws", () => ({ ...realWs, abortReconnect, disconnect }));
   await mock.module("@/stores/servers", () => ({ ...realServers, removeServer }));
   await mock.module("@/lib/feedback", () => ({ ...realFeedback, showInlineStatus }));
-  purgeModule = await import("./server-purge");
+  // Cache-bust the SUT import. server-purge.ts destructures abortReconnect/
+  // disconnect/removeServer/showInlineStatus at module-eval time, so those
+  // bindings freeze to whatever the deps resolved to on first evaluation.
+  // On Linux CI Bun's module registry is process-global: sibling files
+  // (ws.test.ts, servers.test.ts) mock server-purge and thereby evaluate it
+  // with the *real* deps before this file installs its mocks above — and a
+  // plain `import("./server-purge")` would then return that stale-bound cached
+  // copy, so our mocks never fire. The `?fresh` query forces a clean
+  // re-evaluation that binds against the mocks just installed. (Windows isolates
+  // the registry per file, which is why this only failed on CI.)
+  // The specifier is held in a variable so TypeScript doesn't try to resolve
+  // the `?fresh`-suffixed path (it only resolves static string-literal imports).
+  const freshSpecifier = "./server-purge?fresh";
+  purgeModule = (await import(freshSpecifier)) as typeof import("./server-purge");
+});
+
+afterAll(async () => {
+  await mock.module("@/lib/ws", () => realWs);
+  await mock.module("@/stores/servers", () => realServers);
+  await mock.module("@/lib/feedback", () => realFeedback);
 });
 
 beforeEach(() => {

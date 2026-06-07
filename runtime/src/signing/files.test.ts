@@ -24,7 +24,16 @@ describe("file URL signing", () => {
   test("verify rejects tampered signature", () => {
     const path = "/files/x/y.png";
     const sig = signFilePath(path, "u1");
-    const q = new URLSearchParams({ t: sig.t.slice(0, -1) + "A", exp: String(sig.exp), u: sig.u });
+    // Tamper the FIRST char with a guaranteed-different value. Replacing the
+    // last char with a fixed "A" is flaky: a 32-byte HMAC's final base64url
+    // symbol only encodes 4 aligned bits (~1/16 of values is "A"), so when the
+    // signature already ends in "A" the "tampered" token is byte-identical to
+    // the original and verify wrongly succeeds. exp is time-based, so sig.t
+    // varies per run — that intermittently reddened this test. The first char is
+    // a full 6-bit symbol; swapping A↔B always yields a different, same-length
+    // token that still decodes cleanly → bad-signature.
+    const tamperedT = (sig.t[0] === "A" ? "B" : "A") + sig.t.slice(1);
+    const q = new URLSearchParams({ t: tamperedT, exp: String(sig.exp), u: sig.u });
     const result = verifyFileSig(path, q);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("bad-signature");

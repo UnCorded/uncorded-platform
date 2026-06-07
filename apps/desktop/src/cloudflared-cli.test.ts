@@ -6,6 +6,17 @@ import * as _realChildProcess from "child_process";
 // applies would just return the stubbed shape.
 const realChildProcess = { ..._realChildProcess };
 
+// Capture the real sibling modules we stub below. Bun's mock.module is
+// process-global and does not reliably auto-reset between files on every
+// platform (it leaks on Linux CI), so without restoring these the stripped
+// mocks bleed into cloudflare.test.ts / cloudflared-bin.test.ts. Their
+// internal `import { app } from "./electron-main-deps"` is a live binding, so
+// the restored modules re-resolve against whatever those files mock.
+import * as _realCloudflare from "./cloudflare";
+import * as _realCloudflaredBin from "./cloudflared-bin";
+const realCloudflare = { ..._realCloudflare };
+const realCloudflaredBin = { ..._realCloudflaredBin };
+
 const mockExecFile = mock<typeof import("child_process").execFile>();
 
 let userDataDir = "";
@@ -108,6 +119,8 @@ afterEach(() => {
 
 afterAll(async () => {
   await mock.module("child_process", () => realChildProcess);
+  await mock.module("./cloudflare", () => realCloudflare);
+  await mock.module("./cloudflared-bin", () => realCloudflaredBin);
 });
 
 describe("cloudflared CLI wrapper", () => {

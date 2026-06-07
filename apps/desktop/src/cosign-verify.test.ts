@@ -8,6 +8,12 @@ import * as _realChildProcess from "child_process";
 // established in cloudflared-cli.test.ts).
 const realChildProcess = { ..._realChildProcess };
 
+// Capture the real ./cosign-bin surface before we stub it below. Bun's
+// mock.module is process-global and leaks across files on Linux CI, so without
+// restoring it in afterAll the stub bleeds into cosign-bin.test.ts.
+import * as _realCosignBin from "./cosign-bin";
+const realCosignBin = { ..._realCosignBin };
+
 const mockExecFile = mock<typeof import("child_process").execFile>();
 
 let cosignVerifyModule: typeof import("./cosign-verify");
@@ -161,6 +167,7 @@ afterEach(() => {
 
 afterAll(async () => {
   await mock.module("child_process", () => realChildProcess);
+  await mock.module("./cosign-bin", () => realCosignBin);
 });
 
 describe("verifyImage", () => {
