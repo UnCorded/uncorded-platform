@@ -337,6 +337,7 @@ Rules:
 - unauthorized viewers receive the placeholder, not the value.
 - `secret` values are structurally unrepresentable on the viewer wire.
 - `local` values never leave the producer.
+- Runtime validation treats any incoming canonical frame containing `{ origin: "local" }` as malformed and returns a deterministic reject response. `local` may be dropped by the producer serializer before send; it must never be silently dropped by the runtime.
 - `preserve-host-rect` is allowed only when the schema explicitly accepts the size/existence leak.
 
 ### 4.4 Resource and policy references
@@ -406,7 +407,7 @@ type CoViewProjectedValue =
 
 Per-viewer projection cannot be O(viewers x nodes x frames) on every frame.
 
-CV-FOUND-2 must implement an entitlement-class projection cache with keys that include:
+CV-FOUND-2 must implement an entitlement-class projection cache with deterministic keys. The top-level projection cache key includes:
 
 - session id
 - render mode
@@ -414,6 +415,29 @@ CV-FOUND-2 must implement an entitlement-class projection cache with keys that i
 - resource permission version
 - surface/schema version
 - frame sequence or changed value ids
+
+The `viewer entitlement class` component is itself a canonical serialized record, with fields in this exact order:
+
+```text
+role_set=<sorted canonical role ids>
+session_visibility_mode=<public|private>
+whitelist_membership_flag=<0|1>
+blacklist_membership_flag=<0|1>
+owner_flag=<0|1>
+banned_flag=<0|1>
+moderator_flag=<0|1>
+render_mode=<as-host|as-viewer>        # only when distinct from top-level render mode
+feature_flags=<sorted canonical per-view feature flags>
+```
+
+Normalization rules:
+
+- Role ids, feature flags, user ids, server ids, resource ids, and enum values use canonical protocol ids and casing, never display labels.
+- Sets are sorted bytewise by canonical id before serialization.
+- Booleans serialize as `0` / `1`.
+- Empty sets serialize as an empty value, not as an omitted field.
+- Field order is fixed before concatenating or hashing; implementations must not use object iteration order.
+- A viewer may share a projection only when every serialized entitlement-class field matches. This prevents over-broad cache sharing across owner/moderator/banned/whitelist/blacklist/render-mode differences.
 
 Cursor/pen frames and pure hover/open/control-state frames must not trigger value authorization work unless a data-bearing value changed.
 
@@ -442,9 +466,12 @@ The registry defines:
 - which attributes may travel
 - which values may be host-provided
 - which values must be runtime-resolved
+- `producerValueAllowed`, which defaults to `false` if omitted
 - accepted placeholder modes
 - accepted size/existence leaks
 - unsupported/default behavior
+
+Fail-closed producer values are a CV-FOUND-1 contract requirement. A gated slot is runtime-resolved unless its schema explicitly sets `producerValueAllowed: true`; otherwise a host-provided `value` on that slot is malformed and rejected. This distinction matters: a host may provide render structure and interaction state, but protected data values must either be runtime-resolved from `resourceRef` or explicitly allowed by schema. Forgetting the default would turn omission into accidental value exposure.
 
 Registered first-party surfaces get detailed validation. Unregistered plugin interiors fail closed for data values but can still mirror outer shell/structure if safe.
 
@@ -479,7 +506,7 @@ For raw plugin output with no provenance, runtime projection cannot safely infer
 5. **Secret values are unrepresentable.** Viewer-facing frame types have no field capable of carrying a secret value.
 6. **Local values never leave the producer.**
 7. **Snapshot and live frames use the same projection path.**
-8. **Malformed frames reject whole.** Unknown node kinds, over-budget frames, value-bearing secrets, missing policy refs, and unsafe attributes are rejected, not truncated.
+8. **Malformed frames reject whole.** Unknown node kinds, over-budget frames, value-bearing secrets, incoming `origin: "local"` values, host-provided values on `producerValueAllowed: false` slots, missing policy refs, and unsafe attributes are rejected, not truncated.
 9. **Authorization uncertainty withholds.** Resolver errors, stale permission versions, deleted resources, and missing adapters fail closed.
 10. **Layout leaks are explicit.** Preserving real size/count/position for a withheld value requires schema acceptance.
 11. **Viewer mutation stays closed.** Accepted viewer frames are lifecycle/cursor/pen/annotation only unless a future CoDrive policy explicitly adds action execution.
@@ -522,9 +549,9 @@ Each PR must ship its own security/performance tests. Legacy CoView state can re
 | PR | Scope | Proves |
 |---|---|---|
 | **CV-FOUND-0** | This planning doc. | Design alignment around host render-tree projection. |
-| **CV-FOUND-1** | Protocol types: canonical/projected render tree, safe attrs, value refs, placeholder shapes, policy/resource refs, viewer value states, Zod schemas. Additive; legacy state untouched. | Wire can express same UI structure plus per-viewer values. Secret/local cannot reach viewer type. |
-| **CV-FOUND-2** | Runtime projection core: schema validation, resolver interface, `resolveForViewer`, entitlement-class cache, update lanes, projection benchmark. No producer wiring yet. | Per-viewer value projection is correct and has the production performance shape. |
-| **CV-FOUND-3** | Website producer: emit one text-channel panel render tree behind a flag. Preserve controls/state; mark channel/message data with resource refs; drop local/secret values. Pipe producer output through runtime validator in tests. | Host can produce a valid render tree without becoming the privacy authority. |
+| **CV-FOUND-1** | Protocol types: canonical/projected render tree, safe attrs, value refs, placeholder shapes, policy/resource refs, viewer value states, Zod schemas, and schema defaults including `producerValueAllowed: false`. Additive; legacy state untouched. | Wire can express same UI structure plus per-viewer values. Secret/local cannot reach viewer type, and schema omission cannot permit host-provided protected values. |
+| **CV-FOUND-2** | Runtime projection core: schema validation, resolver interface, `resolveForViewer`, deterministic entitlement-class cache, update lanes, projection benchmark. No producer wiring yet. | Per-viewer value projection is correct and has the production performance shape without over-broad cache sharing. |
+| **CV-FOUND-3** | Website producer: emit one text-channel panel render tree behind a flag. Preserve controls/state; mark channel/message data with resource refs; drop local/secret values. Pipe producer output through runtime validator in tests, including rejection of any leaked `origin: "local"` or host-provided value on a runtime-resolved slot. | Host can produce a valid render tree without becoming the privacy authority. |
 | **CV-FOUND-4** | Runtime broadcast path + viewer renderer for the text-channel slice. Live and snapshot frames use projection. | End-to-end: authorized viewer gets real values; unauthorized viewer gets same UI structure with placeholders; protected bytes never cross unauthorized wire. |
 | **CV-FOUND-5** | Permission changes, cache invalidation, stale-resource behavior, snapshot/gap recovery parity. | Revocation and auth uncertainty fail closed without breaking structure. |
 | **CV-FOUND-6** | Expand first-party surfaces: modals, popovers, inputs, tabs, scroll, panel chrome, richer channel rows. Retire producer-authoritative privacy for migrated surfaces. | Whole first-party shell follows the new boundary. |
@@ -535,7 +562,7 @@ Each PR must ship its own security/performance tests. Legacy CoView state can re
 ## 8. Test Strategy
 
 - **Type-level:** projected viewer frames cannot carry `secret` values or `local` values.
-- **Schema validation:** reject unsafe attrs, unknown node kinds, unsafe `src`/`href`/`title`/`alt`/`aria-label` values, value-bearing secrets, missing policy/resource refs, and over-budget frames.
+- **Schema validation:** reject unsafe attrs, unknown node kinds, unsafe `src`/`href`/`title`/`alt`/`aria-label` values, value-bearing secrets, incoming `origin: "local"` values, host-provided values on `producerValueAllowed: false` slots, missing policy/resource refs, and over-budget frames.
 - **Host-control parity:** for a host-rendered context menu, both authorized and unauthorized viewers receive the same control nodes and interaction state.
 - **Data projection:** authorized viewer bytes contain real text/image/icon values; unauthorized viewer bytes contain placeholders and not the protected substrings/URLs.
 - **Action separation:** a viewer receiving a host-rendered button cannot execute that action unless an explicit collaboration policy allows it.
@@ -543,7 +570,7 @@ Each PR must ship its own security/performance tests. Legacy CoView state can re
 - **Permission revocation:** a viewer who loses `channel.read` starts receiving placeholders on the next projected frame.
 - **Resolver failure:** auth lookup errors, missing plugin adapters, and deleted resources withhold and log diagnostics.
 - **Shape leak checks:** `preserve-host-rect` requires schema-level `sizeLeakAccepted`; secret values default to synthetic/absent.
-- **Performance benchmark:** CV-FOUND-2 tracks frames/sec per session at fixed viewer and entitlement-class counts, e.g. 50 viewers across 1, 5, and 25 entitlement classes. Interaction-only frames should produce zero value-resolution work.
+- **Performance benchmark:** CV-FOUND-2 tracks frames/sec per session at fixed viewer and entitlement-class counts, e.g. 50 viewers across 1, 5, and 25 entitlement classes using the canonical entitlement-class serialization in section 4.7. Interaction-only frames should produce zero value-resolution work.
 - **No broad skips:** keep existing CoView/runtime/website suites green through the migration.
 
 Verification gates per repo discipline: `bun run typecheck`, relevant `bun test` suites, and lint with no new warnings in touched files before any implementation PR merges.
