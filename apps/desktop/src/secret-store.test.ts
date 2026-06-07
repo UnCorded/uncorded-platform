@@ -79,7 +79,22 @@ beforeAll(async () => {
     homedir: () => homedirOverride ?? realOs.homedir(),
   }));
 
-  secretStoreModule = await import("./secret-store");
+  // Cache-bust the SUT import. secret-store.ts destructures `app` and
+  // `safeStorage` from ./electron-main-deps at module-eval time, so those
+  // bindings freeze to whatever electron-main-deps resolved to on first
+  // evaluation. On Linux CI Bun's module registry is process-global and a
+  // sibling file (e.g. anything pulling in ./electron-main-deps → the global
+  // electron preload, or desktop-secrets → secret-store) can evaluate
+  // secret-store.ts with the *preload* stub before this file installs the mocks
+  // above — a plain `import("./secret-store")` would then return that
+  // stale-bound cached copy (app.isPackaged=false, non-stateful safeStorage),
+  // so the packaged/keyring paths and the enc: round-trip never see our mocks.
+  // `?fresh` forces a clean re-evaluation that binds against the mocks just
+  // installed. (Windows isolates the registry per file, which is why this only
+  // surfaced on CI once the file started loading.) The specifier is held in a
+  // variable so TypeScript doesn't try to resolve the suffixed path.
+  const freshSpecifier = "./secret-store?fresh";
+  secretStoreModule = (await import(freshSpecifier)) as typeof import("./secret-store");
 });
 
 afterAll(async () => {
