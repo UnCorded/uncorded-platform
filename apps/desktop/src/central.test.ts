@@ -8,11 +8,9 @@ let centralModule: typeof import("./central");
 const originalFetch = globalThis.fetch;
 
 beforeAll(async () => {
-  await mock.module("electron", () => ({
-    app: {
-      isPackaged: false,
-    },
-  }));
+  // electron is stubbed globally by the test preload
+  // (apps/desktop/test/preload-electron.ts), so no per-file electron mock is
+  // needed here.
 
   // tunnelSecretKey + encryptionSecretKey are included so this mock survives
   // leaking into sibling test files (Bun's mock.module persists across files

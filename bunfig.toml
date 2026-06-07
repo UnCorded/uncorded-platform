@@ -1,4 +1,8 @@
 [test]
+# Registers the full electron / electron-updater stub before ANY test file is
+# linked, so desktop modules that import electron resolve deterministically
+# regardless of file order (see apps/desktop/test/preload-electron.ts).
+preload = ["./apps/desktop/test/preload-electron.ts"]
 pathIgnorePatterns = [
   "**/text-channels.test.ts",
   "**/index.boot.test.ts",

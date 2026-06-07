@@ -108,7 +108,8 @@ let provisionModule: typeof import("./provision");
 const originalFetch = globalThis.fetch;
 
 beforeAll(async () => {
-  await mock.module("electron", () => ({ app: { isPackaged: false } }));
+  // electron is stubbed globally by the test preload
+  // (apps/desktop/test/preload-electron.ts) — no per-file electron mock needed.
   await mock.module("./desktop-secrets", () => ({
     getSecret: mockKeychainGet,
     setSecret: mockKeychainSet,

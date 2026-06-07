@@ -1,60 +1,15 @@
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import type { UpdateState } from "./auto-update";
 
 let mod: typeof import("./auto-update");
 
 beforeAll(async () => {
   // auto-update.ts imports `electron` and `electron-updater` at module scope.
-  // Bun's test runner can't load the real Electron runtime, so stub both.
-  // The reducers under test never touch these — they're only wired in by
-  // setupAutoUpdater(), which this suite deliberately doesn't call.
-  //
-  // Mock is intentionally broad: Bun's mock.module persists across files in
-  // the same worker, so a narrow stub here breaks sibling test files that
-  // import `app`, `safeStorage`, etc. from "electron". Include every symbol
-  // the desktop package statically imports from "electron".
-  await mock.module("electron", () => ({
-    app: {
-      isPackaged: false,
-      getVersion: () => "0.0.0",
-      getAppPath: () => "",
-      getPath: () => "",
-      setAppUserModelId: () => {},
-      commandLine: { appendSwitch: () => {} },
-      requestSingleInstanceLock: () => true,
-      on: () => {},
-      quit: () => {},
-      isReady: () => false,
-      exit: () => {},
-      whenReady: async () => {},
-    },
-    ipcMain: { handle: () => {}, on: () => {} },
-    BrowserWindow: class {},
-    dialog: { showErrorBox: () => {} },
-    session: { defaultSession: {} },
-    shell: { openExternal: async () => {} },
-    safeStorage: {
-      isEncryptionAvailable: () => false,
-      encryptString: (s: string) => Buffer.from(s),
-      decryptString: (b: Buffer) => b.toString(),
-    },
-    contextBridge: { exposeInMainWorld: () => {} },
-    ipcRenderer: {
-      invoke: async () => undefined,
-      on: () => {},
-      removeListener: () => {},
-    },
-  }));
-  await mock.module("electron-updater", () => ({
-    autoUpdater: {
-      on: () => {},
-      removeAllListeners: () => {},
-      checkForUpdates: async () => undefined,
-      downloadUpdate: async () => undefined,
-      quitAndInstall: () => {},
-    },
-  }));
-
+  // Bun's test runner can't load the real Electron runtime; both are stubbed
+  // globally by the test preload (apps/desktop/test/preload-electron.ts) before
+  // any file links, so no per-file electron mock is needed here. The reducers
+  // under test never touch these — they're only wired in by setupAutoUpdater(),
+  // which this suite deliberately doesn't call.
   mod = await import("./auto-update");
 });
 
