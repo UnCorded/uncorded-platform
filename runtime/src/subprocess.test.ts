@@ -378,6 +378,8 @@ describe("SubprocessManager — environment", () => {
     const originalSecret = process.env["UNCORDED_TEST_SECRET"];
     process.env["UNCORDED_TEST_SECRET"] = "s3cret_value";
 
+    const received: Record<string, unknown>[] = [];
+
     const manager = new SubprocessManager();
     const result = await manager.spawn(
       "env-check",
@@ -385,24 +387,36 @@ describe("SubprocessManager — environment", () => {
       "env-plugin.ts",
       DATA_DIR,
       API_VERSION,
-      { handshakeTimeoutMs: SHORT_TIMEOUT },
+      {
+        handshakeTimeoutMs: SHORT_TIMEOUT,
+        // Attach the listener BEFORE the ready handshake. The fixture emits
+        // its "env_report" frame immediately after "ready", so registering on
+        // result.process.transport only after spawn() resolves races the
+        // plugin's startup writes: on fast Linux CI the report is read and
+        // dispatched (to the no-op handshake handler) before the post-spawn
+        // listener attaches, so it is dropped and the test hangs to timeout.
+        // onTransportCreated exists precisely for handlers that must not miss
+        // post-ready messages.
+        onTransportCreated: (transport) => {
+          transport.onMessage((msg) => received.push(msg as Record<string, unknown>));
+        },
+      },
     );
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable");
 
-    const received: unknown[] = [];
-    result.process.transport.onMessage((msg) => received.push(msg));
-
+    // This listener now also sees the "ready" frame, so select env_report.
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (received.length > 0) {
+        if (received.some((msg) => msg["type"] === "env_report")) {
           clearInterval(check);
           resolve();
         }
       }, 10);
     });
 
-    const report = received[0] as Record<string, unknown>;
+    const report = received.find((msg) => msg["type"] === "env_report");
+    if (!report) throw new Error("unreachable");
     const envKeys = report["env_keys"] as string[];
 
     // On Docker/Linux: child should NOT have UNCORDED_TEST_SECRET.
