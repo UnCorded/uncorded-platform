@@ -1,4 +1,4 @@
-import { describe, expect, test, afterEach, setDefaultTimeout } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import { SubprocessManager } from "./subprocess";
 import {
   createRestartTracker,
@@ -339,6 +339,8 @@ describe("SubprocessManager — IPC", () => {
 
 describe("SubprocessManager — environment", () => {
   test("PLUGIN_DATA_DIR is set to plugins root", async () => {
+    const received: Record<string, unknown>[] = [];
+
     const manager = new SubprocessManager();
     const result = await manager.spawn(
       "my-plugin",
@@ -346,25 +348,31 @@ describe("SubprocessManager — environment", () => {
       "env-plugin.ts",
       DATA_DIR,
       API_VERSION,
-      { handshakeTimeoutMs: SHORT_TIMEOUT },
+      {
+        handshakeTimeoutMs: SHORT_TIMEOUT,
+        // The fixture emits env_report immediately after ready. Attach before
+        // spawn resolves so fast CI runners cannot dispatch the frame before
+        // this test's listener exists.
+        onTransportCreated: (transport) => {
+          transport.onMessage((msg) => received.push(msg as Record<string, unknown>));
+        },
+      },
     );
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable");
 
-    const received: unknown[] = [];
-    result.process.transport.onMessage((msg) => received.push(msg));
-
     // Wait for env report
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (received.length > 0) {
+        if (received.some((msg) => msg["type"] === "env_report")) {
           clearInterval(check);
           resolve();
         }
       }, 10);
     });
 
-    const report = received[0] as Record<string, unknown>;
+    const report = received.find((msg) => msg["type"] === "env_report");
+    if (!report) throw new Error("unreachable");
     expect(report["type"]).toBe("env_report");
     expect(report["plugin_slug"]).toBe("my-plugin");
     expect(report["plugin_data_dir"]).toBe(`${DATA_DIR}/plugins/my-plugin`);
