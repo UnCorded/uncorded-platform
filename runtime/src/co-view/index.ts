@@ -14,3 +14,13 @@ export {
   CO_VIEW_HOST_PERMISSION,
   CO_VIEW_MODERATE_PERMISSION,
 } from "./permissions";
+// Render-tree projection core (CV-FOUND-2). Pure; not wired into live sessions
+// or the broadcast path yet (that lands in CV-FOUND-3/4).
+export { projectCanonicalRenderFrame } from "./render-tree-projection";
+export type {
+  CoViewProjectionResult,
+  CoViewValueResolver,
+  CoViewGatedResolveRequest,
+} from "./render-tree-projection";
+export { serializeEntitlementClass } from "./entitlement-class";
+export type { CoViewEntitlementClass, CoViewRenderMode } from "./entitlement-class";
