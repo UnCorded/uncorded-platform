@@ -3,6 +3,10 @@ export * from "./core.js";
 // Plugin resource permission foundation (RP-FOUND-1) — additive identity,
 // action vocabulary, and version-stamped authorization decision shapes.
 export * from "./plugin-resources.js";
+// CoView render-tree projection foundation (CV-FOUND-1) — additive canonical /
+// projected render-tree types, value origins, value refs, policy/resource refs,
+// and the surface schema registry skeleton. Legacy CoView state is untouched.
+export * from "./co-view-render-tree.js";
 // WebSocket uses these as the message envelope format.
 // IPC uses the Ipc* variants for runtime ↔ plugin communication.
 
