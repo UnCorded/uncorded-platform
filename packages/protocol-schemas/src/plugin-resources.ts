@@ -91,6 +91,10 @@ export const PluginResourceActionSchema = z.union([
   z.string().regex(CUSTOM_PLUGIN_RESOURCE_ACTION_RE),
 ]);
 
+const ProtocolIdentifierSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "protocol-identifier");
+
 // ---------------------------------------------------------------------------
 // Placeholders & value slots (plan §4.5)
 // ---------------------------------------------------------------------------
@@ -232,9 +236,9 @@ export const PluginResourceTypeRegistrationSchema = z.object({
   actions: z.array(PluginResourceActionSchema),
   inheritableActions: z.array(PluginResourceActionSchema),
   actionImplications: z
-    .record(z.string(), z.array(PluginResourceActionSchema))
+    .record(PluginResourceActionSchema, z.array(PluginResourceActionSchema))
     .optional(),
-  valueSlots: z.record(z.string(), ValueSlotDefinitionSchema),
+  valueSlots: z.record(ProtocolIdentifierSchema, ValueSlotDefinitionSchema),
   // Required, not optional — a registration must state the choice; the future
   // registry treats the semantic default as `false` (plan §4.2, §10.6).
   producerValueAllowed: z.boolean(),

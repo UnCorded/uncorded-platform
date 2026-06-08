@@ -480,6 +480,26 @@ describe("PluginResourceTypeRegistrationSchema", () => {
       }).success,
     ).toBe(false);
   });
+
+  test("actionImplications with non-protocol key delete rejects", () => {
+    expect(
+      PluginResourceTypeRegistrationSchema.safeParse({
+        ...valid,
+        actionImplications: { delete: ["read"] },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("valueSlots with empty string key rejects", () => {
+    expect(
+      PluginResourceTypeRegistrationSchema.safeParse({
+        ...valid,
+        valueSlots: {
+          "": { policy: "x.read" },
+        },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("ValueSlotDefinitionSchema", () => {
