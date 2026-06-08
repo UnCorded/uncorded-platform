@@ -1,5 +1,8 @@
 // Wire protocol types — shared between client and server.
 export * from "./core.js";
+// Plugin resource permission foundation (RP-FOUND-1) — additive identity,
+// action vocabulary, and version-stamped authorization decision shapes.
+export * from "./plugin-resources.js";
 // WebSocket uses these as the message envelope format.
 // IPC uses the Ipc* variants for runtime ↔ plugin communication.
 
