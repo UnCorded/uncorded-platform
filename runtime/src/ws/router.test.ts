@@ -16,6 +16,9 @@ import type {
 import { jsonCodec } from "./codec";
 import { EventBus } from "../events/bus";
 import type { PluginTransportProvider } from "../events/types";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PluginResourceStore, PluginResourceResolver } from "../plugin-resources";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -1790,5 +1793,107 @@ describe("per-message rate limiting", () => {
     }
 
     expect(transport.sent.length).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugin resource SDK dispatch (resources.*) — RP-FOUND-4 boot-wiring contract
+//
+// The boot follow-up calls router.setPluginResources({ store, resolver,
+// serverId }). These tests pin the router's two states around that call:
+//   - UNWIRED: resources.* answers PLUGIN_RESOURCES_UNAVAILABLE.
+//   - WIRED:   resources.* is served by handlePluginResourcesIpc (the resolver
+//              answers with an AuthDecision, never the UNAVAILABLE error).
+// A real RP-FOUND-2 store over an in-memory core.db (migrations applied) and a
+// real RP-FOUND-3 resolver stand in for what boot constructs.
+// ---------------------------------------------------------------------------
+
+describe("plugin resource dispatch (resources.*)", () => {
+  const RESOURCE_MIGRATIONS_DIR = join(import.meta.dir, "../plugin-resources/migrations");
+
+  function buildPluginResourceBackend(): {
+    store: PluginResourceStore;
+    resolver: PluginResourceResolver;
+  } {
+    const db = new Database(":memory:");
+    const init = PluginResourceStore.initialize(
+      db,
+      RESOURCE_MIGRATIONS_DIR,
+      (dir) => readdirSync(dir),
+      (path) => readFileSync(path, "utf-8"),
+    );
+    if (!init.ok) throw new Error(`migration failed: ${init.error.message}`);
+    const store = new PluginResourceStore(db);
+    const resolver = new PluginResourceResolver({
+      store,
+      roles: { getRole: () => ({ id: 1 }) },
+      isBanned: () => false,
+      // Server-scoped, fail-closed predicate (mirrors makePluginResourceMembershipCheck).
+      // userId check omitted here; makePluginResourceMembershipCheck unit tests
+      // cover per-user membership. This stub only needs to admit the runtime's
+      // own server so the router-dispatch path reaches the resolver.
+      isMember: (serverId, _userId) => serverId === "srv-1",
+    });
+    return { store, resolver };
+  }
+
+  const ownCheck = {
+    type: "resources.check",
+    id: "ck_1",
+    user_id: "billy",
+    resource: {
+      kind: "pluginResource",
+      pluginSlug: "family-album",
+      resourceType: "album",
+      resourceId: "ghost",
+    },
+    action: "read",
+  } as unknown as IpcMessage;
+
+  test("UNWIRED: resources.* answers PLUGIN_RESOURCES_UNAVAILABLE", () => {
+    const transport = mockTransport();
+    const checker = new CapabilityChecker("family-album", []);
+    const manager = mockSubprocessManager({
+      "family-album": mockPluginProcess("family-album", transport),
+    });
+    const router = new MessageRouter(manager, undefined, jsonCodec);
+    router.attachPlugin("family-album", transport as unknown as StdioParentTransport, checker);
+    // NOTE: setPluginResources is intentionally NOT called.
+
+    transport.simulateMessage(ownCheck);
+
+    const responses = transport.sent.filter(
+      (m) => m["type"] === "response" && m["id"] === "ck_1",
+    );
+    expect(responses).toHaveLength(1);
+    const err = responses[0]!["error"] as Record<string, unknown> | undefined;
+    expect(err?.["code"]).toBe("PLUGIN_RESOURCES_UNAVAILABLE");
+  });
+
+  test("WIRED: resources.* is served by the resolver (no UNAVAILABLE error, returns a decision)", () => {
+    const transport = mockTransport();
+    const checker = new CapabilityChecker("family-album", []);
+    const manager = mockSubprocessManager({
+      "family-album": mockPluginProcess("family-album", transport),
+    });
+    const router = new MessageRouter(manager, undefined, jsonCodec);
+    router.attachPlugin("family-album", transport as unknown as StdioParentTransport, checker);
+
+    const { store, resolver } = buildPluginResourceBackend();
+    router.setPluginResources({ store, resolver, serverId: "srv-1" });
+
+    transport.simulateMessage(ownCheck);
+
+    const responses = transport.sent.filter(
+      (m) => m["type"] === "response" && m["id"] === "ck_1",
+    );
+    expect(responses).toHaveLength(1);
+    const res = responses[0]!;
+    // Served, not the unavailable error: an own-plugin check on an unknown
+    // resource fails closed inside the resolver as a DECISION, not an IPC error.
+    expect(res["error"]).toBeUndefined();
+    const result = res["result"] as Record<string, unknown> | undefined;
+    expect(result?.["allowed"]).toBe(false);
+    expect(result?.["reason"]).toBe("unknown-resource");
   });
 });

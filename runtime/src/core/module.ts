@@ -200,6 +200,23 @@ export class CoreModule {
   // Members (called by IPC handler)
   // -----------------------------------------------------------------------
 
+  /**
+   * Whether a user is a member of THIS runtime's server (has a row in
+   * `members`). NOTE: this accessor is NOT server-scoped by argument — the
+   * runtime hosts exactly one server, so `core.db`'s `members` table is
+   * implicitly that one server's roster and there is no `serverId` parameter.
+   * Callers that need a server-scoped predicate (e.g. the plugin-resource
+   * resolver) must wrap this in `makePluginResourceMembershipCheck`, which
+   * rejects any foreign `serverId` before consulting this method.
+   *
+   * Authoritative source for the plugin-resource resolver's `everyone`
+   * principal (RP-FOUND-3, plan §6.1): membership-unknown returns false so
+   * the resolver fails closed rather than treating `everyone` as global.
+   */
+  isMember(userId: string): boolean {
+    return dao.isMember(this.db, userId);
+  }
+
   listMembers(opts: { limit: number; offset: number }): { members: CoreMember[]; total: number } {
     return {
       members: dao.listMembers(this.db, opts),

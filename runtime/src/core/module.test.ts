@@ -280,3 +280,27 @@ describe("CoreModule.initialize — online flag reset", () => {
     expect(mod2.getUser("u1")?.is_online).toBe(false);
   });
 });
+
+describe("CoreModule.isMember", () => {
+  it("returns true for a user who has joined (membership row exists)", () => {
+    const { mod } = makeModule();
+    mod.onUserConnected("u1", "alice", "Alice", "");
+    expect(mod.isMember("u1")).toBe(true);
+  });
+
+  it("fails closed: returns false for a user with no membership row", () => {
+    const { mod } = makeModule();
+    mod.onUserConnected("u1", "alice", "Alice", "");
+    // A different, never-seen user is not a member.
+    expect(mod.isMember("stranger")).toBe(false);
+  });
+
+  it("membership survives disconnect (a former member stays a member)", () => {
+    const { mod } = makeModule();
+    mod.onUserConnected("u1", "alice", "Alice", "");
+    mod.onUserDisconnected("u1");
+    // The resolver's `everyone` principal keys on having ever joined, not on
+    // being currently online.
+    expect(mod.isMember("u1")).toBe(true);
+  });
+});

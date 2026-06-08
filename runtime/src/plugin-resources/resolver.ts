@@ -469,6 +469,7 @@ export class PluginResourceResolver {
 //     membership source says, and no wider.
 //
 // Runtime boot wiring (constructing the resolver with the real store / roles /
-// core signals) is intentionally NOT done in this PR — it belongs with the SDK
-// and CoView consumers (RP-FOUND-4+), and adding it here would wire an
-// unused authority into boot.
+// core signals and handing it to the router) lands in the RP-FOUND-4 follow-up
+// in `runtime/src/main.ts`: `isBanned` is backed by `CoreModule.isBanned` and
+// `isMember` by `CoreModule.isMember`, the latter wrapped in a server-scoped,
+// fail-closed predicate (`makePluginResourceMembershipCheck`).
