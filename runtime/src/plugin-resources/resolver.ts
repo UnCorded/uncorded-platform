@@ -141,7 +141,12 @@ function nodeKey(resource: StoredResource): PluginResourceKey {
 }
 
 function nodeKeyString(resource: StoredResource): string {
-  return `${resource.serverId}/${resource.pluginSlug}/${resource.resourceType}:${resource.resourceId}`;
+  return JSON.stringify([
+    resource.serverId,
+    resource.pluginSlug,
+    resource.resourceType,
+    resource.resourceId,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +164,10 @@ export class PluginResourceResolver {
    * Can this viewer see the protected value content of this resource? `read` is
    * the action behind this question (plan §5.1, §7.1). A type that does not
    * declare `read` denies with `unknown-action` — fail closed.
+   *
+   * This enforces user-level ACL only. If a plugin caller reads another
+   * plugin's resource, the SDK/capability layer (RP-FOUND-4+) must first verify
+   * the caller declared the required cross-plugin read capability.
    */
   canReadPluginResource(viewer: ViewerContext, resourceRef: PluginResourceRef): AuthDecision {
     return this.decide(viewer, resourceRef, "read");
@@ -168,6 +177,9 @@ export class PluginResourceResolver {
    * Can this viewer take a (registered) action on this resource? This answers
    * the authorization question only; it executes nothing (plan §3, §10.13). An
    * action not declared by the resource type denies with `unknown-action`.
+   *
+   * This enforces user-level ACL only. Cross-plugin caller capability checks
+   * belong to the SDK/capability layer before invoking this resolver.
    */
   canPluginResourceAction(
     viewer: ViewerContext,
@@ -186,6 +198,7 @@ export class PluginResourceResolver {
     resourceRef: PluginResourceRef,
     action: PluginResourceAction,
   ): AuthDecision {
+    let knownVersions = ZERO_VERSIONS;
     try {
       // The runtime re-attaches server scope from the viewer context; a ref
       // carries identity, never scope (plan §4.1).
@@ -199,22 +212,23 @@ export class PluginResourceResolver {
       // 1. Resource lookup. Unknown resource fails closed (plan §6.8).
       const resource = this.deps.store.getResource(key);
       if (!resource) return deny("unknown-resource", ZERO_VERSIONS);
+      knownVersions = baseVersions(resource);
 
       // 2. Resource type lookup. An unregistered type is unknown (plan §4.2).
       const type = this.deps.store.getType(key.pluginSlug, key.resourceType);
-      if (!type) return deny("unknown-resource", baseVersions(resource));
+      if (!type) return deny("unknown-resource", knownVersions);
 
       // 3. Action validity. The action must be declared by the type — no
       //    free-form `check(user, "whatever")` (plan §5.2). This also gates
       //    `read`: a type that never declared `read` cannot be read.
       if (!type.actions.includes(action)) {
-        return deny("unknown-action", baseVersions(resource));
+        return deny("unknown-action", knownVersions);
       }
 
       // 4. Ban short-circuit. A banned viewer denies regardless of ACL rows
       //    (plan §6.6, §10.11). Derived from the authoritative ban source.
       if (this.deps.isBanned(viewer.userId)) {
-        return deny("banned", baseVersions(resource));
+        return deny("banned", knownVersions);
       }
 
       // 5. Derive viewer facts from authoritative sources (never the caller).
@@ -225,10 +239,10 @@ export class PluginResourceResolver {
       };
 
       // 6. Evaluate precedence + inheritance.
-      const result = this.walk(resource, action, facts, new Set<string>(), 0);
+      const result = this.walk(resource, type, action, facts, new Set<string>(), 0);
       if (result.kind === "error") {
         // Malformed / cyclic / over-deep parent chain → fail closed (plan §6.8).
-        return deny("error", baseVersions(resource));
+        return deny("error", knownVersions);
       }
 
       const versions: AuthVersions = {
@@ -240,7 +254,7 @@ export class PluginResourceResolver {
     } catch {
       // Authorization uncertainty withholds (plan §10.11): any unexpected error
       // denies rather than risking a fall-open.
-      return deny("error", ZERO_VERSIONS);
+      return deny("error", knownVersions);
     }
   }
 
@@ -260,6 +274,7 @@ export class PluginResourceResolver {
    */
   private walk(
     node: StoredResource,
+    type: StoredResourceType,
     action: PluginResourceAction,
     facts: ViewerFacts,
     visited: Set<string>,
@@ -269,10 +284,9 @@ export class PluginResourceResolver {
 
     const keyStr = nodeKeyString(node);
     if (visited.has(keyStr)) return { kind: "error" }; // cycle
+    // `visited` is mutated in place. The resource graph is a single-parent
+    // chain, so there is no branch to backtrack.
     visited.add(keyStr);
-
-    const type = this.deps.store.getType(node.pluginSlug, node.resourceType);
-    if (!type) return { kind: "error" }; // type vanished mid-chain → malformed
 
     // Local precedence (most-specific-first, deny-wins-within-tier).
     const local = this.evaluateLocal(node, type, action, facts);
@@ -302,8 +316,10 @@ export class PluginResourceResolver {
     });
     // A parent referenced but absent is a broken chain → fail closed.
     if (!parent) return { kind: "error" };
+    const parentType = this.deps.store.getType(parent.pluginSlug, parent.resourceType);
+    if (!parentType) return { kind: "error" };
 
-    const sub = this.walk(parent, action, facts, visited, depth + 1);
+    const sub = this.walk(parent, parentType, action, facts, visited, depth + 1);
     if (sub.kind === "error") return sub;
 
     // We consulted the parent: record its ACL version (and any further up the

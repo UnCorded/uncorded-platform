@@ -186,6 +186,18 @@ describe("fail-closed lookups", () => {
     expect(d.allowed).toBe(false);
     expect(d.reason).toBe("unknown-action");
   });
+
+  test("mid-flight resolver errors keep known resource versions", () => {
+    h = makeHarness({ getRole: () => { throw new Error("role source down"); } });
+    h.store.createResource({ ...albumKey("a1") });
+    const resource = h.store.getResource(albumKey("a1"))!;
+
+    const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("error");
+    expect(d.versions.resourceAclVersion).toBe(resource.aclVersion);
+    expect(d.versions.resourcePermissionVersion).toBe(resource.permissionVersion);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -234,6 +246,14 @@ describe("user & owner precedence", () => {
     const d = h.resolver.canReadPluginResource(viewer("dad"), albumRef("a1"));
     expect(d.allowed).toBe(false);
     expect(d.reason).toBe("default-deny");
+  });
+
+  test("user deny beats owner allow within the explicit tier", () => {
+    h.store.grant(albumKey("a1"), { kind: "owner" }, "read", "sys");
+    h.store.deny(albumKey("a1"), { kind: "user", userId: "dad" }, "read", "sys");
+    const d = h.resolver.canReadPluginResource(viewer("dad"), albumRef("a1"));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("explicit-deny");
   });
 });
 
@@ -428,6 +448,52 @@ describe("inheritance", () => {
     const d = h.resolver.canReadPluginResource(viewer("billy"), photoRef("p1"));
     expect(d.allowed).toBe(false);
     expect(d.reason).toBe("error");
+  });
+
+  test("cycle detection distinguishes resource keys containing delimiter characters", () => {
+    h.store.registerType({
+      pluginSlug: PLUGIN,
+      type: "a:b",
+      actions: ["read"],
+      inheritableActions: ["read"],
+      valueSlots: {},
+      producerValueAllowed: false,
+    });
+    h.store.registerType({
+      pluginSlug: PLUGIN,
+      type: "a",
+      parentType: "a:b",
+      actions: ["read"],
+      inheritableActions: ["read"],
+      valueSlots: {},
+      producerValueAllowed: false,
+    });
+    h.store.createResource({
+      serverId: SERVER,
+      pluginSlug: PLUGIN,
+      resourceType: "a:b",
+      resourceId: "c",
+    });
+    h.store.createResource({
+      serverId: SERVER,
+      pluginSlug: PLUGIN,
+      resourceType: "a",
+      resourceId: "b:c",
+      parent: { resourceType: "a:b", resourceId: "c" },
+    });
+    h.store.grant(
+      { serverId: SERVER, pluginSlug: PLUGIN, resourceType: "a:b", resourceId: "c" },
+      { kind: "user", userId: "billy" },
+      "read",
+      "dad",
+    );
+
+    const d = h.resolver.canReadPluginResource(
+      viewer("billy"),
+      { kind: "pluginResource", pluginSlug: PLUGIN, resourceType: "a", resourceId: "b:c" },
+    );
+    expect(d.allowed).toBe(true);
+    expect(d.reason).toBe("inherited-allow");
   });
 });
 
