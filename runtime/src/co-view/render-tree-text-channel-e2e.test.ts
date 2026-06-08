@@ -227,11 +227,22 @@ const WITHHELD: CoViewProjectedValue = {
   placeholderShape: { mode: "synthetic" },
 };
 
+class ProjectionError extends Error {
+  readonly code = "ERR_PROJECTION_NOT_OK";
+  readonly context: { reason: string; issues: string[] };
+
+  constructor(context: { reason: string; issues: string[] }) {
+    super("expected ok projection");
+    this.name = "ProjectionError";
+    this.context = context;
+  }
+}
+
 function unwrap(
   result: Awaited<ReturnType<typeof projectCanonicalRenderFrame>>,
 ): CoViewProjectedNode {
   if (!result.ok) {
-    throw new Error(`expected ok projection, got ${result.reason}: ${result.issues.join(", ")}`);
+    throw new ProjectionError({ reason: result.reason, issues: result.issues });
   }
   return result.frame.root;
 }
