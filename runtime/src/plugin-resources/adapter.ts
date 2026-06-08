@@ -35,7 +35,8 @@ export interface AdapterResolveValueResult {
   value?: JsonValue | undefined;
   /** Optional placeholder hint when the plugin wants a non-default skeleton. */
   placeholderShape?: PlaceholderShape | undefined;
-  /** Monotonic value version, for cache invalidation (plan §11). */
+  /** Monotonic value version, for cache invalidation (plan §11).
+   *  TODO(RP-FOUND-8): propagate this through viewer projection/cache types. */
   valueVersion: number;
 }
 

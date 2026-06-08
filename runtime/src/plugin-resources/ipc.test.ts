@@ -123,6 +123,17 @@ describe("define & create", () => {
     expect(stored?.pluginSlug).toBe(PLUGIN);
   });
 
+  test("define ignores a caller-supplied pluginSlug and stamps the caller's instead", () => {
+    const res = h.call(PLUGIN, {
+      type: "resources.define",
+      id: "1",
+      registration: { ...ALBUM_REGISTRATION, pluginSlug: OTHER },
+    });
+    expect(res.error).toBeUndefined();
+    expect(h.store.getType(PLUGIN, "album")?.pluginSlug).toBe(PLUGIN);
+    expect(h.store.getType(OTHER, "album")).toBeNull();
+  });
+
   test("define without a registration object → INVALID_PARAMS", () => {
     const res = h.call(PLUGIN, { type: "resources.define", id: "1" });
     expect(res.error?.code).toBe("INVALID_PARAMS");

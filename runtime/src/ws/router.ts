@@ -1048,6 +1048,8 @@ export class MessageRouter {
       // (they are in the passthrough set); the handler enforces caller
       // capabilities contextually — own-plugin is always allowed, cross-plugin
       // READ requires `resources.read:<plugin>`, cross-plugin WRITE is forbidden.
+      // TODO(RP-FOUND-8): add a resources.* rate limiter once the backend is
+      // wired at boot; resources.create can otherwise be called in a tight loop.
       if (msgType.startsWith("resources.")) {
         if (!this.pluginResourceDeps) {
           this.sendIpcError(
@@ -1060,7 +1062,7 @@ export class MessageRouter {
         }
         handlePluginResourcesIpc(slug, msg, transport, {
           ...this.pluginResourceDeps,
-          checkCapability: (cap) => this.checkers.get(slug)?.isAllowed(cap) ?? false,
+          checkCapability: (cap) => this.checkers.get(slug)?.check(cap).ok ?? false,
         });
         return;
       }

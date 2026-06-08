@@ -135,6 +135,9 @@ export class PluginResourceValueGate {
       };
     }
 
+    // TODO(RP-FOUND-8): surface `raw.valueVersion` in the projection/cache
+    // contract. RP-FOUND-4 preserves only AuthVersions because
+    // ResolvedPluginResourceValue has no value-version field yet.
     return { state: "visible", value: raw.value, versions: decision.versions };
   }
 }

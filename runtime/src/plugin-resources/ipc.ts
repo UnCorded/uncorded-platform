@@ -24,6 +24,7 @@
 // a client-supplied plugin slug cannot widen that scope.
 
 import { rootLogger } from "@uncorded/shared";
+import { z } from "zod";
 import type {
   IpcMessage,
   IpcTransport,
@@ -43,6 +44,11 @@ import type { PluginResourceResolver } from "./resolver";
 import type { CreateResourceInput } from "./types";
 
 const log = rootLogger.child({ component: "plugin-resources-ipc" });
+
+const ParentRefInputSchema = z.object({
+  resourceType: z.string(),
+  resourceId: z.string(),
+});
 
 /**
  * Dependencies the dispatch needs. `serverId` is the runtime's own server scope
@@ -169,11 +175,12 @@ function handleCreate(
 
   const parent = msg["parent"];
   if (parent !== undefined) {
-    if (!isRecord(parent) || typeof parent["resourceType"] !== "string" || typeof parent["resourceId"] !== "string") {
+    const parsedParent = ParentRefInputSchema.safeParse(parent);
+    if (!parsedParent.success) {
       sendError(transport, id, "INVALID_PARAMS", "'parent' must be { resourceType, resourceId }.");
       return;
     }
-    input.parent = { resourceType: parent["resourceType"], resourceId: parent["resourceId"] };
+    input.parent = parsedParent.data;
   }
 
   const owner = msg["owner"];
@@ -308,9 +315,6 @@ function handleCheck(
   }
 
   const viewer: ViewerContext = { userId, serverId: deps.serverId };
-  const decision =
-    action === "read"
-      ? deps.resolver.canReadPluginResource(viewer, ref)
-      : deps.resolver.canPluginResourceAction(viewer, ref, action);
+  const decision = deps.resolver.canPluginResourceAction(viewer, ref, action);
   sendResult(transport, id, decision);
 }
