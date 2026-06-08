@@ -292,7 +292,11 @@ export class PluginResourceStore {
       ],
     );
 
-    return { ok: true, value: this.getResource(key)! };
+    const inserted = this.getResource(key);
+    if (!inserted) {
+      throw new Error(`Failed to retrieve resource after insert for key: ${describeKey(key)}.`);
+    }
+    return { ok: true, value: inserted };
   }
 
   getResource(key: PluginResourceKey): StoredResource | null {
@@ -560,8 +564,8 @@ export class PluginResourceStore {
 
   /**
    * Validate a proposed parent for a (would-be) child of `type`. Returns the
-   * child's resulting depth on success. `existingResourceType` is supplied on
-   * re-parent so the cycle walk can recognise the node being moved.
+   * child's resulting depth on success. `childResourceType` is always supplied
+   * so cycle detection compares the full resource key, not just the id.
    */
   private validateParent(
     serverId: string,
@@ -569,7 +573,7 @@ export class PluginResourceStore {
     type: StoredResourceType,
     childResourceId: string,
     parent: ParentResourceRef,
-    childResourceType?: string,
+    childResourceType: string,
   ): PluginResourceResult<number> {
     if (type.parentType === null) {
       return err(
@@ -587,7 +591,7 @@ export class PluginResourceStore {
     // Self-parent is the trivial cycle.
     if (
       parent.resourceId === childResourceId &&
-      (childResourceType === undefined || parent.resourceType === childResourceType)
+      parent.resourceType === childResourceType
     ) {
       return err("PARENT_CYCLE", `Resource "${childResourceId}" cannot be its own parent.`);
     }
@@ -618,7 +622,7 @@ export class PluginResourceStore {
     while (cursor) {
       if (
         cursor.resourceId === childResourceId &&
-        (childResourceType === undefined || cursor.resourceType === childResourceType)
+        cursor.resourceType === childResourceType
       ) {
         return err(
           "PARENT_CYCLE",
