@@ -22,5 +22,12 @@ export type {
   CoViewValueResolver,
   CoViewGatedResolveRequest,
 } from "./render-tree-projection";
+// Render-tree transport path (CV-FOUND-4b). Disabled by default — wired into
+// dispatch but gated behind the flag + optional injected transport deps.
+export {
+  CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED,
+  handleRenderTreeFrame,
+} from "./render-tree-transport";
+export type { CoViewRenderTreeTransportDeps } from "./types";
 export { serializeEntitlementClass } from "./entitlement-class";
 export type { CoViewEntitlementClass, CoViewRenderMode } from "./entitlement-class";

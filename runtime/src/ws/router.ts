@@ -360,6 +360,22 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
       return out;
     }
 
+    case "co-view.render-tree.frame": {
+      // CV-FOUND-4b: shallow envelope validation only — `session_id` is a
+      // string and `frame` is an object. The canonical frame's deep structure
+      // is validated downstream by `CoViewCanonicalRenderFrameSchema` inside the
+      // projector (the single source of truth for render-tree validity), so we
+      // don't duplicate that here. The transport handler is disabled by default
+      // regardless, so a frame that parses still goes nowhere in production.
+      if (typeof msg["session_id"] !== "string") return null;
+      if (!isPlainObject(msg["frame"])) return null;
+      return {
+        type: "co-view.render-tree.frame",
+        session_id: msg["session_id"],
+        frame: msg["frame"] as unknown as import("@uncorded/protocol").CoViewCanonicalRenderFrame,
+      };
+    }
+
     default:
       return null;
   }

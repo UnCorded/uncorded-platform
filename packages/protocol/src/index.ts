@@ -7,6 +7,13 @@ export * from "./plugin-resources.js";
 // projected render-tree types, value origins, value refs, policy/resource refs,
 // and the surface schema registry skeleton. Legacy CoView state is untouched.
 export * from "./co-view-render-tree.js";
+// Referenced by the CV-FOUND-4b render-tree *transport* wire frames below
+// (`WsCoViewRenderTreeFrame` / `WsCoViewRenderTreeProjected`). Type-only, so
+// this import is erased at runtime.
+import type {
+  CoViewCanonicalRenderFrame,
+  CoViewProjectedRenderFrame,
+} from "./co-view-render-tree.js";
 // WebSocket uses these as the message envelope format.
 // IPC uses the Ipc* variants for runtime ↔ plugin communication.
 
@@ -94,7 +101,8 @@ export type ClientMessage =
   | WsCoViewEvent
   | WsCoViewCursor
   | WsCoViewSnapshotReq
-  | WsCoViewSnapshotRes;
+  | WsCoViewSnapshotRes
+  | WsCoViewRenderTreeFrame;
 
 // ---------------------------------------------------------------------------
 // Server → Client (WebSocket)
@@ -142,7 +150,8 @@ export type ServerMessage =
   | WsCoViewEvent
   | WsCoViewCursor
   | WsCoViewSnapshotReq
-  | WsCoViewSnapshotRes;
+  | WsCoViewSnapshotRes
+  | WsCoViewRenderTreeProjected;
 
 // ---------------------------------------------------------------------------
 // IPC: Runtime ↔ Plugin subprocess (stdio JSON)
@@ -1127,6 +1136,49 @@ export interface WsCoViewSnapshotRes {
   seq: number;
   diffs?: WsCoViewState[] | undefined;
   full_state?: CoViewStateSnapshot | undefined;
+}
+
+// ---------- render-tree transport (CV-FOUND-4b) ----------
+//
+// Additive transport frames for the host render-tree projection direction
+// (`docs/coview/foundation-plan.md` §4.6). These carry the CV-FOUND-1 canonical
+// / projected render-tree shapes over the existing CoView WS channel. They are
+// DISTINCT from the legacy `co-view.state` shell-state path (which is untouched)
+// and from the lifecycle frames above — a render-tree-capable host emits
+// `co-view.render-tree.frame`; the runtime projects per viewer and emits
+// `co-view.render-tree.projected` to each. The whole path is gated behind a
+// disabled runtime flag (`CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED`) until the
+// producer + viewer renderer ship, so defining these types changes no live
+// behavior.
+
+/**
+ * Host → runtime: a single canonical host render frame (CV-FOUND-1 §4.1, §4.6).
+ * The runtime validates it with `CoViewCanonicalRenderFrameSchema`, projects it
+ * per viewer through the surface registry + injected value authority, and
+ * forwards one `WsCoViewRenderTreeProjected` to each viewer. Only the host
+ * connection of a session may emit this; a non-host frame is dropped.
+ *
+ * `frame` carries the wire-safe canonical value vocabulary only (no `local`,
+ * gated slots carry no real bytes) — the runtime is the single value authority
+ * for protected slots. This is sanitized render-tree projection, NOT raw DOM.
+ */
+export interface WsCoViewRenderTreeFrame {
+  type: "co-view.render-tree.frame";
+  session_id: string;
+  frame: CoViewCanonicalRenderFrame;
+}
+
+/**
+ * Runtime → one viewer: the per-viewer projected render frame (CV-FOUND-1 §4.6).
+ * Node identity / kind / structure / control state / attrs are byte-identical to
+ * the canonical frame the host emitted (controls mirror from host UI); only the
+ * data-bearing `value` payloads differ by the viewer's entitlement. No variant
+ * carries a secret or unauthorized value toward a viewer.
+ */
+export interface WsCoViewRenderTreeProjected {
+  type: "co-view.render-tree.projected";
+  session_id: string;
+  frame: CoViewProjectedRenderFrame;
 }
 
 // ---------- runtime → plugin event topics ----------
