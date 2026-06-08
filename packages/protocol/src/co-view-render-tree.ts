@@ -433,6 +433,7 @@ export type CoViewSlotValidationReason =
   | "producer-value-not-allowed"
   | "placeholder-mode-not-accepted"
   | "missing-policy-ref"
+  | "policy-ref-mismatch"
   | "missing-resource-ref";
 
 export type CoViewSlotValidationResult =

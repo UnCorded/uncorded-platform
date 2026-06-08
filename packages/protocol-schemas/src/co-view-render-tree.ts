@@ -81,22 +81,22 @@ export const CoViewPolicyRefSchema = z.enum([
 // Discriminated on `kind`; the `pluginResource` arm reuses the RP-FOUND-1 ref
 // schema so the two layers share one definition.
 export const CoViewResourceRefSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("server"), serverId: z.string().min(1) }),
-  z.object({ kind: z.literal("channel"), channelId: z.string().min(1) }),
-  z.object({
+  z.strictObject({ kind: z.literal("server"), serverId: z.string().min(1) }),
+  z.strictObject({ kind: z.literal("channel"), channelId: z.string().min(1) }),
+  z.strictObject({
     kind: z.literal("message"),
     channelId: z.string().min(1),
     messageId: z.string().min(1),
   }),
-  z.object({ kind: z.literal("member"), userId: z.string().min(1) }),
-  z.object({ kind: z.literal("album"), albumId: z.string().min(1) }),
-  z.object({
+  z.strictObject({ kind: z.literal("member"), userId: z.string().min(1) }),
+  z.strictObject({ kind: z.literal("album"), albumId: z.string().min(1) }),
+  z.strictObject({
     kind: z.literal("albumPhoto"),
     albumId: z.string().min(1),
     photoId: z.string().min(1),
   }),
   PluginResourceRefSchema,
-  z.object({ kind: z.literal("panel"), panelId: z.string().min(1) }),
+  z.strictObject({ kind: z.literal("panel"), panelId: z.string().min(1) }),
 ]) satisfies z.ZodType<CoViewResourceRef>;
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ export const CoViewControlKindSchema = z.enum([
   "toolbar",
 ]) satisfies z.ZodType<CoViewControlKind>;
 
-export const CoViewBoxSchema = z.object({
+export const CoViewBoxSchema = z.strictObject({
   x: z.number(),
   y: z.number(),
   width: z.number().nonnegative(),
@@ -218,7 +218,7 @@ export const CoViewRenderNodeSchema: z.ZodType<CoViewRenderNode> = z.lazy(() =>
   }),
 );
 
-export const CoViewCanonicalRenderFrameSchema = z.object({
+export const CoViewCanonicalRenderFrameSchema = z.strictObject({
   surfaceId: z.string().min(1),
   root: CoViewRenderNodeSchema,
 }) satisfies z.ZodType<CoViewCanonicalRenderFrame>;
@@ -256,7 +256,7 @@ export const CoViewProjectedNodeSchema: z.ZodType<CoViewProjectedNode> = z.lazy(
   }),
 );
 
-export const CoViewProjectedRenderFrameSchema = z.object({
+export const CoViewProjectedRenderFrameSchema = z.strictObject({
   surfaceId: z.string().min(1),
   root: CoViewProjectedNodeSchema,
 }) satisfies z.ZodType<CoViewProjectedRenderFrame>;
@@ -284,7 +284,7 @@ export const CoViewSlotOriginSchema = z.enum([
  * defaults to `false` in `validateCanonicalSlotValue`.
  */
 export const CoViewSurfaceSlotSchemaSchema = z
-  .object({
+  .strictObject({
     slotId: z.string().min(1),
     origin: CoViewSlotOriginSchema,
     policyRef: CoViewPolicyRefSchema.optional(),
@@ -301,7 +301,7 @@ export const CoViewSurfaceSlotSchemaSchema = z
   ) satisfies z.ZodType<CoViewSurfaceSlotSchema>;
 
 export const CoViewSurfaceSchemaSchema = z
-  .object({
+  .strictObject({
     surfaceId: z.string().min(1),
     nodeKinds: z.array(CoViewNodeKindSchema).optional(),
     slots: z.array(CoViewSurfaceSlotSchemaSchema),
@@ -311,9 +311,17 @@ export const CoViewSurfaceSchemaSchema = z
     { message: "slot ids must be unique within a surface", path: ["slots"] },
   ) satisfies z.ZodType<CoViewSurfaceSchema>;
 
-export const CoViewSurfaceRegistrySchema = z.object({
-  surfaces: z.record(z.string().min(1), CoViewSurfaceSchemaSchema),
-}) satisfies z.ZodType<CoViewSurfaceRegistry>;
+// The map key must equal the inner `surfaceId` — they are two names for the same
+// surface, and a mismatch is a registry-authoring bug (the validator looks a
+// surface up by key, so a drifted `surfaceId` would silently never be reached).
+export const CoViewSurfaceRegistrySchema = z
+  .strictObject({
+    surfaces: z.record(z.string().min(1), CoViewSurfaceSchemaSchema),
+  })
+  .refine(
+    (r) => Object.entries(r.surfaces).every(([key, surface]) => key === surface.surfaceId),
+    { message: "registry key must equal the surface's surfaceId", path: ["surfaces"] },
+  ) satisfies z.ZodType<CoViewSurfaceRegistry>;
 
 // ---------------------------------------------------------------------------
 // Registry validation (foundation-plan §4.9, §5.8) — fail-closed
@@ -389,6 +397,13 @@ export function validateCanonicalSlotValue(
   }
 
   if (value.origin === "gated") {
+    // A gated value must be evaluated against the slot's REGISTERED authority —
+    // a producer cannot swap in a different policy than the slot was registered
+    // with. (slot.policyRef is defined here: a gated slot with an undefined
+    // policyRef already failed `missing-policy-ref` above.)
+    if (slot.origin === "gated" && slot.policyRef !== value.policyRef) {
+      return { ok: false, reason: "policy-ref-mismatch" };
+    }
     // Defensive against loosely-typed/JSON input: a gated value must carry a
     // resource ref unless the slot explicitly opts out.
     if (slot.resourceRefRequired !== false && value.resourceRef === undefined) {

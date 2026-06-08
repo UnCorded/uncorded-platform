@@ -75,6 +75,11 @@ describe("CoViewResourceRefSchema", () => {
   test("rejects message ref missing messageId", () => {
     expect(CoViewResourceRefSchema.safeParse({ kind: "message", channelId: "c1" }).success).toBe(false);
   });
+  test("rejects an arm carrying an extra key (strict — no smuggling)", () => {
+    expect(
+      CoViewResourceRefSchema.safeParse({ kind: "channel", channelId: "c1", secretToken: "x" }).success,
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +368,16 @@ describe("CoViewRenderNodeSchema / canonical frame", () => {
     bad.children![1]!.kind = "iframe" as never;
     expect(CoViewRenderNodeSchema.safeParse(bad).success).toBe(false);
   });
+
+  test("a canonical frame carrying an extra top-level key rejects (strict frame)", () => {
+    expect(
+      CoViewCanonicalRenderFrameSchema.safeParse({
+        surfaceId: "text-channel",
+        root: buildCanonicalPanel(),
+        viewerId: "smuggled",
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("structure parity vs per-viewer value projection", () => {
@@ -488,6 +503,33 @@ describe("CoViewSurfaceSchemaSchema / registry", () => {
   test("a full registry parses", () => {
     expect(CoViewSurfaceRegistrySchema.safeParse(REGISTRY).success).toBe(true);
   });
+
+  test("a slot carrying an extra key rejects (strict slot)", () => {
+    expect(
+      CoViewSurfaceSlotSchemaSchema.safeParse({
+        slotId: "label",
+        origin: "public",
+        placeholderModes: [],
+        producerValueAllowedTypo: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("a registry carrying an extra top-level key rejects (strict registry)", () => {
+    expect(
+      CoViewSurfaceRegistrySchema.safeParse({ surfaces: {}, version: 2 }).success,
+    ).toBe(false);
+  });
+
+  test("a registry whose map key disagrees with the inner surfaceId rejects", () => {
+    expect(
+      CoViewSurfaceRegistrySchema.safeParse({
+        surfaces: {
+          "text-channel": { surfaceId: "voice-channel", slots: [] },
+        },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 const REGISTRY: CoViewSurfaceRegistry = {
@@ -592,6 +634,25 @@ describe("validateCanonicalSlotValue (fail-closed)", () => {
     expect(validateCanonicalSlotValue(REGISTRY, "text-channel", "secret-token", gatedRuntimeResolved)).toEqual({
       ok: false,
       reason: "origin-widened",
+    });
+  });
+
+  test("a gated value whose policyRef differs from the slot's registered policy rejects", () => {
+    // channel-name is registered against "channel.read"; a value evaluated
+    // against "member.read" must not be accepted on it.
+    const wrongPolicy: CoViewCanonicalValueRef = {
+      origin: "gated",
+      policyRef: "member.read",
+      resourceRef: { kind: "member", userId: "u1" },
+      placeholderShape: { mode: "synthetic" },
+    };
+    expect(validateCanonicalSlotValue(REGISTRY, "text-channel", "channel-name", wrongPolicy)).toEqual({
+      ok: false,
+      reason: "policy-ref-mismatch",
+    });
+    // matching policy on the same slot is accepted
+    expect(validateCanonicalSlotValue(REGISTRY, "text-channel", "channel-name", gatedRuntimeResolved)).toEqual({
+      ok: true,
     });
   });
 
