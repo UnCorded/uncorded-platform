@@ -77,7 +77,7 @@ export type BanCheck = (userId: string) => boolean;
  * real wiring backs it with that table. See the LIMITATION note at the bottom
  * of this file for the fail-closed posture when membership is unknown.
  */
-export type MembershipCheck = (userId: string) => boolean;
+export type MembershipCheck = (serverId: string, userId: string) => boolean;
 
 export interface PluginResourceResolverDeps {
   store: PluginResourceStore;
@@ -221,7 +221,7 @@ export class PluginResourceResolver {
       const facts: ViewerFacts = {
         userId: viewer.userId,
         roleId: this.deps.roles.getRole(viewer.userId).id,
-        isMember: this.deps.isMember(viewer.userId),
+        isMember: this.deps.isMember(viewer.serverId, viewer.userId),
       };
 
       // 6. Evaluate precedence + inheritance.

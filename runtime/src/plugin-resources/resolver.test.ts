@@ -40,6 +40,20 @@ const ROLES_MIGRATIONS_DIR = join(import.meta.dir, "..", "roles", "migrations");
 const SERVER = "srv-1";
 const PLUGIN = "family-album";
 
+class TestMigrationError extends Error {
+  readonly code = "MIGRATION_FAILED";
+  readonly context: {
+    migrationSet: string;
+    error: unknown;
+  };
+
+  constructor(migrationSet: string, error: unknown) {
+    super(`${migrationSet} migration failed`);
+    this.name = "TestMigrationError";
+    this.context = { migrationSet, error };
+  }
+}
+
 const ALBUM_TYPE: PluginResourceTypeRegistration = {
   pluginSlug: PLUGIN,
   type: "album",
@@ -85,6 +99,12 @@ function photoRef(id: string): PluginResourceRef {
 function viewer(userId: string): ViewerContext {
   return { userId, serverId: SERVER };
 }
+function viewerIn(serverId: string, userId: string): ViewerContext {
+  return { userId, serverId };
+}
+function memberKey(serverId: string, userId: string): string {
+  return `${serverId}:${userId}`;
+}
 
 // ---------------------------------------------------------------------------
 // Harness — store + injected authorities. Roles/bans/members are mutable maps
@@ -97,7 +117,7 @@ interface Harness {
   resolver: PluginResourceResolver;
   roleOf: Map<string, number>; // userId -> roleId (default 1 = "member")
   banned: Set<string>;
-  members: Set<string>;
+  members: Set<string>; // `${serverId}:${userId}`
 }
 
 const MEMBER_ROLE_ID = 1;
@@ -110,7 +130,7 @@ function makeHarness(roles?: ResolverRoleSource): Harness {
     (dir) => readdirSync(dir),
     (path) => readFileSync(path, "utf-8"),
   );
-  if (!result.ok) throw new Error(`migration failed: ${result.error.message}`);
+  if (!result.ok) throw new TestMigrationError("plugin-resources", result.error);
   const store = new PluginResourceStore(db);
 
   const roleOf = new Map<string, number>();
@@ -124,7 +144,7 @@ function makeHarness(roles?: ResolverRoleSource): Harness {
     store,
     roles: roleSource,
     isBanned: (userId) => banned.has(userId),
-    isMember: (userId) => members.has(userId),
+    isMember: (serverId, userId) => members.has(memberKey(serverId, userId)),
   });
 
   store.registerType(ALBUM_TYPE);
@@ -247,11 +267,32 @@ describe("role & everyone precedence", () => {
   });
 
   test("everyone allow → everyone-allow for a server member", () => {
-    h.members.add("billy");
+    h.members.add(memberKey(SERVER, "billy"));
     h.store.grant(albumKey("a1"), { kind: "everyone" }, "read", "dad");
     const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
     expect(d.allowed).toBe(true);
     expect(d.reason).toBe("everyone-allow");
+  });
+
+  test("everyone allow is scoped to the viewer's server", () => {
+    const otherServer = "srv-2";
+    h.members.add(memberKey(SERVER, "billy"));
+    h.store.createResource({
+      serverId: otherServer,
+      pluginSlug: PLUGIN,
+      resourceType: "album",
+      resourceId: "a1",
+    });
+    h.store.grant(
+      { serverId: otherServer, pluginSlug: PLUGIN, resourceType: "album", resourceId: "a1" },
+      { kind: "everyone" },
+      "read",
+      "dad",
+    );
+
+    const d = h.resolver.canReadPluginResource(viewerIn(otherServer, "billy"), albumRef("a1"));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("default-deny");
   });
 
   test("everyone allow does NOT apply to a non-member (fail-closed membership)", () => {
@@ -284,7 +325,7 @@ describe("cross-tier precedence", () => {
   });
 
   test("user deny overrides everyone allow", () => {
-    h.members.add("billy");
+    h.members.add(memberKey(SERVER, "billy"));
     h.store.grant(albumKey("a1"), { kind: "everyone" }, "read", "dad");
     h.store.deny(albumKey("a1"), { kind: "user", userId: "billy" }, "read", "dad");
     const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
@@ -456,7 +497,7 @@ describe("RolesEngine integration", () => {
       (dir) => readdirSync(dir),
       (path) => readFileSync(path, "utf-8"),
     );
-    if (!rolesResult.ok) throw new Error(`roles migration failed: ${rolesResult.error.message}`);
+    if (!rolesResult.ok) throw new TestMigrationError("roles", rolesResult.error);
     const engine = new RolesEngine(db);
 
     // Assign "moderator" to billy via an owner caller.
@@ -473,7 +514,7 @@ describe("RolesEngine integration", () => {
       (dir) => readdirSync(dir),
       (path) => readFileSync(path, "utf-8"),
     );
-    if (!sres.ok) throw new Error(`store migration failed: ${sres.error.message}`);
+    if (!sres.ok) throw new TestMigrationError("plugin-resources", sres.error);
     const store = new PluginResourceStore(storeDb);
     store.registerType(ALBUM_TYPE);
     store.createResource({ ...albumKey("a1") });
@@ -483,7 +524,7 @@ describe("RolesEngine integration", () => {
       store,
       roles: engine,
       isBanned: () => false,
-      isMember: () => false,
+      isMember: (_serverId, _userId) => false,
     });
 
     const allowed = resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
