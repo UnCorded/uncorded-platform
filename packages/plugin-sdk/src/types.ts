@@ -8,9 +8,21 @@ import type {
   CoreUser,
   CoreCategory,
   PresenceEntry,
+  AuthDecision,
+  PluginResourceAction,
+  PluginResourceRef,
+  PluginResourceTypeRegistration,
+  ResourcePrincipal,
 } from "@uncorded/protocol";
 
 export type { PresenceEntry };
+export type {
+  AuthDecision,
+  PluginResourceAction,
+  PluginResourceRef,
+  PluginResourceTypeRegistration,
+  ResourcePrincipal,
+};
 
 // ---------------------------------------------------------------------------
 // Request handling
@@ -63,6 +75,54 @@ export interface PermissionsApi {
   getRole(userId: string): Promise<{ name: string; level: number }>;
   /** Check if actorId outranks targetId and can perform moderation actions on them. */
   canActOn(actorId: string, targetId: string): Promise<boolean>;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin resources (resources.*) — RP-FOUND-4
+// ---------------------------------------------------------------------------
+
+/**
+ * Plugin resource permissions API. The runtime is the authority: the calling
+ * plugin's slug is stamped on every define/create/grant/revoke, so a plugin can
+ * only register / create / mutate ACLs on its OWN resources. `check` returns the
+ * resolver's decision unchanged.
+ *
+ * Cross-plugin rules are enforced runtime-side and surface as a rejected promise
+ * (`SdkProtocolError`): a `check` on another plugin's resource needs a declared
+ * `resources.read:<owner-plugin>` capability; a grant/revoke on another plugin's
+ * resource is always forbidden.
+ */
+export interface ResourcesApi {
+  /**
+   * Register a resource type for this plugin. `pluginSlug` is supplied by the
+   * runtime from the caller — omit it.
+   */
+  define(registration: Omit<PluginResourceTypeRegistration, "pluginSlug">): Promise<void>;
+  /** Create a resource instance owned by this plugin; returns its canonical ref. */
+  create(input: {
+    resourceType: string;
+    resourceId: string;
+    parent?: { resourceType: string; resourceId: string };
+    owner?: { userId: string };
+  }): Promise<PluginResourceRef>;
+  /** Add an `allow` ACL row; returns the resource's new ACL version. */
+  grant(
+    resource: PluginResourceRef,
+    principal: ResourcePrincipal,
+    action: PluginResourceAction,
+  ): Promise<{ aclVersion: number | null }>;
+  /** Remove an ACL row; returns the resource's new ACL version. */
+  revoke(
+    resource: PluginResourceRef,
+    principal: ResourcePrincipal,
+    action: PluginResourceAction,
+  ): Promise<{ aclVersion: number | null }>;
+  /** Ask the runtime resolver whether a user may perform an action on a resource. */
+  check(
+    userId: string,
+    resource: PluginResourceRef,
+    action: PluginResourceAction,
+  ): Promise<AuthDecision>;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +413,15 @@ export interface PluginHandle {
   events: EventsApi;
   /** Permission checks and registration. */
   permissions: PermissionsApi;
+  /**
+   * Plugin resource permissions (RP-FOUND-4): define resource types, create
+   * instances, manage per-resource ACLs, and ask the resolver authorization
+   * questions. Own-plugin define/create/grant/revoke need no capability;
+   * cross-plugin `check` requires `resources.read:<owner-plugin>` in the
+   * manifest. The runtime returns PLUGIN_RESOURCES_UNAVAILABLE when booted
+   * without the resource backend.
+   */
+  resources: ResourcesApi;
   /** Cross-plugin data reads. */
   data: DataApi;
   /** Own-database access — enforced by runtime capability check. */

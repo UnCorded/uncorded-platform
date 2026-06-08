@@ -12,6 +12,10 @@
 // `z.unknown()` keeps the one signature without weakening per-action sites.
 
 import { z } from "zod";
+import {
+  AuthDecisionSchema,
+  PluginResourceRefSchema,
+} from "@uncorded/protocol-schemas";
 
 // ---------------------------------------------------------------------------
 // Sentinel: result-not-validated (void / ignored responses)
@@ -128,3 +132,23 @@ export const VoiceCreateJoinTokenResult = z.object({
 export const VoiceRemoveParticipantResult = z.object({
   ok: z.literal(true),
 });
+
+// ---------------------------------------------------------------------------
+// Plugin resources (resources.*) — RP-FOUND-4
+// ---------------------------------------------------------------------------
+
+/** `resources.define` ack. */
+export const ResourceDefineResult = z.object({ ok: z.literal(true) });
+
+/** `resources.create` → the canonical ref the runtime stamped. */
+export const ResourceCreateResult = z.object({ ref: PluginResourceRefSchema });
+
+/** `resources.grant` / `resources.revoke` → new ACL version (null if the
+ *  resource row vanished, which the SDK surfaces rather than guessing). */
+export const ResourceAclWriteResult = z.object({
+  ok: z.literal(true),
+  aclVersion: z.number().nullable(),
+});
+
+/** `resources.check` → the resolver's AuthDecision verbatim. */
+export const ResourceCheckResult = AuthDecisionSchema;

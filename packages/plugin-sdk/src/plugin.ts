@@ -9,6 +9,7 @@ import { createHandlerRegistry } from "./handle";
 import { createRequestClient } from "./request";
 import { createEventsApi } from "./events";
 import { createPermissionsApi } from "./permissions";
+import { createResourcesApi } from "./resources";
 import { createDataApi } from "./data";
 import { createDbApi } from "./db";
 import { createCoreApi } from "./core";
@@ -60,6 +61,7 @@ export function createPlugin(options?: PluginOptions): PluginHandle {
   const client = createRequestClient(transport);
   const events = createEventsApi(transport, client);
   const permissions = createPermissionsApi(client);
+  const resources = createResourcesApi(client);
   const data = createDataApi(client);
   const db = createDbApi(client);
   const core = createCoreApi(client);
@@ -132,6 +134,7 @@ export function createPlugin(options?: PluginOptions): PluginHandle {
       unsubscribe: events.unsubscribe,
     },
     permissions,
+    resources,
     data,
     db,
     core,
