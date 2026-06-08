@@ -260,13 +260,22 @@ async function projectValue(
         return { state: "withheld", placeholderShape: { mode: "synthetic" } };
       }
 
-      const resolved = await resolver.resolveGatedValue(viewer, {
-        surfaceId,
-        slotId,
-        policyRef: value.policyRef,
-        resourceRef: value.resourceRef,
-        placeholderShape: value.placeholderShape,
-      });
+      let resolved: ResolvedPluginResourceValue;
+      try {
+        resolved = await resolver.resolveGatedValue(viewer, {
+          surfaceId,
+          slotId,
+          policyRef: value.policyRef,
+          resourceRef: value.resourceRef,
+          placeholderShape: value.placeholderShape,
+        });
+      } catch {
+        // Authorization/materialization uncertainty withholds. Keep the frame
+        // structure intact, but emit a system-controlled placeholder so a
+        // resolver failure cannot bubble into a partial send or leak producer
+        // supplied shape/data.
+        return { state: "withheld", placeholderShape: { mode: "synthetic" } };
+      }
 
       switch (resolved.state) {
         case "visible":

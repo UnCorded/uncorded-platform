@@ -478,4 +478,19 @@ describe("projectCanonicalRenderFrame — fail closed", () => {
     const billy = unwrap(await projectCanonicalRenderFrame(frame, REGISTRY, viewer("billy"), r.resolver));
     expect(findNode(billy, "msg-text")?.value).toEqual({ state: "unsupported", reason: "unknown-resource-type" });
   });
+
+  test("resolver throw fails closed to withheld without rejecting the projection", async () => {
+    const frame = buildPanelFrame();
+    const r = makeResolver(() => {
+      throw new Error("adapter unavailable");
+    });
+
+    const billy = unwrap(await projectCanonicalRenderFrame(frame, REGISTRY, viewer("billy"), r.resolver));
+
+    expect(findNode(billy, "msg-text")?.value).toEqual({
+      state: "withheld",
+      placeholderShape: { mode: "synthetic" },
+    });
+    expect(r.calls.some((c) => c.slotId === "msg-text")).toBe(true);
+  });
 });
