@@ -45,6 +45,7 @@ const ALBUM_TYPE: PluginResourceTypeRegistration = {
   type: "album",
   actions: ["read", "comment", "edit", "share", "admin", "family-album:download"],
   inheritableActions: ["read", "comment"],
+  actionImplications: { edit: ["read"], admin: ["edit", "share"] },
   valueSlots: { title: { policy: "album.read" } },
   producerValueAllowed: false,
 };
@@ -285,6 +286,47 @@ describe("cross-tier precedence", () => {
   test("user deny overrides everyone allow", () => {
     h.members.add("billy");
     h.store.grant(albumKey("a1"), { kind: "everyone" }, "read", "dad");
+    h.store.deny(albumKey("a1"), { kind: "user", userId: "billy" }, "read", "dad");
+    const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("explicit-deny");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Action implications
+// ---------------------------------------------------------------------------
+
+describe("action implications", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = makeHarness();
+    h.store.createResource({ ...albumKey("a1") });
+  });
+
+  test("an allow for an implying action satisfies the implied action", () => {
+    h.store.grant(albumKey("a1"), { kind: "user", userId: "billy" }, "edit", "dad");
+    const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
+    expect(d.allowed).toBe(true);
+    expect(d.reason).toBe("explicit-allow");
+  });
+
+  test("action implications are resolved transitively", () => {
+    h.store.grant(albumKey("a1"), { kind: "user", userId: "billy" }, "admin", "dad");
+    const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
+    expect(d.allowed).toBe(true);
+    expect(d.reason).toBe("explicit-allow");
+  });
+
+  test("a deny for an implying action does not deny the implied action", () => {
+    h.store.deny(albumKey("a1"), { kind: "user", userId: "billy" }, "edit", "dad");
+    const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe("default-deny");
+  });
+
+  test("an exact deny for the requested action still beats an implied allow", () => {
+    h.store.grant(albumKey("a1"), { kind: "user", userId: "billy" }, "edit", "dad");
     h.store.deny(albumKey("a1"), { kind: "user", userId: "billy" }, "read", "dad");
     const d = h.resolver.canReadPluginResource(viewer("billy"), albumRef("a1"));
     expect(d.allowed).toBe(false);

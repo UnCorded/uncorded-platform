@@ -44,7 +44,7 @@ import type {
 } from "@uncorded/protocol";
 import { MAX_PLUGIN_RESOURCE_PARENT_DEPTH } from "@uncorded/protocol";
 import type { PluginResourceStore } from "./store";
-import type { StoredResource } from "./types";
+import type { StoredResource, StoredResourceType } from "./types";
 
 // ---------------------------------------------------------------------------
 // Injected authority sources (plan §7 — the resolver derives, never trusts)
@@ -275,7 +275,7 @@ export class PluginResourceResolver {
     if (!type) return { kind: "error" }; // type vanished mid-chain → malformed
 
     // Local precedence (most-specific-first, deny-wins-within-tier).
-    const local = this.evaluateLocal(node, action, facts);
+    const local = this.evaluateLocal(node, type, action, facts);
     if (local) {
       return { kind: "ok", allowed: local.allowed, reason: local.reason, parentVersions: [] };
     }
@@ -345,6 +345,7 @@ export class PluginResourceResolver {
    */
   private evaluateLocal(
     node: StoredResource,
+    type: StoredResourceType,
     action: PluginResourceAction,
     facts: ViewerFacts,
   ): LocalOutcome | null {
@@ -358,7 +359,7 @@ export class PluginResourceResolver {
     let everyoneDeny = false;
 
     for (const entry of this.deps.store.listAcl(nodeKey(node))) {
-      if (entry.action !== action) continue;
+      if (!this.entryApplies(type, entry.action, entry.effect, action)) continue;
       const isDeny = entry.effect === "deny";
       const p = entry.principal;
 
@@ -397,6 +398,36 @@ export class PluginResourceResolver {
     if (everyoneDeny) return { allowed: false, reason: "everyone-deny" };
     if (everyoneAllow) return { allowed: true, reason: "everyone-allow" };
     return null;
+  }
+
+  /**
+   * An allow row for an implying action can satisfy the implied action
+   * (`edit => read`). A deny row applies only to its exact action: denying
+   * `edit` says nothing about whether `read` is allowed.
+   */
+  private entryApplies(
+    type: StoredResourceType,
+    entryAction: PluginResourceAction,
+    entryEffect: "allow" | "deny",
+    requestedAction: PluginResourceAction,
+  ): boolean {
+    if (entryAction === requestedAction) return true;
+    if (entryEffect === "deny") return false;
+    return this.actionImplies(type, entryAction, requestedAction, new Set<PluginResourceAction>());
+  }
+
+  private actionImplies(
+    type: StoredResourceType,
+    from: PluginResourceAction,
+    to: PluginResourceAction,
+    seen: Set<PluginResourceAction>,
+  ): boolean {
+    if (seen.has(from)) return false;
+    seen.add(from);
+
+    const implied = type.actionImplications?.[from] ?? [];
+    if (implied.includes(to)) return true;
+    return implied.some((next) => this.actionImplies(type, next, to, seen));
   }
 }
 
