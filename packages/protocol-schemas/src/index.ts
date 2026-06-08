@@ -29,6 +29,9 @@ import type {
 // Plugin resource permission foundation schemas (RP-FOUND-1).
 export * from "./plugin-resources.js";
 
+// CoView render-tree projection foundation schemas (CV-FOUND-1).
+export * from "./co-view-render-tree.js";
+
 // ---------------------------------------------------------------------------
 // Common
 // ---------------------------------------------------------------------------
