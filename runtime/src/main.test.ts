@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import {
   boot,
   parseServerConfig,
   BootError,
+  makePluginResourceMembershipCheck,
 } from "./main";
 import type {
   BootDependencies,
@@ -609,6 +611,71 @@ describe("boot — happy path", () => {
     bootResult = await boot(deps);
 
     expect(tunnel.started).toBe(true);
+  });
+
+  test("wires the plugin resource backend without throwing (RP-FOUND-4)", async () => {
+    // Boot constructs the PluginResourceStore + PluginResourceResolver and
+    // hands them to the router via setPluginResources(). If any of that wiring
+    // threw — or the resolver's RolesEngine / CoreModule deps were unsatisfied —
+    // boot() would reject. A clean boot is the proof the backend is wired.
+    const { deps } = createBootDeps();
+
+    bootResult = await boot(deps);
+
+    expect(bootResult.config.server_id).toBe("server_test");
+    // The plugin_resource tables must exist in core.db (migrations ran before
+    // the expected-table assertion, which boot would otherwise fail on).
+    const coreDbPath = join(deps.dataDir!, "core.db");
+    const probe = new Database(coreDbPath, { readonly: true });
+    try {
+      const tables = probe
+        .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table'")
+        .all()
+        .map((r) => r.name);
+      expect(tables).toContain("plugin_resource_types");
+      expect(tables).toContain("plugin_resources");
+      expect(tables).toContain("plugin_resource_acl");
+    } finally {
+      probe.close();
+    }
+  });
+});
+
+// ===========================================================================
+// Tests: makePluginResourceMembershipCheck (server-scoped, fail-closed)
+// ===========================================================================
+
+describe("makePluginResourceMembershipCheck", () => {
+  test("returns true only for the runtime's own server scope AND a real member", () => {
+    const isMember = makePluginResourceMembershipCheck(
+      (userId) => userId === "member-1",
+      "server_test",
+    );
+    expect(isMember("server_test", "member-1")).toBe(true);
+  });
+
+  test("is server-scoped: a foreign serverId denies even for a real member", () => {
+    const isMember = makePluginResourceMembershipCheck(
+      // Underlying source would say yes for anyone — scope must still gate it.
+      () => true,
+      "server_test",
+    );
+    expect(isMember("some-other-server", "member-1")).toBe(false);
+    // Sanity: the same user is a member under the correct scope.
+    expect(isMember("server_test", "member-1")).toBe(true);
+  });
+
+  test("fails closed: a non-member denies under the correct scope", () => {
+    const isMember = makePluginResourceMembershipCheck(
+      (userId) => userId === "member-1",
+      "server_test",
+    );
+    expect(isMember("server_test", "stranger")).toBe(false);
+  });
+
+  test("never falls open when membership is unknown (source returns false)", () => {
+    const isMember = makePluginResourceMembershipCheck(() => false, "server_test");
+    expect(isMember("server_test", "anyone")).toBe(false);
   });
 });
 

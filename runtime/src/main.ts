@@ -34,7 +34,8 @@ import type {
   InstalledPluginInfo,
 } from "./http/types";
 import { RolesEngine } from "./roles/engine";
-import { PluginResourceStore } from "./plugin-resources";
+import { PluginResourceStore, PluginResourceResolver } from "./plugin-resources";
+import type { MembershipCheck } from "./plugin-resources";
 import { seedCorePermissions } from "./core/permission-seeds";
 import { createUpdateStateStore, type UpdateStateStore } from "./update-state/store";
 import { createUpdateLogStore, type UpdateLogStore } from "./update-state/log";
@@ -419,6 +420,25 @@ function defaultListFiles(dir: string): string[] {
 function defaultReadFile(path: string): string {
   const { readFileSync } = require("node:fs") as typeof import("node:fs");
   return readFileSync(path, "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-resource membership check
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the server-scoped, fail-closed `isMember` predicate the plugin-resource
+ * resolver consumes for the `everyone` principal (RP-FOUND-3, plan §6.1). The
+ * runtime hosts exactly one server, so a resource scoped to any *other*
+ * serverId is unrepresentable here and must deny: the predicate returns false
+ * for a mismatched scope, and false when the membership source reports the user
+ * is not a member. Membership-unknown is never an allow.
+ */
+export function makePluginResourceMembershipCheck(
+  isMemberOfServer: (userId: string) => boolean,
+  ownServerId: string,
+): MembershipCheck {
+  return (serverId, userId) => serverId === ownServerId && isMemberOfServer(userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -884,9 +904,10 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
   coreModule.initialize();
 
   // Plugin resource store (RP-FOUND-2) — core-owned resource registry + ACL
-  // tables in core.db. Migrations only here; the registry/resolver are wired in
-  // later RP-FOUND PRs. Runs before the expected-table assertion so its tables
-  // are present when the fail-fast check fires.
+  // tables in core.db. Migrations run here, before the expected-table assertion
+  // so the tables are present when the fail-fast check fires; the store +
+  // resolver instances are constructed and handed to the router just below
+  // (RP-FOUND-4 wiring).
   const pluginResourceMigrationsDir = join(import.meta.dir, "plugin-resources", "migrations");
   const pluginResourceMigrationResult = PluginResourceStore.initialize(
     db,
@@ -915,6 +936,25 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
       `core.db is missing required tables: ${missing?.join(", ") ?? "unknown"}. Refusing to start.`,
     );
   }
+
+  // Plugin resource backend (RP-FOUND-4 wiring). The migrations above created
+  // the tables; build the runtime-authoritative store + ACL resolver now and
+  // hand them to the router below, so `resources.*` IPC is served instead of
+  // answering PLUGIN_RESOURCES_UNAVAILABLE. The resolver derives every
+  // authorization-affecting fact from authoritative sources — roles from
+  // RolesEngine, bans + server membership from CoreModule — never from the
+  // caller (plan §7.2). Both ban and membership fail closed: unknown → deny,
+  // and the membership check additionally rejects any foreign server scope.
+  const pluginResourceStore = new PluginResourceStore(db);
+  const pluginResourceResolver = new PluginResourceResolver({
+    store: pluginResourceStore,
+    roles: rolesEngine,
+    isBanned: (userId) => coreModule.isBanned(userId),
+    isMember: makePluginResourceMembershipCheck(
+      (userId) => coreModule.isMember(userId),
+      config.server_id,
+    ),
+  });
 
   const pluginRegistry = new InMemoryPluginRegistry();
   const installedPlugins = new Map<string, InstalledPluginInfo>();
@@ -974,6 +1014,14 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
   routerRef = router;
   router.setWatchdog(watchdog);
   router.setCoreModule(coreModule);
+  // RP-FOUND-4 — serve the `resources.*` IPC family from the store + resolver
+  // built above. `checkCapability` is supplied per-call by the router from the
+  // calling plugin's CapabilityChecker; serverId is this runtime's own scope.
+  router.setPluginResources({
+    store: pluginResourceStore,
+    resolver: pluginResourceResolver,
+    serverId: config.server_id,
+  });
   try {
     router.setCentralHost(new URL(config.central_url).hostname);
   } catch {

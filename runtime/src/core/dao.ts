@@ -188,6 +188,21 @@ export function countMembers(db: Database): number {
   return row?.n ?? 0;
 }
 
+/**
+ * Whether a user has a membership row in THIS runtime's single-server roster
+ * (joined at least once). There is no `serverId` parameter: `core.db` belongs
+ * to exactly one server, so the `members` table is implicitly that server's.
+ * A bare existence probe — does not join the users table. Used by the
+ * plugin-resource resolver's `everyone` principal; membership-unknown returns
+ * false so the caller fails closed.
+ */
+export function isMember(db: Database, userId: string): boolean {
+  const row = db
+    .query<{ one: number }, [string]>("SELECT 1 AS one FROM members WHERE id = ? LIMIT 1")
+    .get(userId);
+  return row !== null;
+}
+
 // ---------------------------------------------------------------------------
 // Bans DAO
 // ---------------------------------------------------------------------------
