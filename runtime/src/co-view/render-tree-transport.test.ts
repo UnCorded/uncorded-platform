@@ -545,6 +545,36 @@ describe("render-tree transport — enabled", () => {
     expect(findNode(sarah, "btn-delete")?.state).toEqual({ hovered: true });
   });
 
+  test("viewer projections start in parallel, not one viewer at a time", async () => {
+    const blocked = new Map<string, () => void>();
+    const seenFirstCall = new Set<string>();
+    const resolver: CoViewValueResolver = {
+      async resolveGatedValue(v) {
+        if (!seenFirstCall.has(v.userId)) {
+          seenFirstCall.add(v.userId);
+          await new Promise<void>((resolve) => {
+            blocked.set(v.userId, resolve);
+          });
+        }
+        return { state: "withheld", placeholderShape: { mode: "synthetic" }, versions: VERSIONS };
+      },
+    };
+    h.dispose();
+    h = makeHarness({ resolver, enabled: true });
+    const sid = await bootHostAndViewers(h);
+
+    const pendingDispatch = dispatch(h, "c-host", renderTreeFrame(sid, buildFixtureFrame()));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(blocked.has(AUTHORIZED)).toBe(true);
+    expect(blocked.has(UNAUTHORIZED)).toBe(true);
+
+    for (const release of blocked.values()) release();
+    await pendingDispatch;
+    expect(projectedFrames(h)).toHaveLength(2);
+  });
+
   test("a malformed canonical frame is rejected whole — nothing is sent to any viewer", async () => {
     const sid = await bootHostAndViewers(h);
     const frame = buildFixtureFrame();

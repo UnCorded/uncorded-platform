@@ -38,7 +38,11 @@
 import type { ViewerContext, WsCoViewRenderTreeFrame } from "@uncorded/protocol";
 
 import type { CoViewContext } from "./handlers";
-import { projectCanonicalRenderFrame } from "./render-tree-projection";
+import {
+  projectCanonicalRenderFrame,
+  type CoViewProjectionResult,
+} from "./render-tree-projection";
+import type { CoViewMemberInternal } from "./types";
 
 /**
  * Master switch for the render-tree transport path. `false` until the producer
@@ -49,6 +53,34 @@ import { projectCanonicalRenderFrame } from "./render-tree-projection";
  * fail-safe when no override is supplied.
  */
 export const CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED = false;
+
+function traceContext(msg: WsCoViewRenderTreeFrame): {
+  plugin: "co-view";
+  request_id?: string;
+  correlationId?: string;
+} {
+  const raw = msg as unknown as Record<string, unknown>;
+  const requestId = raw["request_id"];
+  const correlationId = raw["correlationId"] ?? raw["correlation_id"];
+  return {
+    plugin: "co-view",
+    ...(typeof requestId === "string" && requestId.length > 0
+      ? { request_id: requestId }
+      : {}),
+    ...(typeof correlationId === "string" && correlationId.length > 0
+      ? { correlationId }
+      : {}),
+  };
+}
+
+function projectionErrorResult(error: unknown): CoViewProjectionResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    ok: false,
+    reason: "invalid-frame",
+    issues: [`projection threw: ${message}`],
+  };
+}
 
 /**
  * Handle a host-emitted canonical render frame: validate, project per viewer,
@@ -66,6 +98,8 @@ export async function handleRenderTreeFrame(
   msg: WsCoViewRenderTreeFrame,
   connectionId: string,
 ): Promise<void> {
+  const log = ctx.log.child(traceContext(msg));
+
   // --- Gate: disabled by default ---------------------------------------
   // Resolve the effective enabled state. Production supplies no transport
   // wiring, so `transport` is undefined and the path is off. A test injects
@@ -77,7 +111,7 @@ export async function handleRenderTreeFrame(
   if (!transport || !enabled) {
     // Drop silently (debug-level) — this is the steady-state production path
     // and must not touch session state or the legacy `co-view.state` channel.
-    ctx.log.debug("co-view: render-tree frame dropped — transport disabled", {
+    log.debug("co-view: render-tree frame dropped — transport disabled", {
       sessionId: msg.session_id,
       connectionId,
     });
@@ -92,7 +126,7 @@ export async function handleRenderTreeFrame(
 
   // --- Host-only: a non-host may not emit render-tree frames ------------
   if (session.hostSessionId !== connectionId) {
-    ctx.log.warn("co-view: non-host emitted render-tree frame", {
+    log.warn("co-view: non-host emitted render-tree frame", {
       sessionId: session.id,
       connectionId,
       surfaceId: msg.frame?.surfaceId,
@@ -107,27 +141,39 @@ export async function handleRenderTreeFrame(
   // projection reject (`ok: false`) → nothing is sent to anyone, satisfying
   // "rejects whole and sends nothing". We still compute it per viewer so the
   // resolver/registry remain the single, per-viewer value authority.
-  for (const member of session.members.values()) {
-    if (member.role === "host") continue;
+  const projections = await Promise.all(
+    Array.from(session.members.values())
+      .filter((member) => member.role !== "host")
+      .map(async (
+        member,
+      ): Promise<{ member: CoViewMemberInternal; result: CoViewProjectionResult }> => {
+        const viewer: ViewerContext = {
+          userId: member.userId,
+          serverId: ctx.deps.serverId,
+        };
 
-    const viewer: ViewerContext = {
-      userId: member.userId,
-      serverId: ctx.deps.serverId,
-    };
+        try {
+          const result = await projectCanonicalRenderFrame(
+            msg.frame,
+            transport.registry,
+            viewer,
+            transport.resolver,
+          );
+          return { member, result };
+        } catch (error) {
+          return { member, result: projectionErrorResult(error) };
+        }
+      }),
+  );
 
-    const result = await projectCanonicalRenderFrame(
-      msg.frame,
-      transport.registry,
-      viewer,
-      transport.resolver,
-    );
+  for (const { member, result } of projections) {
 
     if (!result.ok) {
       // Malformed/unsafe canonical frame — fail closed: send this viewer
       // nothing. (Deterministic across viewers since the schema verdict does
       // not depend on viewer identity, so a malformed frame yields an empty
       // send to all.)
-      ctx.log.warn("co-view: render-tree frame rejected — invalid canonical frame", {
+      log.warn("co-view: render-tree frame rejected — invalid canonical frame", {
         sessionId: session.id,
         surfaceId: msg.frame?.surfaceId,
         issues: result.issues,
