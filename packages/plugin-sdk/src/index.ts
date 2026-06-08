@@ -26,6 +26,12 @@ export type {
   VoiceApi,
   VoiceJoinToken,
   VoiceTokenGrants,
+  ResourcesApi,
+  AuthDecision,
+  PluginResourceAction,
+  PluginResourceRef,
+  PluginResourceTypeRegistration,
+  ResourcePrincipal,
 } from "./types";
 
 export { getCurrentSession, getRequestContext } from "./request-context";

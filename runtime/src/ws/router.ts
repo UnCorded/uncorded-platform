@@ -40,6 +40,10 @@ import {
   handleVoiceModerationIpc,
   type VoiceIpcDeps,
 } from "../voice/ipc";
+import {
+  handlePluginResourcesIpc,
+  type PluginResourceIpcDeps,
+} from "../plugin-resources";
 import type { OpenDatabaseFn } from "../ipc/handlers";
 import type {
   ClientMessage,
@@ -413,6 +417,7 @@ export class MessageRouter {
   private centralHost: string | undefined;
   private presenceModule: ScopedPresenceModule | undefined;
   private voiceIpcDeps: VoiceIpcDeps | undefined;
+  private pluginResourceDeps: Omit<PluginResourceIpcDeps, "checkCapability"> | undefined;
   private coViewDispatcher: CoViewHandle | undefined;
   private connectionRegisteredCallbacks: Array<(connectionId: string) => void> = [];
   private connectionRemovedCallbacks: Array<(connectionId: string) => void> = [];
@@ -465,6 +470,18 @@ export class MessageRouter {
    */
   setVoiceIpcDeps(deps: VoiceIpcDeps): void {
     this.voiceIpcDeps = deps;
+  }
+
+  /**
+   * Set the plugin-resource backend deps for `resources.*` IPC dispatch
+   * (RP-FOUND-4). `checkCapability` is supplied per-call in `attachPlugin` from
+   * the calling plugin's `CapabilityChecker`, so deps here carry only the
+   * store/resolver/serverId. Left unset until the follow-up boot PR wires it —
+   * until then `resources.*` answers PLUGIN_RESOURCES_UNAVAILABLE, mirroring how
+   * `voice.*` behaves when the bridge is unconfigured.
+   */
+  setPluginResources(deps: Omit<PluginResourceIpcDeps, "checkCapability">): void {
+    this.pluginResourceDeps = deps;
   }
 
   /**
@@ -1023,6 +1040,30 @@ export class MessageRouter {
             }
           },
         );
+        return;
+      }
+
+      // --- Plugin resource SDK dispatch (resources.*) — RP-FOUND-4 ---
+      // The generic capability gate is intentionally skipped for resources.*
+      // (they are in the passthrough set); the handler enforces caller
+      // capabilities contextually — own-plugin is always allowed, cross-plugin
+      // READ requires `resources.read:<plugin>`, cross-plugin WRITE is forbidden.
+      // TODO(RP-FOUND-8): add a resources.* rate limiter once the backend is
+      // wired at boot; resources.create can otherwise be called in a tight loop.
+      if (msgType.startsWith("resources.")) {
+        if (!this.pluginResourceDeps) {
+          this.sendIpcError(
+            transport,
+            msg,
+            "PLUGIN_RESOURCES_UNAVAILABLE",
+            "Plugin resources are not configured — runtime was booted without the resource backend.",
+          );
+          return;
+        }
+        handlePluginResourcesIpc(slug, msg, transport, {
+          ...this.pluginResourceDeps,
+          checkCapability: (cap) => this.checkers.get(slug)?.check(cap).ok ?? false,
+        });
         return;
       }
 
@@ -1735,6 +1776,11 @@ export function buildCapabilityString(msg: IpcMessage): string | null {
   if (PASSTHROUGH_TYPES.has(msgType)) return null;
   // All core.* actions are available to every plugin without capability declarations.
   if (msgType.startsWith("core.")) return null;
+  // resources.* (RP-FOUND-4) bypass the generic gate: their authorization is
+  // context-dependent (own-plugin allowed; cross-plugin read needs
+  // `resources.read:<plugin>`; cross-plugin write forbidden) and is enforced
+  // inside handlePluginResourcesIpc BEFORE the resolver/store is consulted.
+  if (msgType.startsWith("resources.")) return null;
 
   // Self-scoped: data.sql, data.kv, storage.file
   if (SELF_SCOPED_TYPES.has(msgType)) {
