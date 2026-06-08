@@ -117,7 +117,16 @@ export class PluginResourceValueGate {
 
     // 6. Allowed + non-secret → materialize from the runtime-controlled adapter
     //    path. A missing adapter answer fails closed to a placeholder.
-    const raw = await this.deps.adapter.resolveValue(ref.resourceType, ref.resourceId, slotRef.slot);
+    let raw;
+    try {
+      raw = await this.deps.adapter.resolveValue(ref.resourceType, ref.resourceId, slotRef.slot);
+    } catch {
+      return {
+        state: "withheld",
+        placeholderShape: { mode: "synthetic" },
+        versions: decision.versions,
+      };
+    }
     if (raw === null || !raw.exists || raw.value === undefined) {
       return {
         state: "withheld",

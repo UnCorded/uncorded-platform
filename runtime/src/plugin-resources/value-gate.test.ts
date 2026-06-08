@@ -32,6 +32,20 @@ const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 const SERVER = "srv-1";
 const PLUGIN = "family-album";
 
+class TestMigrationError extends Error {
+  readonly code = "MIGRATION_FAILED";
+  readonly context: {
+    migrationSet: string;
+    error: unknown;
+  };
+
+  constructor(migrationSet: string, error: unknown) {
+    super("migration failed");
+    this.name = "TestMigrationError";
+    this.context = { migrationSet, error };
+  }
+}
+
 const ALBUM_TYPE: PluginResourceTypeRegistration = {
   pluginSlug: PLUGIN,
   type: "album",
@@ -68,6 +82,7 @@ interface Harness {
   callLog: string[];
   setDecision: (d: AuthDecision) => void;
   setAdapterResult: (r: AdapterResolveValueResult | null) => void;
+  setAdapterReject: (err: unknown) => void;
 }
 
 function makeHarness(): Harness {
@@ -78,7 +93,7 @@ function makeHarness(): Harness {
     (dir) => readdirSync(dir),
     (path) => readFileSync(path, "utf-8"),
   );
-  if (!init.ok) throw new Error(`migration failed: ${init.error.message}`);
+  if (!init.ok) throw new TestMigrationError("plugin-resources", init.error);
   const store = new PluginResourceStore(db);
   store.registerType(ALBUM_TYPE);
 
@@ -89,6 +104,7 @@ function makeHarness(): Harness {
     value: "the-real-bytes",
     valueVersion: 3,
   };
+  let adapterError: unknown = null;
 
   // Mock resolver: records when it was consulted and returns the pinned
   // decision. Cast through unknown because the gate's dep is the concrete
@@ -108,6 +124,7 @@ function makeHarness(): Harness {
     describe: async () => null,
     resolveValue: async (): Promise<AdapterResolveValueResult | null> => {
       callLog.push("adapter");
+      if (adapterError !== null) throw adapterError;
       return adapterResult;
     },
   };
@@ -120,7 +137,11 @@ function makeHarness(): Harness {
       decision = d;
     },
     setAdapterResult: (r) => {
+      adapterError = null;
       adapterResult = r;
+    },
+    setAdapterReject: (err) => {
+      adapterError = err;
     },
   };
 }
@@ -238,5 +259,13 @@ describe("materializeValue ordering & gating", () => {
     h.setAdapterResult({ exists: false, valueVersion: 1 });
     const r = await h.gate.materializeValue(viewer("billy"), slot(albumRef("a1"), "title"));
     expect(r.state).toBe("withheld");
+  });
+
+  test("allow but adapter rejects → fail closed to withheld", async () => {
+    h.setDecision(allowDecision());
+    h.setAdapterReject(new Error("adapter down"));
+    const r = await h.gate.materializeValue(viewer("billy"), slot(albumRef("a1"), "title"));
+    expect(r.state).toBe("withheld");
+    expect(h.callLog).toEqual(["resolver", "adapter"]);
   });
 });
