@@ -28,6 +28,7 @@ import {
   handleSnapshotRes,
   handleState,
 } from "./state-handlers";
+import { handleRenderTreeFrame } from "./render-tree-transport";
 import type {
   CoViewClientMessage,
   CoViewDeps,
@@ -99,6 +100,12 @@ export function startCoView(deps: CoViewDeps): CoViewHandle {
         return;
       case "co-view.snapshot.res":
         handleSnapshotRes(ctx, message, connectionId);
+        return;
+      case "co-view.render-tree.frame":
+        // CV-FOUND-4b: disabled by default (see CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED
+        // + the optional renderTreeTransport wiring). Awaited because projection
+        // resolves gated values through the injected async value authority.
+        await handleRenderTreeFrame(ctx, message, connectionId);
         return;
     }
   }

@@ -48,6 +48,25 @@ describe("ClientMessageSchema", () => {
     ).toBe(false);
   });
 
+  test("co-view render-tree host frames stay out of the generic client schema", () => {
+    // Runtime inbound CoView frames use the router's narrow parseClientMessage
+    // guard; ClientMessageSchema remains the auth/request plugin client schema.
+    expect(
+      ClientMessageSchema.safeParse({
+        type: "co-view.render-tree.frame",
+        session_id: "sess-1",
+        frame: {
+          surfaceId: "text-channel",
+          root: {
+            id: "root",
+            kind: "element",
+            box: { x: 0, y: 0, width: 1, height: 1 },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("__proto__ key on params is preserved as a string field, not prototype-polluted", () => {
     // Zod rejects unknown keys on object schemas by default — but params is
     // record(string, unknown), so it accepts arbitrary keys. The point of this
@@ -104,6 +123,23 @@ describe("ServerMessageSchema", () => {
     expect(
       ServerMessageSchema.safeParse({ type: "garbage", x: 1 }).success,
     ).toBe(false);
+  });
+
+  test("co-view projected render-tree frame valid", () => {
+    expect(
+      ServerMessageSchema.safeParse({
+        type: "co-view.render-tree.projected",
+        session_id: "sess-1",
+        frame: {
+          surfaceId: "text-channel",
+          root: {
+            id: "root",
+            kind: "element",
+            box: { x: 0, y: 0, width: 1, height: 1 },
+          },
+        },
+      }).success,
+    ).toBe(true);
   });
 
 });

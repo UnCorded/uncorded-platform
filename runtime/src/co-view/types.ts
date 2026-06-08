@@ -13,6 +13,7 @@ import type {
   CoViewMemberLeftReason,
   CoViewRenderMode,
   CoViewStateSnapshot,
+  CoViewSurfaceRegistry,
   CoViewVisibility,
   WsCoViewCursor,
   WsCoViewEndReq,
@@ -21,6 +22,7 @@ import type {
   WsCoViewKickReq,
   WsCoViewLeaveReq,
   WsCoViewListReq,
+  WsCoViewRenderTreeFrame,
   WsCoViewSnapshotReq,
   WsCoViewSnapshotRes,
   WsCoViewStartReq,
@@ -32,6 +34,7 @@ import type { RolesEngine } from "../roles/engine";
 import type { EventBus } from "../events/bus";
 import type { ScopedPresenceModule } from "../presence";
 import type { AuthenticatedUser } from "../ws/types";
+import type { CoViewValueResolver } from "./render-tree-projection";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -222,6 +225,32 @@ export type SendToConnectionFn = (connectionId: string, message: unknown) => voi
 export type GetConnectedUserFn = (connectionId: string) => AuthenticatedUser | undefined;
 
 // ---------------------------------------------------------------------------
+// Render-tree transport wiring (CV-FOUND-4b) — optional, disabled in production
+// ---------------------------------------------------------------------------
+
+/**
+ * Injected wiring for the render-tree transport path. Production boot supplies
+ * this as `undefined`, so the path stays disabled and unwired (the legacy
+ * `co-view.state` channel is the only live producer→viewer path). Tests inject a
+ * surface registry + value resolver test-double here to exercise the gated path.
+ *
+ * Even when present, the path stays gated behind
+ * `CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED` unless `enabled` is explicitly set —
+ * so wiring the dependency in is not, by itself, enough to make it live.
+ */
+export interface CoViewRenderTreeTransportDeps {
+  /** Surface schema registry used to gate protected-value provenance per viewer. */
+  registry: CoViewSurfaceRegistry;
+  /** The injected runtime value authority for gated values. */
+  resolver: CoViewValueResolver;
+  /**
+   * Test-only override of the disabled module flag. Omitted in production, where
+   * `CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED` (false) governs.
+   */
+  enabled?: boolean | undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Client-message union for dispatch
 // ---------------------------------------------------------------------------
 
@@ -237,7 +266,8 @@ export type CoViewClientMessage =
   | WsCoViewEvent
   | WsCoViewCursor
   | WsCoViewSnapshotReq
-  | WsCoViewSnapshotRes;
+  | WsCoViewSnapshotRes
+  | WsCoViewRenderTreeFrame;
 
 export function isCoViewClientMessage(msg: ClientMessage): msg is CoViewClientMessage {
   switch (msg.type) {
@@ -253,6 +283,7 @@ export function isCoViewClientMessage(msg: ClientMessage): msg is CoViewClientMe
     case "co-view.cursor":
     case "co-view.snapshot.req":
     case "co-view.snapshot.res":
+    case "co-view.render-tree.frame":
       return true;
     default:
       return false;
@@ -280,6 +311,13 @@ export interface CoViewDeps {
   clearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
   /** Injectable id generator (for deterministic tests). Defaults to ulid-ish crypto.randomUUID. */
   generateSessionId?: () => string;
+  /**
+   * Optional render-tree transport wiring (CV-FOUND-4b). Undefined in
+   * production — the transport path is disabled by default and unwired. When
+   * present (tests), the path is still gated behind
+   * `CO_VIEW_RENDER_TREE_TRANSPORT_ENABLED` unless `enabled` is set.
+   */
+  renderTreeTransport?: CoViewRenderTreeTransportDeps | undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,8 @@ import type {
   CoViewSurfaceSchema,
   CoViewSurfaceRegistry,
   CoViewSlotValidationResult,
+  WsCoViewRenderTreeFrame,
+  WsCoViewRenderTreeProjected,
 } from "@uncorded/protocol";
 
 // ---------------------------------------------------------------------------
@@ -260,6 +262,40 @@ export const CoViewProjectedRenderFrameSchema = z.strictObject({
   surfaceId: z.string().min(1),
   root: CoViewProjectedNodeSchema,
 }) satisfies z.ZodType<CoViewProjectedRenderFrame>;
+
+// ---------------------------------------------------------------------------
+// Render-tree transport wire frames (CV-FOUND-4b)
+// ---------------------------------------------------------------------------
+//
+// Envelope schemas for the additive transport frames that carry the canonical /
+// projected render-tree shapes over the CoView WS channel. They reuse the
+// canonical / projected frame schemas above as the `frame` payload, so the same
+// fail-closed structural guarantees (no `local`, no value-bearing secret, strict
+// attr allowlist, safe node kinds) apply to a frame on the wire. `z.object`
+// (not strict) on the envelope tolerates forward-compatible additive fields,
+// matching the other CoView server-frame schemas in `index.ts`.
+
+/**
+ * Host → runtime canonical render frame envelope. The runtime has its own narrow
+ * inbound guard (`parseClientMessage` + `isCoViewClientMessage`) and does not
+ * consult this schema for dispatch, but it is exported for symmetry and for
+ * tests that want to assert a frame is well-formed.
+ */
+export const WsCoViewRenderTreeFrameSchema = z.object({
+  type: z.literal("co-view.render-tree.frame"),
+  session_id: z.string(),
+  frame: CoViewCanonicalRenderFrameSchema,
+}) satisfies z.ZodType<WsCoViewRenderTreeFrame>;
+
+/**
+ * Runtime → viewer projected render frame envelope. Added to `ServerMessageSchema`
+ * so the website's server-frame validator forwards it instead of dropping it.
+ */
+export const WsCoViewRenderTreeProjectedSchema = z.object({
+  type: z.literal("co-view.render-tree.projected"),
+  session_id: z.string(),
+  frame: CoViewProjectedRenderFrameSchema,
+}) satisfies z.ZodType<WsCoViewRenderTreeProjected>;
 
 // ---------------------------------------------------------------------------
 // Surface schema registry (foundation-plan §4.9)
