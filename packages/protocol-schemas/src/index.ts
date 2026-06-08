@@ -26,6 +26,9 @@ import type {
   IpcEventDeliverMessage,
 } from "@uncorded/protocol";
 
+// Plugin resource permission foundation schemas (RP-FOUND-1).
+export * from "./plugin-resources.js";
+
 // ---------------------------------------------------------------------------
 // Common
 // ---------------------------------------------------------------------------
