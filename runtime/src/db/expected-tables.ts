@@ -6,9 +6,9 @@
 //
 // Per spec-22-core-module.md Amendment B, "Fail-fast migration assertion".
 //
-// When adding a new table to either runtime/src/core/migrations/ or
-// runtime/src/roles/migrations/, append its name here. The list is sorted
-// by subsystem to keep diffs readable.
+// When adding a new table to runtime/src/core/migrations/,
+// runtime/src/roles/migrations/, or runtime/src/plugin-resources/migrations/,
+// append its name here. The list is sorted by subsystem to keep diffs readable.
 
 export const EXPECTED_TABLES: readonly string[] = [
   // Roles subsystem (runtime/src/roles/migrations/)
@@ -33,4 +33,9 @@ export const EXPECTED_TABLES: readonly string[] = [
   "categories",
   "voice_config",
   "voice_reachability_state",
+
+  // Plugin resource store (runtime/src/plugin-resources/migrations/)
+  "plugin_resource_types",
+  "plugin_resources",
+  "plugin_resource_acl",
 ] as const;
