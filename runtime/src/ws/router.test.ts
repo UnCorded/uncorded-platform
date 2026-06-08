@@ -1829,6 +1829,9 @@ describe("plugin resource dispatch (resources.*)", () => {
       roles: { getRole: () => ({ id: 1 }) },
       isBanned: () => false,
       // Server-scoped, fail-closed predicate (mirrors makePluginResourceMembershipCheck).
+      // userId check omitted here; makePluginResourceMembershipCheck unit tests
+      // cover per-user membership. This stub only needs to admit the runtime's
+      // own server so the router-dispatch path reaches the resolver.
       isMember: (serverId, _userId) => serverId === "srv-1",
     });
     return { store, resolver };
