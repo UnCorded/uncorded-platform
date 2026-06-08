@@ -248,11 +248,28 @@ export class PluginResourceStore {
     let depth = 0;
 
     if (input.parent) {
-      const check = this.validateParent(input.serverId, input.pluginSlug, type, input.resourceId, input.parent);
+      const check = this.validateParent(
+        input.serverId,
+        input.pluginSlug,
+        type,
+        input.resourceId,
+        input.parent,
+        input.resourceType,
+      );
       if (!check.ok) return check;
       parentType = input.parent.resourceType;
       parentId = input.parent.resourceId;
       depth = check.value;
+    } else if (type.parentType !== null && type.parentType !== type.type) {
+      // A type whose parent is a *different* type must always be created under a
+      // parent; a parentless instance is an orphan that cannot participate in the
+      // tree (plan §4.1 parent metadata integrity). Self-referential types
+      // (parentType === type, e.g. nested folders / threads) are exempt: their
+      // tree root legitimately has no parent.
+      return err(
+        "PARENT_REQUIRED",
+        `Resource type "${type.type}" declares parentType "${type.parentType}"; a parent is required.`,
+      );
     }
 
     const now = Date.now();

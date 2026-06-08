@@ -253,6 +253,38 @@ describe("createResource", () => {
     if (!res.ok) expect(res.error.code).toBe("PARENT_NOT_FOUND");
   });
 
+  test("rejects creating a parent-typed resource as a root (no parent given)", () => {
+    // photo declares parentType "album"; omitting the parent must reject rather
+    // than silently create an orphan that cannot participate in the tree.
+    const res = store.createResource({
+      serverId: SERVER,
+      pluginSlug: PLUGIN,
+      resourceType: "photo",
+      resourceId: "p1",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PARENT_REQUIRED");
+    expect(store.getResource({ serverId: SERVER, pluginSlug: PLUGIN, resourceType: "photo", resourceId: "p1" })).toBeNull();
+  });
+
+  test("allows a child sharing the parent's resourceId across different types", () => {
+    // album:same and photo:same are distinct keys (type differs). The self-parent
+    // cycle check must compare type AND id, not id alone.
+    store.createResource({ serverId: SERVER, pluginSlug: PLUGIN, resourceType: "album", resourceId: "same" });
+    const res = store.createResource({
+      serverId: SERVER,
+      pluginSlug: PLUGIN,
+      resourceType: "photo",
+      resourceId: "same",
+      parent: { resourceType: "album", resourceId: "same" },
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.parentType).toBe("album");
+    expect(res.value.parentId).toBe("same");
+    expect(res.value.depth).toBe(1);
+  });
+
   test(`rejects a parent chain deeper than ${MAX_PLUGIN_RESOURCE_PARENT_DEPTH}`, () => {
     // node:node self-parenting chain. n0 (depth 0) .. nMAX (depth MAX) ok,
     // the next link would be depth MAX+1 and must reject.
