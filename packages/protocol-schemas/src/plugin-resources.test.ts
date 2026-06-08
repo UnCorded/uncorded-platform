@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import {
+  JsonValueSchema,
   PluginResourceKeySchema,
   PluginResourceRefSchema,
   BasePluginResourceActionSchema,
@@ -16,6 +17,30 @@ import {
   ResourcePrincipalSchema,
   ResourceAclEntrySchema,
 } from "./plugin-resources";
+
+// ---------------------------------------------------------------------------
+// JSON value
+// ---------------------------------------------------------------------------
+
+describe("JsonValueSchema", () => {
+  test("accepts primitives", () => {
+    for (const v of ["str", 42, true, false, null]) {
+      expect(JsonValueSchema.safeParse(v).success).toBe(true);
+    }
+  });
+
+  test("accepts nested array/object", () => {
+    expect(JsonValueSchema.safeParse({ a: [1, { b: null }] }).success).toBe(true);
+  });
+
+  test("rejects undefined", () => {
+    expect(JsonValueSchema.safeParse(undefined).success).toBe(false);
+  });
+
+  test("rejects function", () => {
+    expect(JsonValueSchema.safeParse(() => {}).success).toBe(false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Resource identity
@@ -107,6 +132,9 @@ describe("action vocabulary", () => {
     expect(PluginResourceActionSchema.safeParse("a::b").success).toBe(false);
     expect(PluginResourceActionSchema.safeParse(":download").success).toBe(false);
     expect(PluginResourceActionSchema.safeParse("family-album:").success).toBe(false);
+    expect(
+      PluginResourceActionSchema.safeParse("family-album:download:extra").success,
+    ).toBe(false);
   });
 });
 
@@ -149,6 +177,16 @@ describe("PlaceholderShapeSchema", () => {
         mode: "preserve-host-rect",
         sizeLeakAccepted: false,
         reason: "x",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("preserve-host-rect reason must be non-empty", () => {
+    expect(
+      PlaceholderShapeSchema.safeParse({
+        mode: "preserve-host-rect",
+        sizeLeakAccepted: true,
+        reason: "",
       }).success,
     ).toBe(false);
   });
@@ -477,6 +515,27 @@ describe("PluginResourceTypeRegistrationSchema", () => {
       PluginResourceTypeRegistrationSchema.safeParse({
         ...valid,
         actions: ["read", "delete"],
+      }).success,
+    ).toBe(false);
+  });
+
+  test("inheritableActions must be a subset of actions", () => {
+    expect(
+      PluginResourceTypeRegistrationSchema.safeParse({
+        ...valid,
+        actions: ["admin"],
+        inheritableActions: ["read"],
+      }).success,
+    ).toBe(false);
+  });
+
+  test("actionImplications values must reference declared actions", () => {
+    expect(
+      PluginResourceTypeRegistrationSchema.safeParse({
+        ...valid,
+        actions: ["edit"],
+        inheritableActions: [],
+        actionImplications: { edit: ["read"] },
       }).success,
     ).toBe(false);
   });

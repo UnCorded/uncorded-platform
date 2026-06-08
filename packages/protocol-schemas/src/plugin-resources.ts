@@ -91,7 +91,7 @@ export const PluginResourceActionSchema = z.union([
   z.string().regex(CUSTOM_PLUGIN_RESOURCE_ACTION_RE),
 ]);
 
-const ProtocolIdentifierSchema = z
+export const ProtocolIdentifierSchema = z
   .string()
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "protocol-identifier");
 
@@ -112,7 +112,7 @@ export const PlaceholderShapeSchema = z.discriminatedUnion("mode", [
     mode: z.literal("preserve-host-rect"),
     // `true` literal: omission cannot opt into the size/existence leak.
     sizeLeakAccepted: z.literal(true),
-    reason: z.string(),
+    reason: z.string().min(1),
   }),
   z.object({
     mode: z.literal("absent"),
@@ -229,20 +229,39 @@ export const ValueSlotDefinitionSchema = z.object({
   secret: z.boolean().optional(),
 }) satisfies z.ZodType<ValueSlotDefinition>;
 
-export const PluginResourceTypeRegistrationSchema = z.object({
-  pluginSlug: z.string().min(1),
-  type: z.string().min(1),
-  parentType: z.string().min(1).optional(),
-  actions: z.array(PluginResourceActionSchema),
-  inheritableActions: z.array(PluginResourceActionSchema),
-  actionImplications: z
-    .record(PluginResourceActionSchema, z.array(PluginResourceActionSchema))
-    .optional(),
-  valueSlots: z.record(ProtocolIdentifierSchema, ValueSlotDefinitionSchema),
-  // Required, not optional — a registration must state the choice; the future
-  // registry treats the semantic default as `false` (plan §4.2, §10.6).
-  producerValueAllowed: z.boolean(),
-}) satisfies z.ZodType<PluginResourceTypeRegistration>;
+export const PluginResourceTypeRegistrationSchema = z
+  .object({
+    pluginSlug: z.string().min(1),
+    type: z.string().min(1),
+    parentType: z.string().min(1).optional(),
+    actions: z.array(PluginResourceActionSchema),
+    inheritableActions: z.array(PluginResourceActionSchema),
+    actionImplications: z
+      .record(PluginResourceActionSchema, z.array(PluginResourceActionSchema))
+      .optional(),
+    valueSlots: z.record(ProtocolIdentifierSchema, ValueSlotDefinitionSchema),
+    // Required, not optional — a registration must state the choice; the future
+    // registry treats the semantic default as `false` (plan §4.2, §10.6).
+    producerValueAllowed: z.boolean(),
+  })
+  .refine(
+    (r) => r.inheritableActions.every((a) => r.actions.includes(a)),
+    {
+      message: "inheritableActions must be a subset of actions",
+      path: ["inheritableActions"],
+    },
+  )
+  .refine(
+    (r) =>
+      Object.entries(r.actionImplications ?? {}).every(
+        ([action, implied]) =>
+          r.actions.includes(action) && implied.every((a) => r.actions.includes(a)),
+      ),
+    {
+      message: "actionImplications must reference declared actions",
+      path: ["actionImplications"],
+    },
+  ) satisfies z.ZodType<PluginResourceTypeRegistration>;
 
 // ---------------------------------------------------------------------------
 // ACL model (plan §6)

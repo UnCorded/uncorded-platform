@@ -343,7 +343,7 @@ export interface PluginResourceTypeRegistration {
   inheritableActions: PluginResourceAction[];
   /** Declared action implications, e.g. `{ edit: ["read"] }` for "edit ⇒ read"
    *  (plan §5.1). Absent means no implications — `admin` does not imply `read`. */
-  actionImplications?: Record<string, PluginResourceAction[]> | undefined;
+  actionImplications?: Partial<Record<PluginResourceAction, PluginResourceAction[]>> | undefined;
   /** Named data-bearing slots and their policy mapping (plan §4.5). */
   valueSlots: Record<string, ValueSlotDefinition>;
   /**
