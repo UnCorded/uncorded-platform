@@ -34,6 +34,7 @@ import type {
   InstalledPluginInfo,
 } from "./http/types";
 import { RolesEngine } from "./roles/engine";
+import { PluginResourceStore } from "./plugin-resources";
 import { seedCorePermissions } from "./core/permission-seeds";
 import { createUpdateStateStore, type UpdateStateStore } from "./update-state/store";
 import { createUpdateLogStore, type UpdateLogStore } from "./update-state/log";
@@ -881,6 +882,25 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
   // Core Module — initialized before any plugin loads.
   const coreModule = new CoreModule(db, eventBus, log);
   coreModule.initialize();
+
+  // Plugin resource store (RP-FOUND-2) — core-owned resource registry + ACL
+  // tables in core.db. Migrations only here; the registry/resolver are wired in
+  // later RP-FOUND PRs. Runs before the expected-table assertion so its tables
+  // are present when the fail-fast check fires.
+  const pluginResourceMigrationsDir = join(import.meta.dir, "plugin-resources", "migrations");
+  const pluginResourceMigrationResult = PluginResourceStore.initialize(
+    db,
+    pluginResourceMigrationsDir,
+    listFiles,
+    readFile,
+  );
+  if (!pluginResourceMigrationResult.ok) {
+    db.close();
+    throw new BootError(
+      "DB_MIGRATION_FAILED",
+      `Plugin resource store migration failed: ${pluginResourceMigrationResult.error.message}`,
+    );
+  }
 
   // Fail-fast: every expected table must exist after both roles + core
   // migrations have run. A half-migrated server will silently lose audit
