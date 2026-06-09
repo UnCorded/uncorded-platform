@@ -87,8 +87,12 @@ jobs:
 
       - name: Test (desktop)
         if: matrix.os == 'ubuntu-latest'
-        run: bun test src/auto-update.test.ts
-        working-directory: apps/desktop
+        # Run from the repo root so the electron mock registered in the root
+        # bunfig.toml ([test] preload = ./apps/desktop/test/preload-electron.ts)
+        # is applied. From apps/desktop that root-relative preload path doesn't
+        # resolve, electron stays unmocked, and `import { ipcMain }` fails with
+        # "Export named 'ipcMain' not found" on ubuntu-latest.
+        run: bun test apps/desktop/src/auto-update.test.ts
 
       # Download the per-platform cosign binary into apps/desktop/resources/
       # so electron-builder's `extraResources` block can pick it up. cosign
