@@ -706,7 +706,7 @@ Frontend:
     <script src="/sdk/plugin-frontend.js"></script>
     <script>
       (async () => {
-        const sdk = await window.UnCordedPlugin.createPluginFrontend();
+        const sdk = await window.UncodedPlugin.createPluginFrontend();
         const res = await fetch("/proxy-sessions/foundry-vtt/foundry", {
           method: "POST",
           headers: { Authorization: `Bearer ${sdk.token}` },

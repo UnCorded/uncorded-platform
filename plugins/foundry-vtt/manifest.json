@@ -22,9 +22,9 @@
     {
       "key": "foundry_upstream_url",
       "label": "Foundry upstream URL",
-      "description": "Base URL of the Foundry VTT server this plugin proxies to. Changing this invalidates the mount approval until an owner re-approves it.",
+      "description": "Base URL of the Foundry VTT server this plugin proxies to. Docker users can use http://host.docker.internal:30000 for local testing. Changing this invalidates the mount approval until an owner re-approves it.",
       "type": "string",
-      "default": "http://host.docker.internal:30000",
+      "default": "https://example.com",
       "required": true
     }
   ],

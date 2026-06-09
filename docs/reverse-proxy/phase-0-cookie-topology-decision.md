@@ -79,7 +79,7 @@ browser will send the cookie to non-proxy runtime routes — so **only
 
 ### Production (HTTPS tunnel — trycloudflare or custom hostname; cross-site)
 
-```
+```text
 Name:        __Host-uncorded-proxy-<pluginSlug>-<mountName>
 Value:       signed, opaque, mount-bound (user id, server id, plugin slug,
              mount name, approval version, expiry)
@@ -93,7 +93,7 @@ name (forces Secure + Path=/ + no Domain), and binding is carried in the value.
 
 ### Local dev where the runtime is `http://localhost:3000` (same-site, no HTTPS)
 
-```
+```text
 Name:        uncorded-proxy-<pluginSlug>-<mountName>   (no __Host-/Partitioned)
 Attributes:  HttpOnly; Path=/; SameSite=Lax
 ```
@@ -258,6 +258,6 @@ single dev-only branch for the `http://localhost` runtime case. Phase 5 must
 implement the Safari fallback.
 
 The [`cookie-spike/`](./cookie-spike/) harness, this record's raw runs, and the
-standalone multi-engine driver (`C:\Users\jusss\pw-spike`, throwaway) backed
+standalone multi-engine driver (`<USER_HOME>/pw-spike`, throwaway) backed
 these results. The `cookie-spike/` directory is disposable now that this is
 locked.

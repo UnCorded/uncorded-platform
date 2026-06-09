@@ -13,6 +13,7 @@
 
 export { createPluginFrontend } from "./plugin";
 export { SDK_API_VERSION } from "./version";
+export { PluginError } from "./errors";
 export type {
   PluginFrontend,
   NavigateEvent,
