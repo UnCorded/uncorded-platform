@@ -47,6 +47,20 @@ type MessageHandler = (data: unknown) => void;
 export type CoViewListMessage = WsCoViewListChanged;
 export type CoViewListHandler = (msg: CoViewListMessage) => void;
 
+// Projected render-tree frames (CV-FOUND-6) ride their own dedicated subscriber
+// set — NOT the legacy `coViewSessionSubscribers` family — so the gated,
+// sanitized-viewer feature stays isolated from the live state/cursor/pen
+// consumers. The frame already passes `ServerMessageSchema`; this set is the
+// website-side receive path that lands it in the projected-frame store. Dormant
+// until a viewer surface subscribes (`CO_VIEW_PROJECTED_VIEWER_ENABLED`).
+export type CoViewRenderTreeProjectedMessage = Extract<
+  ServerMessage,
+  { type: "co-view.render-tree.projected" }
+>;
+export type CoViewRenderTreeProjectedHandler = (
+  msg: CoViewRenderTreeProjectedMessage,
+) => void;
+
 export type CoViewSessionMessage = Extract<
   ServerMessage,
   {
@@ -112,6 +126,8 @@ interface Connection {
   coViewSessionSubscribers: Set<CoViewSessionSubscription>;
   /** Active co-view ack/nak/list.res subscribers (lifecycle one-shot replies). */
   coViewAckSubscribers: Set<CoViewAckHandler>;
+  /** Active co-view.render-tree.projected subscribers (CV-FOUND-6 receive path). */
+  coViewRenderTreeProjectedSubscribers: Set<CoViewRenderTreeProjectedHandler>;
   backoff: number;
   dead: boolean;
   /** Set true when the server confirms the auth handshake (auth.result ok:true).
@@ -131,6 +147,11 @@ const pendingCoViewListSubscribers = new Map<string, Set<CoViewListHandler>>();
 const pendingCoViewSessionSubscribers = new Map<string, Set<CoViewSessionSubscription>>();
 /** Co-view ack/nak subscribers registered before the WS connection resolves. */
 const pendingCoViewAckSubscribers = new Map<string, Set<CoViewAckHandler>>();
+/** Co-view projected-frame subscribers registered before the WS connection resolves. */
+const pendingCoViewRenderTreeProjectedSubscribers = new Map<
+  string,
+  Set<CoViewRenderTreeProjectedHandler>
+>();
 /** Messages sent before the WS connection resolves; flushed on open.
  *  Plugin iframes can mount and fire getMessages before the WS finishes its
  *  auth handshake (workspace layouts load over HTTP, independent of WS), so
@@ -325,6 +346,32 @@ export function onCoViewAckMessage(
   };
 }
 
+// Subscribe to inbound `co-view.render-tree.projected` frames for the given
+// server (CV-FOUND-6). Same buffer-and-flush model as the other subscriber
+// sets. The projected-frame store is the intended subscriber; it demuxes by
+// `session_id` internally. Returns an unsubscribe function.
+export function onCoViewRenderTreeProjected(
+  serverId: string,
+  handler: CoViewRenderTreeProjectedHandler,
+): () => void {
+  const conn = connections.get(serverId);
+  if (conn) {
+    conn.coViewRenderTreeProjectedSubscribers.add(handler);
+  } else {
+    let pending = pendingCoViewRenderTreeProjectedSubscribers.get(serverId);
+    if (!pending) {
+      pending = new Set();
+      pendingCoViewRenderTreeProjectedSubscribers.set(serverId, pending);
+    }
+    pending.add(handler);
+  }
+  return () => {
+    const c = connections.get(serverId);
+    c?.coViewRenderTreeProjectedSubscribers.delete(handler);
+    pendingCoViewRenderTreeProjectedSubscribers.get(serverId)?.delete(handler);
+  };
+}
+
 // Send a one-shot request to a plugin and return the result as a Promise.
 // Safe to call before the WS is OPEN — the handler is buffered into
 // pendingHandlers and the send into pendingSends, both flushed on ws.onopen.
@@ -486,6 +533,7 @@ export function disconnect(serverId: string): void {
   pendingCoViewListSubscribers.delete(serverId);
   pendingCoViewSessionSubscribers.delete(serverId);
   pendingCoViewAckSubscribers.delete(serverId);
+  pendingCoViewRenderTreeProjectedSubscribers.delete(serverId);
   pendingSends.delete(serverId);
 }
 
@@ -611,6 +659,7 @@ async function openConnectionInner(
     coViewListSubscribers: new Set(),
     coViewSessionSubscribers: new Set(),
     coViewAckSubscribers: new Set(),
+    coViewRenderTreeProjectedSubscribers: new Set(),
     backoff,
     dead: false,
     authenticated: false,
@@ -643,6 +692,11 @@ async function openConnectionInner(
   if (bufferedCvAck) {
     for (const sub of bufferedCvAck) conn.coViewAckSubscribers.add(sub);
     pendingCoViewAckSubscribers.delete(server.id);
+  }
+  const bufferedCvProjected = pendingCoViewRenderTreeProjectedSubscribers.get(server.id);
+  if (bufferedCvProjected) {
+    for (const sub of bufferedCvProjected) conn.coViewRenderTreeProjectedSubscribers.add(sub);
+    pendingCoViewRenderTreeProjectedSubscribers.delete(server.id);
   }
 
   storeToken(server.id, tokenData.token, tokenData.expires_at, (id) => {
@@ -826,6 +880,20 @@ async function openConnectionInner(
       }
       return;
     }
+
+    // Co-View projected render-tree frames (CV-FOUND-6). Dedicated subscriber
+    // set, isolated from the legacy session-push family above. With no
+    // subscribers (the production default) this is a no-op.
+    if (msg.type === "co-view.render-tree.projected") {
+      for (const handler of conn.coViewRenderTreeProjectedSubscribers) {
+        try {
+          handler(msg);
+        } catch (err) {
+          console.warn("[ws] co-view projected subscriber threw", err);
+        }
+      }
+      return;
+    }
   };
 
   ws.onerror = () => {
@@ -924,6 +992,11 @@ async function openConnectionInner(
       let pending = pendingCoViewAckSubscribers.get(server.id);
       if (!pending) { pending = new Set(); pendingCoViewAckSubscribers.set(server.id, pending); }
       for (const sub of conn.coViewAckSubscribers) pending.add(sub);
+    }
+    if (conn.coViewRenderTreeProjectedSubscribers.size > 0) {
+      let pending = pendingCoViewRenderTreeProjectedSubscribers.get(server.id);
+      if (!pending) { pending = new Set(); pendingCoViewRenderTreeProjectedSubscribers.set(server.id, pending); }
+      for (const sub of conn.coViewRenderTreeProjectedSubscribers) pending.add(sub);
     }
 
     connections.delete(server.id);
