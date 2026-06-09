@@ -41,8 +41,9 @@ function SafeNodeView(props: { node: SafeViewNode }) {
       data-pressed={node().state.pressed || undefined}
       data-selected={node().state.selected || undefined}
       data-open={node().state.open || undefined}
-      // `disabled` is only a valid attribute on <button>; harmless elsewhere.
-      disabled={node().tag === "button" ? node().state.disabled || undefined : undefined}
+      type={node().tag === "button" ? "button" : undefined}
+      tabIndex={node().tag === "button" ? -1 : undefined}
+      disabled={node().tag === "button" ? true : undefined}
     >
       <Show when={content().kind === "text" ? content() : null}>
         {(c) => <>{(c() as { kind: "text"; text: string }).text}</>}
@@ -55,6 +56,9 @@ function SafeNodeView(props: { node: SafeViewNode }) {
               class={cn("coview-placeholder", `coview-placeholder--${ph.reason}`)}
               data-coview-placeholder={ph.reason}
               data-coview-placeholder-mode={ph.mode}
+              data-coview-placeholder-width={ph.width}
+              data-coview-placeholder-height={ph.height}
+              data-coview-placeholder-lines={ph.lines}
               aria-hidden="true"
             />
           );
