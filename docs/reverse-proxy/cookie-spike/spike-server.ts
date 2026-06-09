@@ -178,15 +178,18 @@ shows "no" on a fresh load that is expected (no cookie existed yet). Use the she
   function mark(id, present){ const el=document.getElementById(id); el.textContent = present?'YES':'no'; el.className = present?'y':'n'; }
 
   // (b) sub-resource fetch — same-origin to the runtime, evaluated under the
-  // top-level site's third-party-cookie policy.
-  fetch('/spike/echo', { credentials: 'include' })
+  // top-level site's third-party-cookie policy. The ?v= param is REQUIRED so
+  // the server checks for THIS variant's cookie name (without it the server
+  // falls back to the default variant and misreports every other variant).
+  fetch('/spike/echo?v=' + encodeURIComponent(variantId), { credentials: 'include' })
     .then(r => r.json())
     .then(j => { mark('fetchR', j.present); document.getElementById('fetchRaw').innerHTML = '<code>'+(j.raw||'(none)')+'</code>'; results.fetch = j.present; post(); })
     .catch(e => { document.getElementById('fetchR').textContent = 'error: '+e; });
 
-  // (c) WebSocket upgrade to the runtime origin.
+  // (c) WebSocket upgrade to the runtime origin. ?v= required for the same
+  // reason as the fetch above.
   try {
-    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/spike/ws';
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/spike/ws?v=' + encodeURIComponent(variantId);
     const ws = new WebSocket(wsUrl);
     ws.onmessage = (ev) => {
       try { const j = JSON.parse(ev.data); mark('wsR', j.present); document.getElementById('wsRaw').innerHTML='<code>'+(j.raw||'(none)')+'</code>'; results.ws = j.present; post(); ws.close(); } catch(e){}

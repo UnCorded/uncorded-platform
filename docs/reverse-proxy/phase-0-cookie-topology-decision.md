@@ -1,12 +1,14 @@
 # Phase 0 — Proxy-Session Cookie Topology Decision Record
 
-**Status: PREDICTED — pending empirical confirmation.**
-This record states the analysis and the predicted cookie attributes. The
-[`cookie-spike/`](./cookie-spike/) harness must be run across the real client
-paths and the results matrix below filled in. Once confirmed, flip the status to
-**LOCKED**. Phase 1 must mint proxy-session cookies with exactly the locked
-attributes (plan §"Phase 0" gate). **Do not write bootstrap-cookie code until
-this is LOCKED.**
+**Status: LOCKED — empirically confirmed 2026-06-09.**
+The [`cookie-spike/`](./cookie-spike/) harness was run against a live HTTPS
+Cloudflare quick-tunnel runtime origin across Chromium, Firefox, and WebKit
+(Playwright engine builds), including a Chromium third-party-cookie-blocked pass.
+The results (§4) confirm the predicted cookie attributes (§3) and surface one
+target-client limitation — **Safari/WebKit cannot carry any cookie in a
+cross-site iframe**, which is handled by the top-level "Open in browser" fallback
+(empirically verified to work). Phase 1 must mint proxy-session cookies with
+exactly the locked attributes (§3) and implement the Safari fallback (§4a).
 
 ---
 
@@ -105,53 +107,157 @@ behind an explicit dev-only flag so production can never silently drop `Secure`.
 > cross-site **and** Secure-capable, so it uses the **production** cookie, not
 > the dev fallback. The dev fallback is strictly the `http://localhost` runtime.
 
-## 4. Empirical results matrix — FILL THIS IN (then LOCK)
+## 4. Empirical results (2026-06-09)
 
-Run [`cookie-spike/`](./cookie-spike/) per its README. `Y` = cookie carried,
-`n` = not carried. Record browser + version.
+### Method
 
-### Cross-site: shell `https://uncorded.app` (or `localhost:5174`) → runtime `https://<tunnel>.trycloudflare.com`
+- **Runtime origin (iframe):** live HTTPS quick tunnel
+  `https://lauren-guides-…​.trycloudflare.com` → local spike server (`:8787`).
+- **Shell origin (top-level):** a **second** live HTTPS quick tunnel
+  `https://waves-…​.trycloudflare.com` → same spike server.
+  `trycloudflare.com` is on the Public Suffix List, so the two tunnel hostnames
+  are **different registrable domains → genuinely cross-site**, exactly the
+  production relationship. An `http://localhost:8787` shell was also run as a
+  second cross-site case; results matched, ruling out an insecure-top-level
+  artifact.
+- **Engines:** Playwright builds — Chromium 148, Firefox 150, WebKit 26.4
+  (Safari engine). Driven headless via `playwright`. The Chromium 3pc-blocked
+  pass forces the production cookie-phase-out state with CDP
+  `Network.setCookieControls { enableThirdPartyCookieRestriction: true }`.
+- **Measured:** cookie carriage on the three browser-generated request types the
+  proxy depends on — (a) iframe **document navigation**, (b) framed
+  **subresource `fetch()`**, (c) **WebSocket upgrade**. `firstLoad` is the very
+  first iframe load (no cookie exists yet, so doc-nav is always `n`); `reNav`
+  re-navigates the iframe with the cookie already set (this is the row that
+  matters for doc-nav, and it models real usage where bootstrap sets the cookie
+  *before* the iframe loads).
 
-| Variant | doc nav | subresource fetch | WS upgrade | Browser/version | Notes |
-|---------|:------:|:-----------------:|:----------:|-----------------|-------|
-| `lax` | | | | | (expected: all n) |
-| `none` | | | | | (expected: blocked under 3pc) |
-| `none-partitioned` | | | | | |
-| `host-none-partitioned` | | | | | (predicted winner) |
+> ⚠️ These are **Playwright engine builds**, not shipping consumer browsers, and
+> run headless. They are an excellent behavioral proxy (WebKit tracks Safari
+> ITP; the Chromium 3pc-blocked pass is the authoritative phase-out signal) but
+> the Safari result especially should be re-confirmed on real Safari hardware
+> before GA. The *direction* of every result is unambiguous and reproducible.
 
-Repeat the table for: **Chrome/Electron-Chromium**, **Safari**, **Firefox**, and
-for the **authenticated/custom-hostname tunnel** if available.
+### Cross-site iframe — shell `https://<tunnelB>` → runtime `https://<tunnelA>` (the embedded-panel case)
 
-### Same-site dev: shell `http://localhost:5174` → runtime `http://localhost:3000`
+`Y` = carried, `n` = not carried. doc-nav column reports the **reNav** (cookie
+already set) reading; fetch/ws are identical on firstLoad and reNav unless noted.
 
-| Variant | doc nav | subresource fetch | WS upgrade | Browser/version | Notes |
-|---------|:------:|:-----------------:|:----------:|-----------------|-------|
-| `dev-lax` | | | | | (expected: all Y) |
+| Engine / condition | Variant | doc nav | fetch | WS | Stored? |
+|--------------------|---------|:------:|:-----:|:--:|---------|
+| **Chromium 148** (3pc allowed) | `lax` | n | n | n | — |
+| | `none` | Y | Y | Y | yes |
+| | `none-partitioned` | Y | Y | Y | yes (partitioned) |
+| | `host-none-partitioned` | Y | Y | Y | yes, `partitionKey=https://<tunnelB>` |
+| **Chromium 148** (**3pc BLOCKED**) | `lax` | n | n | n | — |
+| | `none` | **n** | **n** | **n** | **no** (blocked) |
+| | `none-partitioned` | Y | Y | Y | yes (partitioned) |
+| | `host-none-partitioned` | **Y** | **Y** | **Y** | yes (partitioned) |
+| **Firefox 150** (default) | `lax` | n | n | n | — |
+| | `none` | Y | Y | Y | yes |
+| | `none-partitioned` | Y | Y | Y | yes |
+| | `host-none-partitioned` | Y | Y | Y | yes |
+| **WebKit 26.4 / Safari** (default ITP) | `lax` | n | n | n | — |
+| | `none` | n | n | n | no |
+| | `none-partitioned` | n | n | n | no |
+| | `host-none-partitioned` | **n** | **n** | **n** | **no — not even stored** |
 
-### Per-client same/cross-site confirmation
+**Readings:**
 
-| Client path | Concrete shell origin | Concrete `tunnel_url` | Same-site or cross-site? |
-|-------------|----------------------|-----------------------|--------------------------|
-| Web dev | | | |
-| Web prod | | | |
-| Desktop dev | | | |
-| Desktop prod | | | |
+1. **`__Host-; SameSite=None; Secure; Partitioned` is the correct production
+   cookie.** It is the *only* combination (with `none-partitioned`) that survives
+   Chromium's third-party-cookie phase-out, and it carries on **all three**
+   request types — document navigation, subresource fetch, **and WebSocket
+   upgrade** — under 3pc blocking. `__Host-` is accepted together with
+   `Partitioned` (cookie stored with the prefix and a `partitionKey`), so the
+   prefix's tamper-resistance is free.
+2. **Unpartitioned `none` is not viable** — it works only while 3pc is allowed
+   and is cleanly dropped (set *and* send) the moment 3pc blocking is on. `lax`
+   never carries cross-site, as expected.
+3. **WebSocket carries the partitioned cookie** wherever the partitioned cookie
+   works at all (Chromium, Firefox). No WS-specific fallback is needed on those
+   engines; Phase 3 can rely on the cookie on the upgrade request.
+4. **Safari/WebKit carries nothing in a cross-site iframe** — and the cookie is
+   not even stored. This is **not** a cookie-attribute problem: *no* attribute
+   set (Lax/None/Partitioned/`__Host-`) works, because Safari ITP refuses
+   third-party cookie storage in an iframe without the Storage Access API. See
+   §4a.
 
-## 5. Open questions to resolve while running
+### Same/cross-site per client path (concrete)
 
-- Does Safari send `Partitioned` cookies in this exact framed-fetch + WS shape?
-  (Safari's CHIPS support is newer; if it fails, the panel must lean on
-  "Open in browser" for Safari users, or we accept top-level-only on Safari.)
-- Does the WebSocket upgrade carry the partitioned cookie in every browser?
-  (Phase 3 depends on this; if not, WS proxy needs a cookie-in-subprotocol or
-  query-token fallback — note it here, do not silently degrade.)
-- Confirm `__Host-` + `Partitioned` is accepted together (some older engines
-  rejected the combination).
+| Client path | Shell origin | Runtime (`tunnel_url`) | Relationship | Cookie path |
+|-------------|--------------|------------------------|--------------|-------------|
+| Web prod | `https://uncorded.app` | `*.trycloudflare.com` / custom CF hostname | **cross-site** | production `__Host-…Partitioned` |
+| Web dev | `http://localhost:5174` | `*.trycloudflare.com` | cross-site, Secure-capable runtime | production cookie |
+| Web dev | `http://localhost:5174` | `http://localhost:3000` | **same-site** | dev fallback (`Lax`) |
+| Desktop prod | `https://uncorded.app` (Electron=Chromium) | `*.trycloudflare.com` / custom | **cross-site** | production cookie (✓ Chromium) |
+| Desktop dev | `http://localhost:5174` | as web dev | cross-site / same-site | as web dev |
 
-## 6. Lock
+The same-site dev case (`localhost:5174`→`localhost:3000`) is same-**site**
+(host `localhost`, port-only difference), so `SameSite=Lax` is carried — well
+established and consistent with the first-party `dev-lax` result in §4a; not
+separately harnessed.
 
-When the matrix is complete and the predicted decision holds (or is amended),
-change **Status** at the top to `LOCKED`, summarize any deviation here, and
-proceed to Phase 1. Phase 1's `mintProxySessionCookie` must emit exactly the
-locked attribute set, with a single dev-only branch for the `http://localhost`
-runtime case.
+## 4a. Safari/WebKit limitation and the locked fallback
+
+In a cross-site iframe Safari carries **no** proxy-session cookie. The locked
+handling is the plan's **"Open in browser"** path: a **top-level** (first-party)
+navigation to the proxied URL. Verified empirically in WebKit 26.4 — loading the
+runtime page top-level (not framed) carries the cookie on **all three** request
+types and stores it:
+
+| WebKit, top-level (first-party) | doc nav | fetch | WS | Stored? |
+|---------------------------------|:------:|:-----:|:--:|---------|
+| `host-none-partitioned` | Y | Y | Y | yes |
+| `dev-lax` | Y | Y | Y | yes |
+| `lax` | Y | Y | Y | yes |
+
+**Locked Safari behavior (Phase 5 panel):**
+
+- Render the embedded iframe as on every engine. Because the cookie won't carry
+  in Safari, the proxied content fails closed (401) inside the frame.
+- Always offer **"Open in browser"** → top-level navigation to the proxied URL,
+  where the cookie is first-party and works. This is the committed Safari path.
+- *Optional future enhancement (not required to ship):* call
+  `document.requestStorageAccess()` from the iframe on a user gesture to attempt
+  in-frame access. Not relied upon by the locked design.
+
+This satisfies the gate rule "if any one request type fails in a target client,
+adjust the design": the adjustment is the app-layer fallback (no cookie attribute
+can fix Safari's iframe policy), and it is verified to work.
+
+## 5. Open questions — resolved
+
+- **Does Safari send `Partitioned` cookies in the framed fetch + WS shape?**
+  No — Safari/WebKit stores and sends nothing in a cross-site iframe under ITP,
+  regardless of `Partitioned`/`__Host-`. Handled by the top-level fallback (§4a).
+- **Does the WebSocket upgrade carry the partitioned cookie in every browser?**
+  Yes on Chromium and Firefox (including Chromium 3pc-blocked). No on Safari
+  in-frame (nothing carries there). No WS-specific cookie fallback is needed on
+  the engines where the cookie works at all.
+- **Is `__Host-` + `Partitioned` accepted together?** Yes — confirmed stored
+  with the prefix and a `partitionKey` on Chromium; Firefox stores it too.
+
+## 6. Lock — summary
+
+**LOCKED 2026-06-09.** The predicted decision (§3) holds unchanged:
+
+- **Production:** `__Host-uncorded-proxy-<slug>-<mount>`,
+  `Secure; HttpOnly; Path=/; SameSite=None; Partitioned`, mount-binding in the
+  signed value. Verified to carry on document navigation, subresource fetch, and
+  WebSocket upgrade on Chromium (incl. 3pc-blocked) and Firefox.
+- **Dev (`http://localhost` runtime, same-site only):** `uncorded-proxy-<slug>-<mount>`,
+  `HttpOnly; Path=/; SameSite=Lax`, behind an explicit dev-only flag. Never
+  emit a non-`Secure` cookie when the runtime origin is HTTPS.
+- **Deviation from prediction:** one new constraint — **Safari/WebKit cannot use
+  the embedded iframe** for proxied content; Phase 5 must ship the verified
+  top-level "Open in browser" fallback (§4a). No change to cookie attributes.
+
+Phase 1's `mintProxySessionCookie` must emit exactly this attribute set, with a
+single dev-only branch for the `http://localhost` runtime case. Phase 5 must
+implement the Safari fallback.
+
+The [`cookie-spike/`](./cookie-spike/) harness, this record's raw runs, and the
+standalone multi-engine driver (`C:\Users\jusss\pw-spike`, throwaway) backed
+these results. The `cookie-spike/` directory is disposable now that this is
+locked.

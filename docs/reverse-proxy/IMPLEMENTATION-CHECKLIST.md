@@ -20,11 +20,16 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
 - [x] README with run + `cloudflared` quick-tunnel + per-shell embedding steps.
 - [x] Decision record scaffold (`phase-0-cookie-topology-decision.md`) with
       topology analysis, predicted decision, and an empty results matrix.
-- [ ] **USER-RUN:** empirical results filled in across web / desktop / live
-      `tunnel_url` (trycloudflare + custom hostname). I cannot drive Electron +
-      live tunnel + real browsers; this step is yours.
-- [ ] **GATE:** decision record finalized & locked. Phase 1 cookie code must
-      mint exactly these attributes.
+- [x] **Empirical run (2026-06-09):** swept all variants across a live HTTPS
+      Cloudflare quick-tunnel runtime origin (cross-site, PSL-separated) in
+      Chromium 148 (incl. a CDP 3pc-blocked pass), Firefox 150, and WebKit 26.4.
+      Verified doc-nav + subresource fetch + WS-upgrade carriage. Results in the
+      decision record §4.
+- [x] **GATE LOCKED:** `__Host-…; Secure; HttpOnly; Path=/; SameSite=None;
+      Partitioned` carries on all three request types on Chromium (incl.
+      3pc-blocked) and Firefox. **Deviation found:** Safari/WebKit carries no
+      cookie in a cross-site iframe → Phase 5 must ship the verified top-level
+      "Open in browser" fallback (decision record §4a). No change to attributes.
 
 ## Phase 1 — Foundation PR — commit(s): manifest, approval store, bootstrap cookie, minimal proxy
 
@@ -96,6 +101,9 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
 ## Phase 5 — Foundry Plugin — commit: `feat(plugins): foundry-vtt`
 - [ ] `plugins/foundry-vtt`: manifest, backend `sidebar.items`, frontend panel.
 - [ ] Bootstrap cookie before iframe `src`; "Open in browser" fallback to proxied URL.
+- [ ] **Safari/WebKit (LOCKED, decision §4a):** the cookie does not carry in a
+      cross-site iframe; always offer "Open in browser" (top-level navigation to
+      the proxied URL, verified to work). Optional later: `requestStorageAccess()`.
 - [ ] Manual test against real Foundry (operator checklist in plan §Phase 5).
 
 ---
