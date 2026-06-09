@@ -290,3 +290,86 @@ describe("WS close-code branches", () => {
     wsModule.abortReconnect("srv-1006");
   });
 });
+
+// CV-FOUND-6: the projected render-tree frame already passes ServerMessageSchema
+// but the dispatcher gained a dedicated branch + subscriber set. These drive the
+// inbound dispatcher directly (a JSON text frame through ws.onmessage) to prove
+// the new branch routes, and — critically — that the legacy session-push family
+// (state/cursor/event) still dispatches and that projected frames stay isolated
+// from it.
+describe("co-view.render-tree.projected routing (CV-FOUND-6)", () => {
+  async function openAuthed(serverId: string): Promise<FakeWebSocket> {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    });
+    FakeWebSocket.autoOpen = true;
+    await wsModule.connect(makeServer(serverId));
+    const ws = FakeWebSocket.instances.at(-1);
+    if (!ws) throw new Error("no FakeWebSocket created");
+    // Complete the auth handshake so the connection is fully live.
+    ws.onmessage?.({ data: JSON.stringify({ type: "auth.result", ok: true }) } as MessageEvent);
+    return ws;
+  }
+
+  function deliver(ws: FakeWebSocket, frame: unknown): void {
+    ws.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent);
+  }
+
+  function projectedFrame(sessionId: string) {
+    return {
+      type: "co-view.render-tree.projected",
+      session_id: sessionId,
+      frame: {
+        surfaceId: sessionId,
+        root: { id: "root", kind: "element", box: { x: 0, y: 0, width: 1, height: 1 } },
+      },
+    };
+  }
+  function stateFrame(sessionId: string) {
+    return { type: "co-view.state", session_id: sessionId, seq: 1, diff: {}, replay: "safe", ts: 0 };
+  }
+  function cursorFrame(sessionId: string) {
+    return { type: "co-view.cursor", session_id: sessionId, x: 1, y: 2, state: "idle", ts: 0 };
+  }
+  function eventFrame(sessionId: string) {
+    return { type: "co-view.event", session_id: sessionId, kind: "nav.route_change", payload: {}, replay: "safe", ts: 0 };
+  }
+
+  test("a projected frame reaches an onCoViewRenderTreeProjected subscriber", async () => {
+    const ws = await openAuthed("srv-cvproj");
+    const received: Array<{ session_id: string }> = [];
+    const unsub = wsModule.onCoViewRenderTreeProjected("srv-cvproj", (m) => received.push(m));
+    deliver(ws, projectedFrame("sess-1"));
+    expect(received).toHaveLength(1);
+    expect(received[0]?.session_id).toBe("sess-1");
+    unsub();
+    wsModule.disconnect("srv-cvproj");
+  });
+
+  test("legacy co-view.state/cursor/event still dispatch; projected stays isolated", async () => {
+    const ws = await openAuthed("srv-cvlegacy");
+    const seen: string[] = [];
+    const unsubSession = wsModule.onCoViewSessionMessage(
+      "srv-cvlegacy",
+      () => true,
+      (m) => seen.push(m.type),
+    );
+    deliver(ws, stateFrame("s"));
+    deliver(ws, cursorFrame("s"));
+    deliver(ws, eventFrame("s"));
+    expect(seen).toEqual(["co-view.state", "co-view.cursor", "co-view.event"]);
+
+    // A projected frame must NOT leak into the legacy session family, and must
+    // reach the dedicated projected subscriber instead.
+    const projected: unknown[] = [];
+    const unsubProj = wsModule.onCoViewRenderTreeProjected("srv-cvlegacy", (m) => projected.push(m));
+    deliver(ws, projectedFrame("s"));
+    expect(seen).toEqual(["co-view.state", "co-view.cursor", "co-view.event"]);
+    expect(projected).toHaveLength(1);
+
+    unsubSession();
+    unsubProj();
+    wsModule.disconnect("srv-cvlegacy");
+  });
+});

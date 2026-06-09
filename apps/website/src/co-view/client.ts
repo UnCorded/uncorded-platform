@@ -32,6 +32,7 @@ import type {
   WsCoViewEvent,
   WsCoViewJoinAck,
   WsCoViewListChanged,
+  WsCoViewRenderTreeProjected,
   WsCoViewSnapshotReq,
   WsCoViewSnapshotRes,
   WsCoViewState,
@@ -40,6 +41,7 @@ import type {
 import {
   onCoViewAckMessage,
   onCoViewListMessage,
+  onCoViewRenderTreeProjected,
   onCoViewSessionMessage,
   send as wsSend,
   type CoViewAckMessage,
@@ -393,6 +395,27 @@ export function observeCoViewList(
     .catch((err) => {
       console.warn("[co-view] initial list snapshot failed", err);
     });
+  return () => {
+    disposed = true;
+    unsub();
+  };
+}
+
+/** Observe `co-view.render-tree.projected` frames for a server (CV-FOUND-6).
+ *  Delivers every projected frame for the connection; the projected-frame store
+ *  demuxes by `session_id`. Unlike `observeCoViewList` there is no seed snapshot
+ *  — the runtime pushes a fresh projected frame on each host render. Returns an
+ *  unsubscribe function. Dormant until a viewer surface subscribes
+ *  (`CO_VIEW_PROJECTED_VIEWER_ENABLED` stays false this PR). */
+export function observeCoViewRenderTreeProjected(
+  serverId: string,
+  onFrame: (frame: WsCoViewRenderTreeProjected) => void,
+): () => void {
+  let disposed = false;
+  const unsub = onCoViewRenderTreeProjected(serverId, (msg) => {
+    if (disposed) return;
+    onFrame(msg);
+  });
   return () => {
     disposed = true;
     unsub();
