@@ -1,6 +1,6 @@
 {
   "name": "@uncorded/desktop",
-  "version": "0.0.26",
+  "version": "0.0.28",
   "private": true,
   "main": "dist/main.js",
   "scripts": {
