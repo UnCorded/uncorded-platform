@@ -276,8 +276,12 @@ describe("POST /proxy-sessions/:slug/:mount", () => {
       headers: { Authorization: "Bearer member-token" },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { url: string };
+    const body = (await res.json()) as { url: string; openUrl: string };
     expect(body.url).toBe(`/proxy/${SLUG}/app/`);
+    // The first-party fallback (Safari §4a) is returned alongside the iframe URL.
+    expect(body.openUrl).toMatch(
+      new RegExp(`^/proxy-open/${SLUG}/app\\?ticket=.+`),
+    );
     expect(res.headers.get("set-cookie")).toContain(`uncorded-proxy-${SLUG}-app=`);
   });
 
@@ -295,6 +299,120 @@ describe("POST /proxy-sessions/:slug/:mount", () => {
       headers: { Authorization: "Bearer owner-token" },
     });
     expect(ownerRes.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-party open handoff route (Safari/WebKit §4a)
+// ---------------------------------------------------------------------------
+
+/** Bootstrap and return the `openUrl` (the first-party handoff path + ticket). */
+async function bootstrapOpenUrl(mount = "app", token = "member-token"): Promise<string> {
+  const boot = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/${mount}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (boot.status !== 200) throw new Error(`bootstrap failed: ${boot.status}`);
+  const body = (await boot.json()) as { openUrl: string };
+  return body.openUrl;
+}
+
+describe("GET /proxy-open/:slug/:mount", () => {
+  test("a valid ticket 302s into the mount and sets the session cookie first-party", async () => {
+    h = setup();
+    const openUrl = await bootstrapOpenUrl();
+
+    // The Safari shape: NO pre-existing proxy cookie — the framed bootstrap
+    // Set-Cookie was blocked, so this top-level nav must mint it fresh.
+    const res = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/proxy/${SLUG}/app/`);
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toContain(`uncorded-proxy-${SLUG}-app=`);
+
+    // The minted cookie actually authenticates the forwarder.
+    const proxied = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
+      headers: { Cookie: cookiePair(setCookie) },
+    });
+    expect(proxied.status).toBe(200);
+    expect(await proxied.text()).toContain("STUB UPSTREAM");
+  });
+
+  test("a missing ticket renders an HTML error page (not JSON)", async () => {
+    h = setup();
+    const res = await fetch(`${h.baseUrl}/proxy-open/${SLUG}/app`, { redirect: "manual" });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain("expired or is invalid");
+  });
+
+  test("a garbage ticket renders the HTML error page", async () => {
+    h = setup();
+    const res = await fetch(`${h.baseUrl}/proxy-open/${SLUG}/app?ticket=not-a-real-ticket`, {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("a session cookie value cannot be replayed as an open ticket", async () => {
+    h = setup();
+    // Pull the raw session-token value out of the bootstrap Set-Cookie and try
+    // to use it as a handoff ticket — purpose-binding must reject it.
+    const boot = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/app`, {
+      method: "POST",
+      headers: { Authorization: "Bearer member-token" },
+    });
+    const pair = cookiePair(boot.headers.get("set-cookie"));
+    const sessionToken = pair.split("=").slice(1).join("=");
+
+    const res = await fetch(
+      `${h.baseUrl}/proxy-open/${SLUG}/app?ticket=${encodeURIComponent(sessionToken)}`,
+      { redirect: "manual" },
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("the open ticket reflects the LIVE approval version after re-approval", async () => {
+    h = setup();
+    const openUrl = await bootstrapOpenUrl();
+
+    // Re-approve → approval_version becomes 2. A cookie minted by the handoff
+    // must carry the NEW version (resolveMount re-reads it), so it still works.
+    const norm = normalizeUpstream(h.upstreamOrigin);
+    if (!norm.ok) throw new Error("normalize failed");
+    h.approvals.upsert({
+      plugin_slug: SLUG,
+      plugin_version: "1.0.0",
+      mount_name: "app",
+      mount_definition_hash: mountDefinitionHash({ name: "app", upstream_setting: "upstream_url" }),
+      upstream_setting_key: "upstream_url",
+      normalized_upstream_origin: norm.origin,
+      normalized_upstream_base_path: norm.basePath,
+      approved_by_user_id: "owner-1",
+      approved_at: Date.now(),
+    });
+
+    const res = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const proxied = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
+      headers: { Cookie: cookiePair(res.headers.get("set-cookie")) },
+    });
+    // Fresh cookie carries approval_version 2 → not stale.
+    expect(proxied.status).toBe(200);
+  });
+
+  test("renders the HTML error page when the mount is no longer approved", async () => {
+    h = setup();
+    const openUrl = await bootstrapOpenUrl();
+    // Drop the approval out from under the ticket.
+    h.coreDb.run("DELETE FROM proxy_approvals WHERE plugin_slug = ? AND mount_name = ?", [SLUG, "app"]);
+
+    const res = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain("no longer available");
   });
 });
 

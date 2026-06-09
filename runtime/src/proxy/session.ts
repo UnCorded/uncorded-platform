@@ -19,6 +19,14 @@
 // and the signed payload, so a cookie can never be replayed against another
 // mount even if two names happen to collide.
 //
+// A `purpose` tag separates the two token shapes that share this signing scheme:
+//   "session" — the cookie the forwarder validates on every proxy request.
+//   "open"    — a short-lived handoff ticket carried in the first-party
+//               `GET /proxy-open/:slug/:mount` URL (the Safari/top-level fallback,
+//               Phase 0 §4a). The open endpoint exchanges it for a fresh session
+//               cookie minted in a first-party context. Tagging keeps an open
+//               ticket from being replayed as a cookie and vice versa.
+//
 // Design mirrors runtime/src/signing/files.ts: a per-boot in-memory secret
 // (never persisted), base64url payloads, constant-time signature comparison.
 
@@ -26,6 +34,11 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 
 const SIGNING_SECRET = randomBytes(32);
 const DEFAULT_TTL_SECONDS = 3600;
+
+/** TTL for the first-party "open" handoff ticket. Short — it is consumed the
+ * moment the user clicks "Open in browser", which in the Safari case happens
+ * within seconds of the framed load failing closed. */
+export const PROXY_OPEN_TICKET_TTL_SECONDS = 300;
 
 const PROD_COOKIE_PREFIX = "__Host-uncorded-proxy-";
 const DEV_COOKIE_PREFIX = "uncorded-proxy-";
@@ -48,8 +61,13 @@ function hmac(payload: string): Uint8Array {
   return new Uint8Array(h.digest());
 }
 
-/** Claims carried by a proxy-session cookie. */
+/** Which token shape a signed payload represents. See module header. */
+export type ProxyTokenPurpose = "session" | "open";
+
+/** Claims carried by a proxy-session cookie or open-handoff ticket. */
 export interface ProxySessionClaims {
+  /** Distinguishes the cookie ("session") from the handoff ticket ("open"). */
+  purpose: ProxyTokenPurpose;
   /** Bound principal id (audit + future per-user checks). */
   userId: string;
   /** Server id this session is valid on. */
@@ -64,18 +82,34 @@ export interface ProxySessionClaims {
   exp: number;
 }
 
-export type MintProxySessionInput = Omit<ProxySessionClaims, "exp">;
+export type MintProxySessionInput = Omit<ProxySessionClaims, "exp" | "purpose">;
+
+function mint(purpose: ProxyTokenPurpose, input: MintProxySessionInput, ttlSeconds: number): string {
+  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const claims: ProxySessionClaims = { ...input, purpose, exp };
+  const payload = base64url(new Uint8Array(Buffer.from(JSON.stringify(claims))));
+  const sig = base64url(hmac(payload));
+  return `${payload}.${sig}`;
+}
 
 /** Mint a signed proxy-session token (the cookie value). */
 export function mintProxySession(
   input: MintProxySessionInput,
   ttlSeconds: number = DEFAULT_TTL_SECONDS,
 ): string {
-  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const claims: ProxySessionClaims = { ...input, exp };
-  const payload = base64url(new Uint8Array(Buffer.from(JSON.stringify(claims))));
-  const sig = base64url(hmac(payload));
-  return `${payload}.${sig}`;
+  return mint("session", input, ttlSeconds);
+}
+
+/**
+ * Mint a short-lived "open" handoff ticket carried in the first-party
+ * `GET /proxy-open/:slug/:mount?ticket=` URL. The open endpoint verifies it and
+ * exchanges it for a fresh session cookie minted top-level (Phase 0 §4a).
+ */
+export function mintProxyOpenTicket(
+  input: MintProxySessionInput,
+  ttlSeconds: number = PROXY_OPEN_TICKET_TTL_SECONDS,
+): string {
+  return mint("open", input, ttlSeconds);
 }
 
 export type ProxySessionReason =
@@ -93,6 +127,8 @@ export type VerifyProxySessionResult =
 export interface ProxySessionExpectation {
   slug: string;
   mount: string;
+  /** Required token purpose. Defaults to "session" (the cookie). */
+  purpose?: ProxyTokenPurpose;
   /** When provided, the token's serverId must match. */
   serverId?: string;
   /** When provided, the token's userId must match. */
@@ -103,6 +139,7 @@ function isValidClaims(v: unknown): v is ProxySessionClaims {
   if (typeof v !== "object" || v === null) return false;
   const c = v as Record<string, unknown>;
   return (
+    (c["purpose"] === "session" || c["purpose"] === "open") &&
     typeof c["userId"] === "string" &&
     typeof c["serverId"] === "string" &&
     typeof c["slug"] === "string" &&
@@ -142,6 +179,9 @@ export function verifyProxySession(
 
   if (Math.floor(Date.now() / 1000) >= claims.exp) return { ok: false, reason: "expired" };
 
+  if (claims.purpose !== (expected.purpose ?? "session")) {
+    return { ok: false, reason: "mismatch" };
+  }
   if (claims.slug !== expected.slug || claims.mount !== expected.mount) {
     return { ok: false, reason: "mismatch" };
   }

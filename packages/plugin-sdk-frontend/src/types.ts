@@ -1,6 +1,7 @@
 // Public types for @uncorded/plugin-sdk-frontend.
 
 import type { FilesPluginApi } from "./files";
+import type { ProxyPluginApi } from "./proxy";
 import type {
   ParticipantSnapshot,
   VoiceErrorCode,
@@ -247,6 +248,14 @@ export interface PluginFrontend {
    * See `FilesPluginApi`.
    */
   readonly files: FilesPluginApi;
+
+  /**
+   * Reverse-proxy helper — bootstrap a manifest-declared `proxy_mounts` entry
+   * and get back the iframe URL plus the first-party "Open in browser" fallback
+   * URL. See `ProxyPluginApi`. Available to any plugin; the bootstrap fails
+   * (throws `ProxyError`) when the plugin/mount isn't declared or approved.
+   */
+  readonly proxy: ProxyPluginApi;
 
   /** Platform-level capabilities exposed to plugins. */
   readonly platform: {

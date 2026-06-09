@@ -1,18 +1,21 @@
 // Frontend panel bootstrap logic — proven without a browser.
 //
-// These cover the two DOM-wiring acceptance points deterministically:
-//   - "iframe loads proxied HTML" → frame.src is set to the proxied URL the
-//     runtime returns from the bootstrap POST.
-//   - "Open in browser points to proxied URL" → link.href is always a /proxy/...
-//     route, never the private upstream, even when the bootstrap POST fails
-//     (the Safari/WebKit fallback path where the iframe cookie does not carry).
+// These cover the DOM-wiring acceptance points deterministically against the
+// blessed SDK surface (`sdk.proxy.openMount`), which the panel now uses instead
+// of a hand-rolled fetch:
+//   - "iframe loads proxied HTML" → frame.src is set to the iframeUrl the SDK
+//     returns.
+//   - "Open in browser points to the first-party handoff" → link.href is set to
+//     the openUrl (the /proxy-open route), never the bare /proxy/ route, since
+//     that would fail closed in Safari where the framed cookie is blocked.
+//   - failure paths leave the iframe/link untouched and return null.
 
 import { describe, expect, test } from "bun:test";
-import { bootstrapFoundryPanel, proxiedMountUrl } from "../frontend/bootstrap.js";
+import { bootstrapFoundryPanel } from "../frontend/bootstrap.js";
 
-const SLUG = "foundry-vtt";
 const MOUNT = "foundry";
-const PROXIED = `/proxy/${SLUG}/${MOUNT}/`;
+const IFRAME_URL = `/proxy/foundry-vtt/${MOUNT}/`;
+const OPEN_URL = `/proxy-open/foundry-vtt/${MOUNT}?ticket=abc.def`;
 
 interface El {
   src: string;
@@ -22,106 +25,70 @@ function el(): El {
   return { src: "", href: "" };
 }
 
-/** A fetch double that returns a 200 JSON body. */
-function okFetch(body: unknown): typeof fetch {
-  return (async () =>
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    })) as unknown as typeof fetch;
+/** An openMount double that resolves with the given session. */
+function okOpenMount(session: { iframeUrl: string; openUrl: string }) {
+  return async (mount: string) => {
+    expect(mount).toBe(MOUNT);
+    return session;
+  };
 }
 
-describe("proxiedMountUrl", () => {
-  test("builds the runtime proxy route for a slug/mount pair", () => {
-    expect(proxiedMountUrl(SLUG, MOUNT)).toBe(PROXIED);
-  });
-});
-
 describe("bootstrapFoundryPanel", () => {
-  test("on success sets the iframe src and link href to the proxied URL", async () => {
+  test("on success sets the iframe src to iframeUrl and the link href to openUrl", async () => {
     const frame = el();
     const link = el();
-    const url = await bootstrapFoundryPanel({
-      fetchImpl: okFetch({ url: PROXIED }),
-      token: "tok",
+    const session = await bootstrapFoundryPanel({
+      openMount: okOpenMount({ iframeUrl: IFRAME_URL, openUrl: OPEN_URL }),
       frame,
       link,
-      slug: SLUG,
       mount: MOUNT,
     });
-    expect(url).toBe(PROXIED);
-    expect(frame.src).toBe(PROXIED);
-    expect(link.href).toBe(PROXIED);
+    expect(session).toEqual({ iframeUrl: IFRAME_URL, openUrl: OPEN_URL });
+    expect(frame.src).toBe(IFRAME_URL);
+    // The fallback points at the first-party handoff, NOT the bare /proxy/ route.
+    expect(link.href).toBe(OPEN_URL);
+    expect(link.href.startsWith("/proxy-open/")).toBe(true);
   });
 
-  test("sends a Bearer-authed same-origin POST to the bootstrap route", async () => {
-    let seenUrl = "";
-    let seenInit: RequestInit | undefined;
-    const fetchImpl = (async (u: string, init?: RequestInit) => {
-      seenUrl = u;
-      seenInit = init;
-      return new Response(JSON.stringify({ url: PROXIED }), { status: 200 });
-    }) as unknown as typeof fetch;
-
-    await bootstrapFoundryPanel({ fetchImpl, token: "secret-token", frame: el(), link: el(), slug: SLUG, mount: MOUNT });
-
-    expect(seenUrl).toBe(`/proxy-sessions/${SLUG}/${MOUNT}`);
-    expect(seenInit).toBeDefined();
-    const init = seenInit as RequestInit;
-    expect(init.method).toBe("POST");
-    expect(init.credentials).toBe("same-origin");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer secret-token");
-  });
-
-  test("pre-seeds the link with the proxied fallback before the POST resolves", async () => {
-    const link = el();
-    // A fetch that rejects: bootstrap fails, but the link must already point at
-    // the proxied route so "Open in browser" still works (Safari/WebKit path).
-    const failing = (async () => {
-      throw new Error("network down");
-    }) as unknown as typeof fetch;
-
-    const url = await bootstrapFoundryPanel({
-      fetchImpl: failing,
-      token: "tok",
+  test("calls openMount with the declared mount name", async () => {
+    let seenMount = "";
+    await bootstrapFoundryPanel({
+      openMount: async (mount: string) => {
+        seenMount = mount;
+        return { iframeUrl: IFRAME_URL, openUrl: OPEN_URL };
+      },
       frame: el(),
-      link,
-      slug: SLUG,
+      link: el(),
       mount: MOUNT,
     });
-    expect(url).toBeNull();
-    expect(link.href).toBe(PROXIED);
+    expect(seenMount).toBe(MOUNT);
   });
 
-  test("returns null and leaves the iframe untouched on a non-OK response", async () => {
+  test("returns null and leaves the iframe untouched when openMount rejects", async () => {
     const frame = el();
     const link = el();
-    const notOk = (async () => new Response("nope", { status: 409 })) as unknown as typeof fetch;
-
-    const url = await bootstrapFoundryPanel({
-      fetchImpl: notOk,
-      token: "tok",
+    const session = await bootstrapFoundryPanel({
+      openMount: async () => {
+        throw new Error("PROXY_NOT_APPROVED");
+      },
       frame,
       link,
-      slug: SLUG,
       mount: MOUNT,
     });
-    expect(url).toBeNull();
+    expect(session).toBeNull();
     expect(frame.src).toBe(""); // never navigated to a half-authed upstream
-    expect(link.href).toBe(PROXIED); // fallback still usable
+    expect(link.href).toBe(""); // no dead/unauthenticated fallback target
   });
 
-  test("returns null when the response body lacks a url", async () => {
+  test("returns null when the session is missing a url field", async () => {
     const frame = el();
-    const url = await bootstrapFoundryPanel({
-      fetchImpl: okFetch({ notUrl: true }),
-      token: "tok",
+    const session = await bootstrapFoundryPanel({
+      openMount: async () => ({ iframeUrl: IFRAME_URL }) as unknown as { iframeUrl: string; openUrl: string },
       frame,
       link: el(),
-      slug: SLUG,
       mount: MOUNT,
     });
-    expect(url).toBeNull();
+    expect(session).toBeNull();
     expect(frame.src).toBe("");
   });
 });

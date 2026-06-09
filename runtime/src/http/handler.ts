@@ -12,6 +12,7 @@ import { extractAuth, requireMinLevel } from "./auth";
 import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE, RATE_PROXY_HTTP, RATE_PROXY_SESSION } from "./rate-limiter";
 import {
   handleProxySessionBootstrap,
+  handleProxyOpen,
   handleProxyRequest,
   approveMount,
   computeProxyMountStatuses,
@@ -335,6 +336,20 @@ function matchRoute(method: string, pathname: string): RouteMatch | null {
       rateConfig: RATE_PROXY_SESSION,
       rateScope: "user",
       corsAuth: true,
+    };
+  }
+
+  // Reverse-proxy first-party open handoff — top-level navigation that re-mints
+  // the proxy-session cookie first-party (Safari/WebKit fallback, Phase 0 §4a).
+  // Gated by the signed "open" ticket in the query; IP-scoped, no corsAuth (this
+  // is a navigation, not a fetch).
+  const proxyOpenMatch = /^\/proxy-open\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(pathname);
+  if (method === "GET" && proxyOpenMatch?.[1] && proxyOpenMatch[2]) {
+    return {
+      handler: handleProxyOpen,
+      params: { slug: proxyOpenMatch[1], mount: proxyOpenMatch[2] },
+      rateConfig: RATE_PROXY_HTTP,
+      rateScope: "ip",
     };
   }
 

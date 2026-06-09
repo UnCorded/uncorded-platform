@@ -1,73 +1,49 @@
 // Panel bootstrap logic, factored out of index.html so it can be unit-tested
-// without a browser. The DOM-wiring is intentionally tiny: mint a proxy-session
-// cookie, then point both the iframe and the "Open in browser" link at the
-// proxied URL the runtime hands back.
+// without a browser. The DOM-wiring is intentionally tiny: ask the SDK to
+// bootstrap the proxy mount, then point the iframe at the proxied URL and the
+// "Open in browser" link at the first-party fallback URL.
 //
-// Why a Bearer POST before setting iframe `src`: the proxy traffic itself is
-// cookie-authenticated (the cross-site iframe carries the proxy-session cookie),
-// but the cookie is only minted by an explicit, Bearer-authed bootstrap call.
-// So the panel must complete bootstrap before the iframe navigates, otherwise
-// the first proxied request arrives with no cookie and fails closed.
+// This plugin is a reverse-proxy test consumer (NOT a bundled product plugin) —
+// it exists to prove the generic `sdk.proxy` + runtime proxy capability against
+// a Foundry-shaped upstream. It deliberately uses ONLY the blessed SDK surface
+// (`sdk.proxy.openMount`), no hand-rolled `/proxy-sessions` fetch, so the path a
+// real plugin author would take is the path under test.
+//
+// Why both URLs: `iframeUrl` carries the proxy-session cookie minted by the
+// bootstrap (works framed on Chromium/Firefox). `openUrl` is the top-level
+// fallback: Safari/WebKit stores no cookie set inside a cross-site iframe
+// (Phase 0 §4a), so the framed load fails closed there and the user must use
+// "Open in browser", which re-mints the cookie first-party via /proxy-open.
 
 /**
- * Build the proxied mount URL for a plugin/mount pair.
- * This mirrors the runtime route contract (`/proxy/:slug/:mount/`) and is used
- * as the pre-bootstrap fallback for the "Open in browser" link so that link is
- * never pointed at the private upstream URL — only ever at the proxied route.
+ * Bootstrap the Foundry panel: open the proxy mount via the SDK, then wire the
+ * iframe and fallback link.
  *
- * @param {string} slug
- * @param {string} mount
- * @returns {string}
- */
-export function proxiedMountUrl(slug, mount) {
-  return `/proxy/${slug}/${mount}/`;
-}
-
-/**
- * Bootstrap the Foundry panel: POST for a proxy-session cookie, then wire the
- * iframe and fallback link to the proxied URL.
- *
- * Returns the proxied URL on success, or `null` if bootstrap failed (in which
- * case the iframe is left untouched and the link keeps its proxied fallback
- * href so "Open in browser" still works as a top-level navigation — the
- * Safari/WebKit path where the iframe cookie does not carry).
+ * Returns the `{ iframeUrl, openUrl }` session on success, or `null` if the
+ * bootstrap failed (in which case the iframe and link are left untouched and the
+ * caller surfaces an error message).
  *
  * @param {object} opts
- * @param {typeof fetch} opts.fetchImpl  fetch implementation (injectable for tests)
- * @param {string} opts.token            plugin session token (Bearer)
+ * @param {(mount: string) => Promise<{ iframeUrl: string, openUrl: string }>} opts.openMount  `sdk.proxy.openMount`
  * @param {{ src: string } | null} opts.frame  iframe element to navigate
  * @param {{ href: string } | null} opts.link  anchor element for the fallback
- * @param {string} opts.slug
- * @param {string} opts.mount
- * @returns {Promise<string | null>}
+ * @param {string} opts.mount  proxy mount name (declared in manifest.json)
+ * @returns {Promise<{ iframeUrl: string, openUrl: string } | null>}
  */
-export async function bootstrapFoundryPanel({ fetchImpl, token, frame, link, slug, mount }) {
-  // Pre-seed the fallback link at the proxied route immediately, so even if the
-  // bootstrap POST fails the user can still open the proxied URL top-level.
-  if (link) link.href = proxiedMountUrl(slug, mount);
-
-  let res;
+export async function bootstrapFoundryPanel({ openMount, frame, link, mount }) {
+  let session;
   try {
-    res = await fetchImpl(`/proxy-sessions/${slug}/${mount}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      credentials: "same-origin",
-    });
+    session = await openMount(mount);
   } catch {
     return null;
   }
-  if (!res.ok) return null;
-
-  let body;
-  try {
-    body = await res.json();
-  } catch {
+  if (!session || typeof session.iframeUrl !== "string" || typeof session.openUrl !== "string") {
     return null;
   }
-  const url = body?.url;
-  if (typeof url !== "string" || url.length === 0) return null;
 
-  if (frame) frame.src = url;
-  if (link) link.href = url;
-  return url;
+  // Point "Open in browser" at the first-party handoff (never at the bare
+  // /proxy/ route, which would 401 in Safari where the framed cookie is blocked).
+  if (link) link.href = session.openUrl;
+  if (frame) frame.src = session.iframeUrl;
+  return session;
 }

@@ -21,7 +21,11 @@
 //   4. static asset loads (GET /proxy/.../assets/app.js)
 //   5. app cookie persists through proxy rewrite (Set-Cookie rewritten + replayed)
 //   6. WebSocket connects through the proxy (echo round-trip)
-//   7. "Open in browser" points to the proxied URL (bootstrap returns the route)
+//   7. "Open in browser" first-party handoff (the Safari/WebKit §4a path): the
+//      bootstrap returns an `openUrl` (/proxy-open/...); navigating it top-level
+//      with NO pre-existing cookie mints the session cookie first-party and 302s
+//      into the mount, where the proxied Foundry HTML then loads. This is the
+//      GENERIC runtime/SDK flow, not a Foundry-specific workaround.
 //
 // The frontend DOM-wiring ("set iframe src", "set Open-in-browser href") is
 // proven separately and deterministically in
@@ -339,15 +343,19 @@ async function approveFoundryMount(): Promise<Response> {
   });
 }
 
-/** Bootstrap a proxy session and return both the response and the replayable cookie pair. */
-async function bootstrap(token = "member-token"): Promise<{ res: Response; cookie: string; url: string }> {
+/** Bootstrap a proxy session and return the response, replayable cookie pair, and URLs. */
+async function bootstrap(
+  token = "member-token",
+): Promise<{ res: Response; cookie: string; url: string; openUrl: string }> {
   const res = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/${MOUNT}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
   });
   const setCookie = res.headers.get("set-cookie");
-  const body = res.ok ? ((await res.clone().json()) as { url: string }) : { url: "" };
-  return { res, cookie: setCookie ? cookiePair(setCookie) : "", url: body.url };
+  const body = res.ok
+    ? ((await res.clone().json()) as { url: string; openUrl: string })
+    : { url: "", openUrl: "" };
+  return { res, cookie: setCookie ? cookiePair(setCookie) : "", url: body.url, openUrl: body.openUrl };
 }
 
 const wsProxyUrl = (suffix = ""): string => `ws://localhost:${h.port}/proxy/${SLUG}/${MOUNT}/${suffix}`;
@@ -421,14 +429,18 @@ describe("foundry-vtt proxy end-to-end (stub upstream)", () => {
     h = setup();
     await approveFoundryMount();
 
-    const { res, cookie, url } = await bootstrap();
+    const { res, cookie, url, openUrl } = await bootstrap();
     expect(res.status).toBe(200);
     expect(cookie).toContain(`uncorded-proxy-${SLUG}-${MOUNT}=`);
-    // 7. "Open in browser" target: bootstrap returns the proxied route, never the
-    //    private upstream URL. This is the value the frontend assigns to the link.
+    // The iframe URL is the proxied route, never the private upstream URL.
     expect(url).toBe(`/proxy/${SLUG}/${MOUNT}/`);
     expect(url.startsWith("/proxy/")).toBe(true);
     expect(url).not.toContain(h.upstream.origin);
+    // And the first-party fallback handoff URL is returned alongside it (see test 7).
+    expect(openUrl).toMatch(
+      new RegExp(`^/proxy-open/${SLUG}/${MOUNT}\\?ticket=.+`),
+    );
+    expect(openUrl).not.toContain(h.upstream.origin);
   });
 
   test("3. iframe loads proxied HTML document", async () => {
@@ -503,6 +515,30 @@ describe("foundry-vtt proxy end-to-end (stub upstream)", () => {
     const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/${MOUNT}/game`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Game View");
+  });
+
+  test("7. open-in-browser first-party handoff mints the cookie and loads Foundry (Safari §4a)", async () => {
+    h = setup();
+    await approveFoundryMount();
+    const { openUrl } = await bootstrap();
+
+    // The Safari shape: the framed bootstrap Set-Cookie was blocked, so we arrive
+    // at the handoff with NO proxy-session cookie. The top-level navigation must
+    // mint it first-party and redirect into the mount.
+    const handoff = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
+    expect(handoff.status).toBe(302);
+    expect(handoff.headers.get("location")).toBe(`/proxy/${SLUG}/${MOUNT}/`);
+    const setCookie = handoff.headers.get("set-cookie");
+    expect(setCookie).toContain(`uncorded-proxy-${SLUG}-${MOUNT}=`);
+
+    // Following the redirect with the freshly-minted cookie loads the proxied
+    // Foundry document — the same end state the framed path reaches elsewhere.
+    const doc = await fetch(`${h.baseUrl}/proxy/${SLUG}/${MOUNT}/`, {
+      headers: { Cookie: cookiePair(setCookie!) },
+    });
+    expect(doc.status).toBe(200);
+    expect(doc.headers.get("content-type")).toContain("text/html");
+    expect(await doc.text()).toContain("Foundry Virtual Tabletop");
   });
 
   test("fails closed: no proxy-session cookie ⇒ 401, never reaches upstream", async () => {

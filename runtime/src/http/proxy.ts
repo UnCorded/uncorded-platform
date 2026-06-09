@@ -27,9 +27,11 @@ import {
 import { normalizeUpstream, type NormalizedUpstream } from "../proxy/upstream";
 import {
   mintProxySession,
+  mintProxyOpenTicket,
   verifyProxySession,
   buildProxySetCookie,
   readProxyCookie,
+  PROXY_OPEN_TICKET_TTL_SECONDS,
 } from "../proxy/session";
 import {
   sanitizeRequestHeaders,
@@ -436,9 +438,81 @@ export async function handleProxySessionBootstrap(
   }
 
   const serverId = deps.getServerId?.() ?? "";
+  const claims = {
+    userId: auth.user.id,
+    serverId,
+    slug,
+    mount: mountName,
+    approvalVersion: approval.approval_version,
+  };
+  const token = mintProxySession(claims, PROXY_SESSION_TTL_SECONDS);
+
+  // First-party fallback (Phase 0 §4a): Safari/WebKit stores no cookie inside a
+  // cross-site iframe, so the in-frame Set-Cookie below is dropped there. The
+  // open ticket lets the client navigate top-level to /proxy-open/:slug/:mount,
+  // which re-mints the cookie first-party (where Safari does store it) and
+  // redirects into the mount. Generic to every mount, not Foundry-specific.
+  const openTicket = mintProxyOpenTicket(claims, PROXY_OPEN_TICKET_TTL_SECONDS);
+  const openUrl = `/proxy-open/${slug}/${mountName}?ticket=${encodeURIComponent(openTicket)}`;
+
+  const secure = isSecureRequest(request);
+  const response = Response.json({ url: `/proxy/${slug}/${mountName}/`, openUrl });
+  response.headers.append("Set-Cookie", buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS));
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// GET /proxy-open/:slug/:mount?ticket=… — first-party top-level handoff.
+//
+// The Safari/WebKit fallback (Phase 0 §4a). A top-level navigation to the
+// runtime origin is first-party, so the Set-Cookie here is stored even under
+// Safari ITP, unlike the in-frame bootstrap cookie. We verify the short-lived
+// "open" ticket (minted by the Bearer-authed bootstrap), re-resolve the mount
+// against the CURRENT approval, mint a fresh session cookie, and redirect into
+// the mount. This is a user-facing navigation, so failures render HTML, not JSON.
+// ---------------------------------------------------------------------------
+
+export async function handleProxyOpen(
+  request: Request,
+  params: Record<string, string>,
+  deps: HttpDependencies,
+  _rateLimiter: RateLimiter,
+  _clientIp: string,
+): Promise<Response> {
+  const slug = params["slug"] ?? "";
+  const mountName = params["mount"] ?? "";
+
+  const ticket = new URL(request.url).searchParams.get("ticket");
+  const serverId = deps.getServerId?.() ?? "";
+
+  // Verify the handoff ticket BEFORE touching mount state. The ticket proves the
+  // bootstrap's Bearer auth + access gate already passed for this user/mount.
+  const verified = verifyProxySession(ticket, {
+    slug,
+    mount: mountName,
+    purpose: "open",
+    serverId,
+  });
+  if (!verified.ok) {
+    return proxyOpenErrorPage(
+      "This link has expired or is invalid. Re-open the plugin panel and try again.",
+    );
+  }
+
+  // Re-resolve against current state: the mount must still exist, be approved,
+  // and have a valid upstream. The minted cookie carries the LIVE approval
+  // version so a re-approval since the ticket was issued is reflected.
+  const resolved = resolveMount(deps, slug, mountName);
+  if (!resolved.ok) {
+    return proxyOpenErrorPage(
+      "This proxy mount is no longer available. Ask the server admin to approve it, then re-open the plugin.",
+    );
+  }
+  const { approval } = resolved.value;
+
   const token = mintProxySession(
     {
-      userId: auth.user.id,
+      userId: verified.claims.userId,
       serverId,
       slug,
       mount: mountName,
@@ -448,9 +522,24 @@ export async function handleProxySessionBootstrap(
   );
 
   const secure = isSecureRequest(request);
-  const response = Response.json({ url: `/proxy/${slug}/${mountName}/` });
+  const response = new Response(null, {
+    status: 302,
+    headers: { Location: `/proxy/${slug}/${mountName}/` },
+  });
   response.headers.append("Set-Cookie", buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS));
   return response;
+}
+
+/** Minimal HTML error page for the top-level open handoff (no JSON on a nav). */
+function proxyOpenErrorPage(message: string): Response {
+  const safe = message.replace(/[&<>"]/g, (c) =>
+    c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;",
+  );
+  const body = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Can't open</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#16181d;color:#e8eaed;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:1.5rem}main{max-width:28rem;text-align:center}p{color:#9aa0a6;line-height:1.5}</style></head><body><main><h1>Couldn't open this content</h1><p>${safe}</p></main></body></html>`;
+  return new Response(body, {
+    status: 403,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
 }
 
 // ---------------------------------------------------------------------------
