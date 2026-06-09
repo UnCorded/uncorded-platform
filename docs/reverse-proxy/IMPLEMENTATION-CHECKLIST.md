@@ -34,40 +34,40 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
 ## Phase 1 — Foundation PR — commit(s): manifest, approval store, bootstrap cookie, minimal proxy
 
 **Manifest & capability** (`packages/shared/src/manifest.ts`)
-- [ ] Add `proxy_mounts` to `PluginManifest` type + `KNOWN_TOP_LEVEL_FIELDS`.
-- [ ] Validate `proxy_mounts`: optional, non-empty array; per-mount `name`
+- [x] Add `proxy_mounts` to `PluginManifest` type + `KNOWN_TOP_LEVEL_FIELDS`.
+- [x] Validate `proxy_mounts`: optional, non-empty array; per-mount `name`
       (slug-safe, unique); `upstream_setting` references a declared
       `string`/`secret` setting; optional `access` ∈ {`members`,`owner`}
       (default `members`); unknown mount fields rejected.
-- [ ] Require ≥1 of `proxy.http:self` / `proxy.websocket:self` in `permissions`
+- [x] Require ≥1 of `proxy.http:self` / `proxy.websocket:self` in `permissions`
       when `proxy_mounts` present.
-- [ ] Manifest tests: valid mounts, dup names, missing/ wrong-type setting,
+- [x] Manifest tests: valid mounts, dup names, missing/ wrong-type setting,
       unknown fields, missing capability.
 
 **Approval store** (runtime-owned SQLite)
-- [ ] Migration: `proxy_approvals` table (plugin_slug, plugin_version,
+- [x] Migration: `proxy_approvals` table (plugin_slug, plugin_version,
       mount_name, mount_definition_hash, upstream_setting_key,
       normalized_upstream_origin, normalized_upstream_base_path,
       approved_by_user_id, approved_at, approval_version). Add to
       `runtime/src/db/expected-tables.ts`.
-- [ ] Upstream URL validator + normalizer (origin + base path; reject userinfo,
+- [x] Upstream URL validator + normalizer (origin + base path; reject userinfo,
       non-http(s), empty host, bad port, fragments, IPv6 zone ids).
-- [ ] Approval store/resolver (runtime SQLite only). `mount_definition_hash`
+- [x] Approval store/resolver (runtime SQLite only). `mount_definition_hash`
       over the mount definition.
-- [ ] Invalidation hook in `PATCH /admin/api/plugins/:slug/config` when changed
+- [x] Invalidation hook in `PATCH /admin/api/plugins/:slug/config` when changed
       key == a mount's `upstream_setting` (transactional with the config write).
-- [ ] Tests seed approvals directly through the store (admin approve endpoint is Phase 4).
+- [x] Tests seed approvals directly through the store (admin approve endpoint is Phase 4).
 
 **Bootstrap cookie** (implements Phase 0 decision)
-- [ ] Proxy-session sign / mint / validate. Bind: user id, server id, plugin
+- [x] Proxy-session sign / mint / validate. Bind: user id, server id, plugin
       slug, mount name, approval version, expiry.
-- [ ] `POST /proxy-sessions/:slug/:mount` (Bearer-authed via `extractAuth`).
-- [ ] Tests: valid, expired, wrong-mount, wrong-user, stale-approval.
+- [x] `POST /proxy-sessions/:slug/:mount` (Bearer-authed via `extractAuth`).
+- [x] Tests: valid, expired, wrong-mount, wrong-user, stale-approval.
 
 **Minimal HTTP proxy proof**
-- [ ] Local upstream test server + minimal `/proxy/:slug/:mount/*` passthrough
+- [x] Local upstream test server + minimal `/proxy/:slug/:mount/*` passthrough
       (cookie-validated, fail-closed; no header/cookie/redirect/DNS/limits yet).
-- [ ] E2E: Bearer bootstrap → cookie → no-Authorization browser-style request
+- [x] E2E: Bearer bootstrap → cookie → no-Authorization browser-style request
       loads stub upstream HTML.
 
 ## Phase 2 — HTTP Proxy Core — commit: `feat(proxy): http forwarder`

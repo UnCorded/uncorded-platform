@@ -9,7 +9,9 @@ import { CapabilityChecker } from "../capabilities/checker";
 import { sniffMime, extensionForMime, INLINE_SAFE_MIMES } from "./mime-sniff";
 import { verifyFileSig } from "../signing/files";
 import { extractAuth, requireMinLevel } from "./auth";
-import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE } from "./rate-limiter";
+import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE, RATE_PROXY_HTTP, RATE_PROXY_SESSION } from "./rate-limiter";
+import { handleProxySessionBootstrap, handleProxyRequest } from "./proxy";
+import { ProxyApprovalStore } from "../proxy/approvals";
 import {
   handleUploadInit,
   handleUploadStatus,
@@ -317,8 +319,36 @@ function matchRoute(method: string, pathname: string): RouteMatch | null {
     return { handler: handlePutBrowserRecent, params: {}, rateConfig: RATE_WORKSPACE, rateScope: "user", corsAuth: true };
   }
 
+  // Reverse-proxy session bootstrap — Bearer-authed, mints the proxy-session
+  // cookie. Same-origin call from the plugin UI; corsAuth covers the shell.
+  const proxySessionMatch = /^\/proxy-sessions\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(pathname);
+  if (method === "POST" && proxySessionMatch?.[1] && proxySessionMatch[2]) {
+    return {
+      handler: handleProxySessionBootstrap,
+      params: { slug: proxySessionMatch[1], mount: proxySessionMatch[2] },
+      rateConfig: RATE_PROXY_SESSION,
+      rateScope: "user",
+      corsAuth: true,
+    };
+  }
+
+  // Reverse-proxy passthrough — browser traffic, validated by the proxy-session
+  // cookie only. IP-scoped pre-auth rate limit; the handler fails closed.
+  const proxyMatch = /^\/proxy\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?:\/(.*))?$/.exec(pathname);
+  if (proxyMatch?.[1] && proxyMatch[2] && PROXY_METHODS.has(method)) {
+    return {
+      handler: handleProxyRequest,
+      params: { slug: proxyMatch[1], mount: proxyMatch[2], path: proxyMatch[3] ?? "" },
+      rateConfig: RATE_PROXY_HTTP,
+      rateScope: "ip",
+    };
+  }
+
   return null;
 }
+
+/** HTTP methods the reverse-proxy passthrough forwards. */
+const PROXY_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 
 // ---------------------------------------------------------------------------
 // Handler factory
@@ -1541,6 +1571,18 @@ async function handleAdminApi(
          updated_by_user_id = excluded.updated_by_user_id`,
       [key, encoded, setting.type, now, user.id],
     );
+
+    // Invalidate any proxy approval backed by this setting. Changing a mount's
+    // upstream setting disables the mount until an owner re-approves (Phase 4) —
+    // config writes may only invalidate, never create. The runtime also
+    // re-checks the normalized upstream against the approval on every proxy
+    // request, so this is defense-in-depth, not the sole guarantee.
+    if (plugin.manifest.proxy_mounts?.some((m) => m.upstream_setting === key)) {
+      const removed = new ProxyApprovalStore(deps.coreDb).invalidateBySettingKey(slug, key);
+      if (removed > 0) {
+        recordAudit(deps, user, "proxy.approval_invalidated", "plugin", slug, { upstream_setting: key, mounts: removed });
+      }
+    }
 
     // Push core.plugin.config_changed to the live plugin process (if any).
     const proc = deps.getPluginProcess(slug);

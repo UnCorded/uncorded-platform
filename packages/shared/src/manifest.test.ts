@@ -1259,4 +1259,112 @@ describe("validateManifest", () => {
       expect(err.field).toBe("serve_ready_handshake");
     });
   });
+
+  // ---- proxy_mounts ----
+
+  describe("proxy_mounts", () => {
+    /** Valid manifest carrying one proxy mount + its backing setting + capability. */
+    function proxyManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return validManifest({
+        permissions: ["data.sql:self", "proxy.http:self"],
+        settings: [{ key: "upstream_url", label: "Upstream", type: "string" }],
+        proxy_mounts: [{ name: "app", upstream_setting: "upstream_url" }],
+        ...overrides,
+      });
+    }
+
+    test("accepts a valid proxy mount", () => {
+      const m = expectOk(validateManifest(proxyManifest()));
+      expect(m.proxy_mounts).toEqual([{ name: "app", upstream_setting: "upstream_url" }]);
+    });
+
+    test("accepts access members/owner and a secret upstream setting", () => {
+      const m = expectOk(
+        validateManifest(
+          proxyManifest({
+            permissions: ["proxy.websocket:self"],
+            settings: [{ key: "url", label: "Upstream", type: "secret" }],
+            proxy_mounts: [
+              { name: "app", upstream_setting: "url", access: "members" },
+              { name: "admin", upstream_setting: "url", access: "owner" },
+            ],
+          }),
+        ),
+      );
+      expect(m.proxy_mounts).toHaveLength(2);
+    });
+
+    test("rejects non-array proxy_mounts", () => {
+      expectErrorCode(validateManifest(proxyManifest({ proxy_mounts: {} })), "INVALID_PROXY_MOUNTS");
+    });
+
+    test("rejects empty proxy_mounts array", () => {
+      expectErrorCode(validateManifest(proxyManifest({ proxy_mounts: [] })), "EMPTY_PROXY_MOUNTS");
+    });
+
+    test("rejects duplicate mount names", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [
+              { name: "app", upstream_setting: "upstream_url" },
+              { name: "app", upstream_setting: "upstream_url" },
+            ],
+          }),
+        ),
+        "DUPLICATE_PROXY_MOUNT_NAME",
+      );
+    });
+
+    test("rejects a non-slug mount name", () => {
+      expectErrorCode(
+        validateManifest(proxyManifest({ proxy_mounts: [{ name: "App_1", upstream_setting: "upstream_url" }] })),
+        "INVALID_PROXY_MOUNT_NAME",
+      );
+    });
+
+    test("rejects upstream_setting that references no declared setting", () => {
+      expectErrorCode(
+        validateManifest(proxyManifest({ proxy_mounts: [{ name: "app", upstream_setting: "missing" }] })),
+        "UNKNOWN_UPSTREAM_SETTING",
+      );
+    });
+
+    test("rejects upstream_setting of the wrong type", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({
+            settings: [{ key: "port", label: "Port", type: "number" }],
+            proxy_mounts: [{ name: "app", upstream_setting: "port" }],
+          }),
+        ),
+        "INVALID_UPSTREAM_SETTING_TYPE",
+      );
+    });
+
+    test("rejects an invalid access value", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({ proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", access: "everyone" }] }),
+        ),
+        "INVALID_PROXY_MOUNT_ACCESS",
+      );
+    });
+
+    test("rejects unknown mount fields", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({ proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", target: "x" }] }),
+        ),
+        "UNKNOWN_PROXY_MOUNT_FIELD",
+      );
+    });
+
+    test("requires a proxy.* capability when proxy_mounts present", () => {
+      expectErrorCode(
+        validateManifest(proxyManifest({ permissions: ["data.sql:self"] })),
+        "MISSING_PROXY_CAPABILITY",
+      );
+    });
+  });
 });
