@@ -88,6 +88,27 @@ export interface PluginSettingStop {
   label: string;
 }
 
+/** Who may access a reverse-proxy mount. Defaults to "members". */
+export type ProxyMountAccess = "members" | "owner";
+
+/**
+ * A reverse-proxy mount declared in the manifest. After an owner approves it,
+ * the runtime serves the configured upstream under `/proxy/<slug>/<name>/*`.
+ * See docs/reverse-proxy/plugin-reverse-proxy-plan.md §Manifest Contract.
+ */
+export interface ProxyMount {
+  /** Mount name. Slug-safe and unique within the plugin; appears in the URL. */
+  name: string;
+  /**
+   * Key of a setting declared in this same manifest (type "string" or
+   * "secret") whose value holds the upstream URL. The runtime resolves and
+   * normalizes that value; the manifest never carries the upstream directly.
+   */
+  upstream_setting: string;
+  /** Access policy. Optional; defaults to "members". */
+  access?: ProxyMountAccess;
+}
+
 export interface PluginManifest {
   name: string;
   version: string;
@@ -160,6 +181,13 @@ export interface PluginManifest {
    * plugin can answer them — the join silently fails and the user walks.
    */
   serve_ready_handshake?: boolean;
+  /**
+   * Reverse-proxy mounts. Optional; when present must be a non-empty array and
+   * the plugin must request at least one of `proxy.http:self` /
+   * `proxy.websocket:self` in `permissions`. Each mount is disabled until an
+   * owner approves it (see the runtime-owned approval store).
+   */
+  proxy_mounts?: ProxyMount[];
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +266,7 @@ const KNOWN_TOP_LEVEL_FIELDS = new Set<string>([
   "runtime_capabilities",
   "managed_services",
   "serve_ready_handshake",
+  "proxy_mounts",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -761,6 +790,92 @@ export function validateManifest(input: unknown): ManifestResult {
     }
   }
 
+  // --- proxy_mounts (optional non-empty array of ProxyMount) ---
+  // See docs/reverse-proxy/plugin-reverse-proxy-plan.md §Manifest Contract.
+  if (input["proxy_mounts"] !== undefined) {
+    if (!Array.isArray(input["proxy_mounts"])) {
+      errors.push({
+        code: "INVALID_PROXY_MOUNTS",
+        field: "proxy_mounts",
+        message: "proxy_mounts must be an array.",
+      });
+    } else if (input["proxy_mounts"].length === 0) {
+      errors.push({
+        code: "EMPTY_PROXY_MOUNTS",
+        field: "proxy_mounts",
+        message: "proxy_mounts must not be empty when present.",
+      });
+    } else {
+      // Build a key -> type lookup over declared settings so each mount's
+      // upstream_setting can be cross-referenced against a same-manifest
+      // string|secret setting.
+      const settingTypeByKey = new Map<string, string>();
+      if (Array.isArray(input["settings"])) {
+        for (const s of input["settings"]) {
+          if (isObject(s) && typeof s["key"] === "string" && typeof s["type"] === "string") {
+            settingTypeByKey.set(s["key"], s["type"]);
+          }
+        }
+      }
+      const ALLOWED_MOUNT_ACCESS = new Set(["members", "owner"]);
+      const KNOWN_MOUNT_FIELDS = new Set(["name", "upstream_setting", "access"]);
+      const seenMountNames = new Set<string>();
+      for (let i = 0; i < input["proxy_mounts"].length; i++) {
+        const m = input["proxy_mounts"][i];
+        const prefix = `proxy_mounts[${i}]`;
+        if (!isObject(m)) {
+          errors.push({ code: "INVALID_PROXY_MOUNT", field: prefix, message: `${prefix} must be an object.` });
+          continue;
+        }
+        // Reject unknown mount fields — a typo here would silently disable a mount.
+        for (const k of Object.keys(m)) {
+          if (!KNOWN_MOUNT_FIELDS.has(k)) {
+            errors.push({ code: "UNKNOWN_PROXY_MOUNT_FIELD", field: `${prefix}.${k}`, message: `${prefix}.${k} is not a recognized proxy mount field.` });
+          }
+        }
+        // name: slug-safe and unique within the plugin.
+        if (typeof m["name"] !== "string" || m["name"].length === 0) {
+          errors.push({ code: "INVALID_PROXY_MOUNT_NAME", field: `${prefix}.name`, message: `${prefix}.name must be a non-empty string.` });
+        } else if (!SLUG_RE.test(m["name"])) {
+          errors.push({ code: "INVALID_PROXY_MOUNT_NAME", field: `${prefix}.name`, message: `${prefix}.name must be a lowercase slug (a-z, 0-9, single hyphens).` });
+        } else if (seenMountNames.has(m["name"])) {
+          errors.push({ code: "DUPLICATE_PROXY_MOUNT_NAME", field: `${prefix}.name`, message: `${prefix}.name ("${m["name"]}") is duplicated; mount names must be unique per plugin.` });
+        } else {
+          seenMountNames.add(m["name"]);
+        }
+        // upstream_setting: references a declared string|secret setting.
+        if (typeof m["upstream_setting"] !== "string" || m["upstream_setting"].length === 0) {
+          errors.push({ code: "INVALID_PROXY_MOUNT_UPSTREAM_SETTING", field: `${prefix}.upstream_setting`, message: `${prefix}.upstream_setting must be a non-empty string.` });
+        } else {
+          const refType = settingTypeByKey.get(m["upstream_setting"]);
+          if (refType === undefined) {
+            errors.push({ code: "UNKNOWN_UPSTREAM_SETTING", field: `${prefix}.upstream_setting`, message: `${prefix}.upstream_setting ("${m["upstream_setting"]}") does not reference a setting declared in this manifest.` });
+          } else if (refType !== "string" && refType !== "secret") {
+            errors.push({ code: "INVALID_UPSTREAM_SETTING_TYPE", field: `${prefix}.upstream_setting`, message: `${prefix}.upstream_setting must reference a setting of type "string" or "secret" (found "${refType}").` });
+          }
+        }
+        // access: optional; one of members|owner.
+        if (m["access"] !== undefined && (typeof m["access"] !== "string" || !ALLOWED_MOUNT_ACCESS.has(m["access"]))) {
+          errors.push({ code: "INVALID_PROXY_MOUNT_ACCESS", field: `${prefix}.access`, message: `${prefix}.access must be one of: members, owner.` });
+        }
+      }
+      // A plugin declaring proxy mounts must request a proxy transport
+      // capability. WebSocket is its own capability and is not implied by HTTP.
+      if (Array.isArray(input["permissions"])) {
+        const hasProxyCapability = input["permissions"].some(
+          (p) => p === "proxy.http:self" || p === "proxy.websocket:self",
+        );
+        if (!hasProxyCapability) {
+          errors.push({
+            code: "MISSING_PROXY_CAPABILITY",
+            field: "permissions",
+            message: 'A plugin declaring proxy_mounts must request at least one of "proxy.http:self" or "proxy.websocket:self" in permissions.',
+          });
+        }
+      }
+    }
+  }
+
   // --- license (optional string) ---
   if (input["license"] !== undefined && typeof input["license"] !== "string") {
     errors.push({
@@ -949,6 +1064,9 @@ export function validateManifest(input: unknown): ManifestResult {
   }
   if (typeof input["serve_ready_handshake"] === "boolean") {
     manifest.serve_ready_handshake = input["serve_ready_handshake"];
+  }
+  if (Array.isArray(input["proxy_mounts"])) {
+    manifest.proxy_mounts = input["proxy_mounts"] as ProxyMount[];
   }
 
   return { ok: true, manifest };

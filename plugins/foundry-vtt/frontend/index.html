@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Foundry VTT</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      background: #16181d;
+      color: #e8eaed;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* The proxied Foundry app fills the panel. */
+    #foundry-frame { flex: 1 1 auto; width: 100%; border: 0; background: #0f1115; }
+
+    /* Fallback bar. Shown once the proxy mount is bootstrapped (Safari/WebKit
+     * cannot carry the proxy-session cookie inside a cross-site iframe, so
+     * "Open in browser" — a top-level navigation to the runtime's /proxy-open
+     * first-party handoff — is the verified path there; see docs/reverse-proxy
+     * decision §4a). Hidden until we have a real openUrl so the link is never a
+     * dead/unauthenticated target. */
+    #fallback[hidden] { display: none; }
+    #fallback {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 12px;
+      color: #9aa0a6;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      background: #1b1e24;
+    }
+    #open-link {
+      color: #8ab4f8;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    #open-link:hover { text-decoration: underline; }
+
+    #status { flex: 0 0 auto; padding: 0.5rem 0.75rem; font-size: 12px; color: #9aa0a6; }
+    #status[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <p id="status">Connecting to Foundry…</p>
+  <iframe
+    id="foundry-frame"
+    allow="fullscreen; clipboard-read; clipboard-write"
+    title="Foundry VTT"
+  ></iframe>
+  <div id="fallback" hidden>
+    <span>Trouble loading?</span>
+    <a id="open-link" target="_blank" rel="noreferrer">
+      Open in browser
+    </a>
+  </div>
+
+  <!-- Classic script: sets window.UncodedPlugin synchronously during parse,
+       before the deferred module below runs. -->
+  <script src="/sdk/plugin-frontend.js"></script>
+  <script type="module">
+    import { bootstrapFoundryPanel } from "./bootstrap.js";
+
+    const MOUNT = "foundry";
+
+    (async () => {
+      const status = document.getElementById("status");
+      const frame = document.getElementById("foundry-frame");
+      const link = document.getElementById("open-link");
+      const fallback = document.getElementById("fallback");
+
+      const sdk = await window.UncodedPlugin.createPluginFrontend();
+
+      const session = await bootstrapFoundryPanel({
+        openMount: (mount) => sdk.proxy.openMount(mount),
+        frame,
+        link,
+        mount: MOUNT,
+      });
+
+      if (session) {
+        // Reveal "Open in browser" now that it points at a real first-party
+        // handoff URL — the Safari path and a manual recovery everywhere else.
+        if (fallback) fallback.hidden = false;
+        if (status) status.hidden = true;
+      } else if (status) {
+        status.textContent =
+          "Couldn't open Foundry in this panel. Reload to try again.";
+      }
+    })();
+  </script>
+</body>
+</html>

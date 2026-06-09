@@ -1,6 +1,8 @@
 // Server-internal types for the WebSocket layer.
 // These are NOT part of the wire protocol — they're runtime implementation details.
 
+import type { ServerWebSocket } from "bun";
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -34,9 +36,16 @@ export interface ConnectedUser {
 
 // ---------------------------------------------------------------------------
 // Per-connection state (stored on ws.data)
+//
+// A single Bun.serve() accepts two unrelated kinds of socket:
+//   - "runtime": the UnCorded WS protocol (auth handshake → MessageRouter).
+//   - "proxy":   a reverse-proxy WebSocket bridged to a plugin upstream.
+// `kind` discriminates the two so the websocket handlers can branch without
+// ever feeding proxy frames into the router (or protocol frames upstream).
 // ---------------------------------------------------------------------------
 
-export interface WsConnectionData {
+export interface RuntimeWsConnectionData {
+  kind: "runtime";
   connectionId: string;
   authenticated: boolean;
   user?: AuthenticatedUser | undefined;
@@ -44,6 +53,50 @@ export interface WsConnectionData {
   authTimer?: ReturnType<typeof setTimeout> | undefined;
   clientIp?: string | undefined;
 }
+
+/** A frame in flight between the proxy client and its upstream. */
+export type ProxyWsFrame = string | ArrayBuffer | Uint8Array;
+
+/**
+ * Mutable per-connection state for a proxied WebSocket. Owns both the upstream
+ * client socket and the bounded buffers that absorb backpressure in each
+ * direction (no unbounded queue: overflow closes the bridge).
+ */
+export interface ProxyWsRuntimeState {
+  /** Resolved upstream ws(s):// URL. */
+  readonly upstreamUrl: string;
+  /** Subprotocol echoed to the client (and requested upstream), "" if none. */
+  readonly subprotocol: string;
+  readonly slug: string;
+  readonly mount: string;
+  readonly userId: string;
+  /** The accepted Bun client socket — set in `open()`, cleared on `close()`. */
+  client: ServerWebSocket<WsConnectionData> | undefined;
+  /** Upstream client socket; undefined once it has been torn down. */
+  upstream: WebSocket | undefined;
+  /** True once the upstream "open" event has fired. */
+  upstreamOpen: boolean;
+  /** True once either side has begun closing — suppresses further piping. */
+  closing: boolean;
+  /** True while the Bun client socket is backpressured (last send() == -1). */
+  clientBackpressured: boolean;
+  /** Client→upstream frames buffered before upstream open or while congested. */
+  toUpstream: ProxyWsFrame[];
+  toUpstreamBytes: number;
+  /** Upstream→client frames the Bun socket couldn't take yet; flushed on drain. */
+  toClient: ProxyWsFrame[];
+  toClientBytes: number;
+}
+
+export interface ProxyWsConnectionData {
+  kind: "proxy";
+  connectionId: string;
+  connectedAt: number;
+  clientIp?: string | undefined;
+  proxy: ProxyWsRuntimeState;
+}
+
+export type WsConnectionData = RuntimeWsConnectionData | ProxyWsConnectionData;
 
 // ---------------------------------------------------------------------------
 // WebSocket close codes (4000-4999 = application-defined per RFC 6455)

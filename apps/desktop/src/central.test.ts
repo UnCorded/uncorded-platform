@@ -24,7 +24,7 @@ beforeAll(async () => {
     encryptionSecretKey: (serverId: string) => `encryption:${serverId}`,
   }));
 
-  centralModule = await import("./central");
+  centralModule = await import(`./central.ts?network-errors-${Date.now()}`) as typeof import("./central");
 });
 
 beforeEach(() => {

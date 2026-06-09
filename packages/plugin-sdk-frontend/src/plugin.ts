@@ -9,6 +9,7 @@ import { performHandshake } from "./handshake";
 import { createRequestClient } from "./request";
 import { createEventsClient } from "./events";
 import { createFilesClient } from "./files";
+import { createProxyClient } from "./proxy";
 import { observeScreenSlot as observeScreenSlotImpl } from "./screen-slots";
 import type {
   CreatePluginFrontendOptions,
@@ -67,6 +68,7 @@ export async function createPluginFrontend(
     // so opaque-origin (`Origin: null`) requests succeed.
     runtimeOrigin: window.location.origin,
   });
+  const proxyClient = createProxyClient({ slug, token });
   const navigateHandlers: NavigateHandlerEntry[] = [];
   let currentNavigation: NavigateEvent | null = initialNavigation ?? null;
 
@@ -340,6 +342,8 @@ export async function createPluginFrontend(
     },
 
     files: filesClient,
+
+    proxy: proxyClient,
 
     platform: {
       panels: {

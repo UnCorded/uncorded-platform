@@ -4,6 +4,7 @@
 // All inbound postMessages are origin-checked against this value.
 
 import { SDK_API_VERSION } from "./version";
+import { PluginError } from "./errors";
 
 const HANDSHAKE_MESSAGE_TYPE = "uncorded.token";
 const READY_MESSAGE_TYPE = "uncorded.ready";
@@ -29,9 +30,11 @@ export function performHandshake(timeoutMs: number): Promise<HandshakeResult> {
     shellOrigin = new URL(document.referrer).origin;
   } catch {
     return Promise.reject(
-      new Error(
+      new PluginError(
+        "HANDSHAKE_FAILED",
         "Cannot determine shell origin: document.referrer is empty or invalid. " +
           "Is this plugin running inside an UnCorded shell?",
+        { context: { referrer: document.referrer || null } },
       ),
     );
   }
@@ -40,9 +43,11 @@ export function performHandshake(timeoutMs: number): Promise<HandshakeResult> {
     const timer = setTimeout(() => {
       window.removeEventListener("message", listener);
       reject(
-        new Error(
+        new PluginError(
+          "HANDSHAKE_TIMEOUT",
           `Handshake timed out after ${timeoutMs}ms: uncorded.ready was sent but no token was received. ` +
             "Is this plugin running inside an UnCorded shell?",
+          { context: { shellOrigin, timeoutMs } },
         ),
       );
     }, timeoutMs);

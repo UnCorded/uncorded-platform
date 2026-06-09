@@ -1,0 +1,38 @@
+{
+  "name": "foundry-vtt",
+  "version": "0.1.0",
+  "api_version": "^1.0",
+  "author": "UnCorded",
+  "description": "Open a Foundry VTT server from the UnCorded sidebar.",
+  "license": "MIT",
+  "type": "standalone",
+  "icon": "Dice6",
+  "backend": {
+    "entry": "backend/index.ts"
+  },
+  "frontend": {
+    "entry": "frontend/index.html"
+  },
+  "permissions": ["proxy.http:self", "proxy.websocket:self"],
+  "sidebar": {
+    "contributes": true,
+    "section": "Tabletop"
+  },
+  "settings": [
+    {
+      "key": "foundry_upstream_url",
+      "label": "Foundry upstream URL",
+      "description": "Base URL of the Foundry VTT server this plugin proxies to. Docker users can use http://host.docker.internal:30000 for local testing. Changing this invalidates the mount approval until an owner re-approves it.",
+      "type": "string",
+      "default": "https://example.com",
+      "required": true
+    }
+  ],
+  "proxy_mounts": [
+    {
+      "name": "foundry",
+      "upstream_setting": "foundry_upstream_url",
+      "access": "members"
+    }
+  ]
+}
