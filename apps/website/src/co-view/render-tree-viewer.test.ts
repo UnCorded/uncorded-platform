@@ -387,6 +387,44 @@ describe("renderer attribute safety", () => {
     expect(JSON.stringify(resolved)).not.toContain(SECRET_BYTES);
   });
 
+  test("controlKind accepts only protocol control tokens", () => {
+    const resolved = resolveProjectedNode({
+      id: "control-leak",
+      kind: "control",
+      box: ZERO_BOX,
+      attrs: { controlKind: "script" as NonNullable<CoViewSafeAttrs["controlKind"]> },
+    });
+
+    expect(resolved.controlKind).toBeUndefined();
+    expect(resolved.tag).toBe("div");
+    expect(JSON.stringify(resolved)).not.toContain("script");
+  });
+
+  test("preserve-host-rect placeholder reason is never echoed", () => {
+    const node: CoViewProjectedNode = {
+      id: "ph",
+      kind: "text",
+      box: ZERO_BOX,
+      value: {
+        state: "withheld",
+        placeholderShape: {
+          mode: "preserve-host-rect",
+          sizeLeakAccepted: true,
+          reason: "sensitive-layout-hint",
+        },
+      },
+    };
+    const resolved = resolveProjectedNode(node);
+
+    expect(resolved.content).toEqual({
+      kind: "placeholder",
+      placeholder: { reason: "withheld", mode: "preserve-host-rect" },
+    });
+    const serialized = JSON.stringify(resolved);
+    expect(serialized).not.toContain("sensitive-layout-hint");
+    expect(serialized).not.toContain("sizeLeakAccepted");
+  });
+
   test("node kinds resolve to a fixed, safe tag set — never img/canvas/script", () => {
     const kinds = [
       { kind: "element", expected: "div" },
@@ -418,5 +456,16 @@ describe("renderer attribute safety", () => {
     const resolved = resolveProjectedNode(node);
     expect(resolved.content).toEqual({ kind: "empty" });
     expect(JSON.stringify(resolved)).not.toContain("nested");
+  });
+
+  test("a visible null value renders empty, not 'null' text", () => {
+    const node: CoViewProjectedNode = {
+      id: "nullish",
+      kind: "text",
+      box: ZERO_BOX,
+      value: { state: "visible", value: null },
+    };
+
+    expect(resolveProjectedNode(node).content).toEqual({ kind: "empty" });
   });
 });

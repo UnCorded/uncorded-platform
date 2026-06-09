@@ -28,17 +28,18 @@
 // This module is pure and side-effect free. It is NOT wired into the live app;
 // the companion view component is gated behind `CO_VIEW_PROJECTED_VIEWER_ENABLED`.
 
-import type {
-  CoViewBox,
-  CoViewControlKind,
-  CoViewNodeKind,
-  CoViewNodeState,
-  CoViewProjectedNode,
-  CoViewProjectedRenderFrame,
-  CoViewProjectedValue,
-  CoViewSafeAttrs,
-  JsonValue,
-  PlaceholderShape,
+import {
+  CO_VIEW_CONTROL_KINDS,
+  type CoViewBox,
+  type CoViewControlKind,
+  type CoViewNodeKind,
+  type CoViewNodeState,
+  type CoViewProjectedNode,
+  type CoViewProjectedRenderFrame,
+  type CoViewProjectedValue,
+  type CoViewSafeAttrs,
+  type JsonValue,
+  type PlaceholderShape,
 } from "@uncorded/protocol";
 
 /**
@@ -206,6 +207,8 @@ const SAFE_ARIA_ROLES = new Set([
   "treeitem",
 ]);
 
+const SAFE_CONTROL_KINDS = new Set<string>(CO_VIEW_CONTROL_KINDS);
+
 function extractAria(attrs: CoViewSafeAttrs | undefined): SafeViewAria {
   if (!attrs) return {};
   const aria: SafeViewAria = {};
@@ -219,7 +222,11 @@ function extractAria(attrs: CoViewSafeAttrs | undefined): SafeViewAria {
 
 /** Pull the allowlisted control kind, if this node declares one. */
 function extractControlKind(attrs: CoViewSafeAttrs | undefined): CoViewControlKind | undefined {
-  return attrs?.controlKind;
+  const controlKind = attrs?.controlKind;
+  if (typeof controlKind === "string" && SAFE_CONTROL_KINDS.has(controlKind)) {
+    return controlKind as CoViewControlKind;
+  }
+  return undefined;
 }
 
 /** Copy host interaction state into a fully-populated boolean flag set. */
