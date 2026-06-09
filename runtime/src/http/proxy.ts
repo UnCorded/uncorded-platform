@@ -403,6 +403,15 @@ function isSecureRequest(request: Request): boolean {
   }
 }
 
+function isLocalhostRequest(request: Request): boolean {
+  try {
+    const host = new URL(request.url).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // POST /proxy-sessions/:slug/:mount — Bearer-authed bootstrap.
 // ---------------------------------------------------------------------------
@@ -456,8 +465,12 @@ export async function handleProxySessionBootstrap(
   const openUrl = `/proxy-open/${slug}/${mountName}?ticket=${encodeURIComponent(openTicket)}`;
 
   const secure = isSecureRequest(request);
+  const localhostFramedCompat = !secure && isLocalhostRequest(request);
   const response = Response.json({ url: `/proxy/${slug}/${mountName}/`, openUrl });
-  response.headers.append("Set-Cookie", buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS));
+  response.headers.append(
+    "Set-Cookie",
+    buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS, localhostFramedCompat),
+  );
   return response;
 }
 
@@ -533,6 +546,7 @@ export async function handleProxyOpen(
   );
 
   const secure = isSecureRequest(request);
+  const localhostFramedCompat = !secure && isLocalhostRequest(request);
   const response = new Response(null, {
     status: 302,
     headers: {
@@ -543,7 +557,10 @@ export async function handleProxyOpen(
       "Referrer-Policy": "no-referrer",
     },
   });
-  response.headers.append("Set-Cookie", buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS));
+  response.headers.append(
+    "Set-Cookie",
+    buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS, localhostFramedCompat),
+  );
   return response;
 }
 

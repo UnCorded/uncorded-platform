@@ -91,17 +91,21 @@ survives a third-party iframe across modern browsers; it is also harmless if a
 given server happens to be same-site. `__Host-` adds tamper-resistance on the
 name (forces Secure + Path=/ + no Domain), and binding is carried in the value.
 
-### Local dev where the runtime is `http://localhost:3000` (same-site, no HTTPS)
+### Local dev where the runtime is `http://localhost:3000` (same-site)
 
 ```text
 Name:        uncorded-proxy-<pluginSlug>-<mountName>   (no __Host-/Partitioned)
-Attributes:  HttpOnly; Path=/; SameSite=Lax
+Attributes:  Secure; HttpOnly; Path=/; SameSite=None   (sandboxed plugin panel)
+             HttpOnly; Path=/; SameSite=Lax            (non-framed fallback)
 ```
 
-Rationale: `http://localhost` cannot use `Secure`, hence cannot use
-`SameSite=None`, `Partitioned`, or `__Host-`. This case only arises when the
-shell is also `localhost` (same-site), where `Lax` is sufficient. Gate this
-behind an explicit dev-only flag so production can never silently drop `Secure`.
+Rationale: production still uses the locked `__Host-` + `Partitioned` HTTPS
+cookie. For local development, browsers treat `localhost` as a trustworthy
+origin for `Secure` cookies, so sandboxed plugin panels can exercise the framed
+flow with `Secure; SameSite=None` even on `http://localhost`. Keep the plain
+`SameSite=Lax` branch only as a non-framed/local fallback. Gate both behind an
+explicit dev-only localhost check so production can never silently drop the
+locked production attributes.
 
 > A dev shell on `http://localhost:5174` pointed at an HTTPS *tunnel* runtime is
 > cross-site **and** Secure-capable, so it uses the **production** cookie, not
@@ -189,14 +193,15 @@ already set) reading; fetch/ws are identical on firstLoad and reNav unless noted
 |-------------|--------------|------------------------|--------------|-------------|
 | Web prod | `https://uncorded.app` | `*.trycloudflare.com` / custom CF hostname | **cross-site** | production `__Host-…Partitioned` |
 | Web dev | `http://localhost:5174` | `*.trycloudflare.com` | cross-site, Secure-capable runtime | production cookie |
-| Web dev | `http://localhost:5174` | `http://localhost:3000` | **same-site** | dev fallback (`Lax`) |
+| Web dev | `http://localhost:5174` | `http://localhost:3000` | **same-site** | localhost dev cookie (`Secure; SameSite=None` in sandboxed plugin panels, `Lax` fallback otherwise) |
 | Desktop prod | `https://uncorded.app` (Electron=Chromium) | `*.trycloudflare.com` / custom | **cross-site** | production cookie (✓ Chromium) |
 | Desktop dev | `http://localhost:5174` | as web dev | cross-site / same-site | as web dev |
 
 The same-site dev case (`localhost:5174`→`localhost:3000`) is same-**site**
-(host `localhost`, port-only difference), so `SameSite=Lax` is carried — well
-established and consistent with the first-party `dev-lax` result in §4a; not
-separately harnessed.
+(host `localhost`, port-only difference), so `SameSite=Lax` is carried in
+ordinary same-site contexts. Sandboxed plugin panels are opaque-origin frames,
+however, so local panel testing uses the framed-compatible localhost cookie
+(`Secure; SameSite=None`, no `Partitioned`) that browsers accept on localhost.
 
 ## 4a. Safari/WebKit limitation and the locked fallback
 
@@ -247,8 +252,9 @@ can fix Safari's iframe policy), and it is verified to work.
   signed value. Verified to carry on document navigation, subresource fetch, and
   WebSocket upgrade on Chromium (incl. 3pc-blocked) and Firefox.
 - **Dev (`http://localhost` runtime, same-site only):** `uncorded-proxy-<slug>-<mount>`,
-  `HttpOnly; Path=/; SameSite=Lax`, behind an explicit dev-only flag. Never
-  emit a non-`Secure` cookie when the runtime origin is HTTPS.
+  `Secure; HttpOnly; Path=/; SameSite=None` for sandboxed plugin panels, with
+  `HttpOnly; Path=/; SameSite=Lax` retained only as a non-framed/local fallback.
+  Never emit a non-`Secure` cookie when the runtime origin is HTTPS.
 - **Deviation from prediction:** one new constraint — **Safari/WebKit cannot use
   the embedded iframe** for proxied content; Phase 5 must ship the verified
   top-level "Open in browser" fallback (§4a). No change to cookie attributes.

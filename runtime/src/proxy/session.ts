@@ -11,6 +11,8 @@
 // (docs/reverse-proxy/phase-0-cookie-topology-decision.md):
 //   production: __Host-uncorded-proxy-<slug>-<mount>
 //               Secure; HttpOnly; Path=/; SameSite=None; Partitioned
+//   dev (http localhost framed): uncorded-proxy-<slug>-<mount>
+//               Secure; HttpOnly; Path=/; SameSite=None
 //   dev (http localhost fallback): uncorded-proxy-<slug>-<mount>
 //               HttpOnly; Path=/; SameSite=Lax
 //
@@ -207,11 +209,18 @@ export function buildProxySetCookie(
   token: string,
   secure: boolean,
   maxAgeSeconds: number = DEFAULT_TTL_SECONDS,
+  localhostFramedCompat: boolean = false,
 ): string {
   const name = proxyCookieName(slug, mount, secure);
   if (secure) {
     // LOCKED production attributes (Phase 0 decision).
     return `${name}=${token}; Secure; HttpOnly; Path=/; SameSite=None; Partitioned; Max-Age=${maxAgeSeconds}`;
+  }
+  if (localhostFramedCompat) {
+    // Localhost is treated as a trustworthy development origin by browsers, so
+    // Secure + SameSite=None is accepted there and allows sandboxed plugin
+    // iframes to exercise the same framed flow production uses on HTTPS.
+    return `${name}=${token}; Secure; HttpOnly; Path=/; SameSite=None; Max-Age=${maxAgeSeconds}`;
   }
   // Dev localhost fallback: no Secure/Partitioned (http origin), first-party Lax.
   return `${name}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}`;

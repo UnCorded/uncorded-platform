@@ -103,6 +103,10 @@ interface RouteMatch {
    *  shell/admin origins. The dispatcher echoes the request's Origin in
    *  Access-Control-Allow-Origin only if it matches deps.allowedOrigins. */
   corsAuth?: boolean;
+  /** Allow sandboxed plugin iframes to call this authenticated endpoint.
+   *  Those frames intentionally have an opaque origin, so browsers send
+   *  `Origin: null` for their CORS bootstrap request. */
+  corsOpaqueOrigin?: boolean;
 }
 
 type RouteHandler = (
@@ -329,6 +333,16 @@ function matchRoute(method: string, pathname: string): RouteMatch | null {
   // Reverse-proxy session bootstrap — Bearer-authed, mints the proxy-session
   // cookie. Same-origin call from the plugin UI; corsAuth covers the shell.
   const proxySessionMatch = /^\/proxy-sessions\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(pathname);
+  if (method === "OPTIONS" && proxySessionMatch?.[1] && proxySessionMatch[2]) {
+    return {
+      handler: handleProxySessionPreflight,
+      params: {},
+      rateConfig: RATE_STATIC,
+      rateScope: "ip",
+      corsAuth: true,
+      corsOpaqueOrigin: true,
+    };
+  }
   if (method === "POST" && proxySessionMatch?.[1] && proxySessionMatch[2]) {
     return {
       handler: handleProxySessionBootstrap,
@@ -336,6 +350,7 @@ function matchRoute(method: string, pathname: string): RouteMatch | null {
       rateConfig: RATE_PROXY_SESSION,
       rateScope: "user",
       corsAuth: true,
+      corsOpaqueOrigin: true,
     };
   }
 
@@ -426,9 +441,14 @@ export function createHttpHandler(options: HttpHandlerOptions): HttpHandlerHandl
       if (route.cors) {
         response.headers.set("Access-Control-Allow-Origin", "*");
       } else if (route.corsAuth) {
-        const allowedOrigin = resolveAllowedOrigin(request.headers.get("Origin"), deps.allowedOrigins);
+        const allowedOrigin = resolveAllowedOrigin(
+          request.headers.get("Origin"),
+          deps.allowedOrigins,
+          route.corsOpaqueOrigin === true,
+        );
         if (allowedOrigin !== null) {
           response.headers.set("Access-Control-Allow-Origin", allowedOrigin);
+          response.headers.set("Access-Control-Allow-Credentials", "true");
           response.headers.append("Vary", "Origin");
         }
       }
@@ -476,8 +496,10 @@ function rateLimitedResponse(retryAfterMs: number): Response {
 function resolveAllowedOrigin(
   requestOrigin: string | null,
   allowlist: readonly string[],
+  allowOpaqueOrigin = false,
 ): string | null {
   if (!requestOrigin) return null;
+  if (allowOpaqueOrigin && requestOrigin === "null") return "null";
   return allowlist.includes(requestOrigin) ? requestOrigin : null;
 }
 
@@ -2233,6 +2255,17 @@ function workspaceCorsHeaders(): Headers {
   });
 }
 
+async function handleProxySessionPreflight(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: new Headers({
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Authorization, Content-Type",
+      "Access-Control-Max-Age": "600",
+    }),
+  });
+}
+
 // Preflight CORS headers for /admin/api/*. ACAO is applied by the dispatcher
 // from the configured allowlist; this helper only negotiates methods/headers.
 function adminApiCorsHeaders(): Headers {
@@ -2351,7 +2384,7 @@ async function requestSidebarItems(
       id: corrId,
       action: "sidebar.items",
       params: {},
-      user: { id: user.id, displayName: user.displayName, role: user.role },
+      user: { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, role: user.role },
     });
   });
 }
@@ -2450,6 +2483,10 @@ async function handlePluginUi(
       "Cache-Control": requestedPath === "index.html"
         ? "no-cache"
         : "public, max-age=3600",
+      // Plugin iframes are sandboxed without allow-same-origin, so native ES
+      // module imports from their own UI asset URLs are CORS-checked as
+      // opaque-origin requests.
+      "Access-Control-Allow-Origin": "*",
     },
   });
 }

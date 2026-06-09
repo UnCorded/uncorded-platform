@@ -149,6 +149,14 @@ describe("proxy cookie helpers", () => {
     expect(c).toContain("SameSite=Lax");
   });
 
+  test("localhost framed dev Set-Cookie uses Secure SameSite=None without Partitioned", () => {
+    const c = buildProxySetCookie("foundry", "app", "TOKEN", false, 3600, true);
+    expect(c).toContain("uncorded-proxy-foundry-app=TOKEN");
+    expect(c).toContain("Secure");
+    expect(c).not.toContain("Partitioned");
+    expect(c).toContain("SameSite=None");
+  });
+
   test("readProxyCookie finds the production cookie", () => {
     const header = `other=1; __Host-uncorded-proxy-foundry-app=TOKEN; another=2`;
     expect(readProxyCookie(header, "foundry", "app")).toBe("TOKEN");

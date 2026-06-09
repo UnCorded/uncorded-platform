@@ -1452,6 +1452,7 @@ describe("GET /plugins/:slug/ui/*", () => {
     // Serve specific file
     const res2 = await fetch(`${ctx.baseUrl}/plugins/chat/ui/app.js`);
     expect(res2.status).toBe(200);
+    expect(res2.headers.get("Access-Control-Allow-Origin")).toBe("*");
 
     rmSync(tmpDir, { recursive: true, force: true });
   });

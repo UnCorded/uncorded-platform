@@ -17,10 +17,11 @@
 //          cookie set inside a cross-site iframe (Phase 0 §4a). Generic to every
 //          mount; the iframe and the fallback always go through this helper.
 //
-// Auth is the iframe's bearer token (issued at handshake). The bootstrap is a
-// same-origin request — the iframe is loaded directly from the runtime origin,
-// the same origin that serves `/proxy-sessions/*` — so `credentials:
-// "same-origin"` lets the response `Set-Cookie` be stored.
+// Auth is the iframe's bearer token (issued at handshake). Plugin iframes are
+// sandboxed without allow-same-origin, so the browser treats the bootstrap as
+// an opaque-origin CORS request even when it targets the runtime URL that served
+// the iframe. `credentials: "include"` is required for the response
+// `Set-Cookie` to be stored.
 
 /** Resolved proxy mount session returned by `sdk.proxy.openMount()`. */
 export interface ProxyMountSession {
@@ -120,9 +121,11 @@ async function openMount(mount: string, deps: ProxyClientDeps): Promise<ProxyMou
     res = await doFetch(path, {
       method: "POST",
       headers: { Authorization: `Bearer ${deps.token}` },
-      // Same-origin request (iframe is served from the runtime origin); lets the
-      // response Set-Cookie be stored for the framed proxy load.
-      credentials: "same-origin",
+      // Plugin iframes are sandboxed without allow-same-origin, so browsers
+      // treat this as an opaque-origin CORS request even though the URL is the
+      // runtime's own origin. Include credentials so the bootstrap Set-Cookie
+      // is accepted for the proxied iframe navigation.
+      credentials: "include",
     });
   } catch (err) {
     throw new ProxyError(

@@ -285,6 +285,30 @@ describe("POST /proxy-sessions/:slug/:mount", () => {
     expect(res.headers.get("set-cookie")).toContain(`uncorded-proxy-${SLUG}-app=`);
   });
 
+  test("allows sandboxed plugin iframe CORS bootstrap", async () => {
+    h = setup();
+    const preflight = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/app`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "null",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("null");
+    expect(preflight.headers.get("access-control-allow-credentials")).toBe("true");
+
+    const res = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/app`, {
+      method: "POST",
+      headers: { Authorization: "Bearer member-token", Origin: "null" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("null");
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(res.headers.get("set-cookie")).toContain(`uncorded-proxy-${SLUG}-app=`);
+  });
+
   test("owner-only mount forbids members but allows the owner", async () => {
     h = setup({ mounts: [{ name: "app", upstream_setting: "upstream_url", access: "owner" }] });
 

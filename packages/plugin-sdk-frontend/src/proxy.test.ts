@@ -63,7 +63,7 @@ describe("createProxyClient.openMount", () => {
     const call = calls[0]!;
     expect(call.url).toBe("/proxy-sessions/foundry-vtt/foundry");
     expect(call.init?.method).toBe("POST");
-    expect(call.init?.credentials).toBe("same-origin");
+    expect(call.init?.credentials).toBe("include");
     const headers = call.init?.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer tok-123");
   });
