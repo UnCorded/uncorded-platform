@@ -120,3 +120,48 @@ export function requiresReapproval(
   if (KNOWN_LOCAL_ALIASES.has(hostname.toLowerCase())) return false;
   return approvedClass !== live;
 }
+
+/**
+ * Categories surfaced to the admin UI as a "this target is local/private" hint
+ * when reviewing a mount for approval. `docker-internal` covers the known Docker
+ * aliases; `mdns` covers `.local` names; the rest mirror {@link AddressClass}.
+ */
+export type UpstreamAdvisory =
+  | "loopback"
+  | "rfc1918"
+  | "link-local"
+  | "unique-local"
+  | "cgnat"
+  | "docker-internal"
+  | "mdns";
+
+/**
+ * A synchronous, best-effort advisory for the approval UI — no DNS lookup. It
+ * flags hostnames that are obviously local/private (literal IPs in private
+ * ranges, `localhost`, Docker aliases, `.local` mDNS names). A public hostname
+ * or one that only resolves privately at connect time returns null here; the
+ * connection-time classifier (resolveHostClasses) is the runtime authority.
+ */
+export function advisoryUpstreamWarning(hostname: string): UpstreamAdvisory | null {
+  const host = hostname.trim().toLowerCase();
+  if (host === "") return null;
+  if (host === "localhost") return "loopback";
+  if (KNOWN_LOCAL_ALIASES.has(host)) return "docker-internal";
+  if (host.endsWith(".local")) return "mdns";
+
+  switch (classifyAddress(host)) {
+    case "loopback":
+      return "loopback";
+    case "rfc1918":
+      return "rfc1918";
+    case "link-local":
+      return "link-local";
+    case "unique-local":
+      return "unique-local";
+    case "cgnat":
+      return "cgnat";
+    default:
+      // "public", "other", or a non-IP hostname — no static warning.
+      return null;
+  }
+}

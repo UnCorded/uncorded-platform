@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  advisoryUpstreamWarning,
   classifyAddress,
   hostnameFromOrigin,
   requiresReapproval,
@@ -73,5 +74,29 @@ describe("requiresReapproval", () => {
   test("requires re-approval on a class change, allows a matching class", () => {
     expect(requiresReapproval("foo.example", "loopback", "public")).toBe(true);
     expect(requiresReapproval("foo.example", "public", "public")).toBe(false);
+  });
+});
+
+describe("advisoryUpstreamWarning", () => {
+  test("flags localhost, docker aliases, and .local names", () => {
+    expect(advisoryUpstreamWarning("localhost")).toBe("loopback");
+    expect(advisoryUpstreamWarning("host.docker.internal")).toBe("docker-internal");
+    expect(advisoryUpstreamWarning("gateway.docker.internal")).toBe("docker-internal");
+    expect(advisoryUpstreamWarning("myhost.local")).toBe("mdns");
+  });
+
+  test("flags private IP literals", () => {
+    expect(advisoryUpstreamWarning("127.0.0.1")).toBe("loopback");
+    expect(advisoryUpstreamWarning("10.0.0.5")).toBe("rfc1918");
+    expect(advisoryUpstreamWarning("192.168.1.1")).toBe("rfc1918");
+    expect(advisoryUpstreamWarning("169.254.0.1")).toBe("link-local");
+    expect(advisoryUpstreamWarning("fc00::1")).toBe("unique-local");
+    expect(advisoryUpstreamWarning("100.64.0.1")).toBe("cgnat");
+  });
+
+  test("returns null for public hosts and ordinary hostnames", () => {
+    expect(advisoryUpstreamWarning("8.8.8.8")).toBeNull();
+    expect(advisoryUpstreamWarning("foundry.example.com")).toBeNull();
+    expect(advisoryUpstreamWarning("")).toBeNull();
   });
 });

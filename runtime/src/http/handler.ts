@@ -10,7 +10,13 @@ import { sniffMime, extensionForMime, INLINE_SAFE_MIMES } from "./mime-sniff";
 import { verifyFileSig } from "../signing/files";
 import { extractAuth, requireMinLevel } from "./auth";
 import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE, RATE_PROXY_HTTP, RATE_PROXY_SESSION } from "./rate-limiter";
-import { handleProxySessionBootstrap, handleProxyRequest } from "./proxy";
+import {
+  handleProxySessionBootstrap,
+  handleProxyRequest,
+  approveMount,
+  computeProxyMountStatuses,
+  type ProxyMountStatus,
+} from "./proxy";
 import { ProxyApprovalStore } from "../proxy/approvals";
 import {
   handleUploadInit,
@@ -1533,7 +1539,16 @@ async function handleAdminApi(
         const stored = rows.find((r) => r.key === setting.key);
         merged[setting.key] = stored && stored.value.length > 0 ? "__redacted__" : "";
       }
-      return Response.json({ slug, settings, values: merged });
+      const payload: {
+        slug: string;
+        settings: PluginSetting[];
+        values: Record<string, string | number | boolean>;
+        proxy_mounts?: ProxyMountStatus[];
+      } = { slug, settings, values: merged };
+      if (plugin.manifest.proxy_mounts && plugin.manifest.proxy_mounts.length > 0) {
+        payload.proxy_mounts = computeProxyMountStatuses(deps, plugin.manifest, slug);
+      }
+      return Response.json(payload);
     }
 
     // PATCH — validate and persist a single key/value.
@@ -1611,6 +1626,27 @@ async function handleAdminApi(
           : ""
         : typedValue;
     return Response.json({ ok: true, key, value: responseValue });
+  }
+
+  // POST /plugins/:slug/proxy-mounts/:mount/approve — owner/admin approval of a
+  // mount's current normalized upstream. This is the ONLY writer of approval
+  // rows; saving settings never approves (config PATCH may only invalidate).
+  const proxyApproveMatch = path.match(
+    /^plugins\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/proxy-mounts\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/approve$/,
+  );
+  if (proxyApproveMatch && request.method === "POST") {
+    const slug = proxyApproveMatch[1]!;
+    const mountName = proxyApproveMatch[2]!;
+    const result = await approveMount(deps, slug, mountName, user.id);
+    if (!result.ok) return result.response;
+    recordAudit(deps, user, "proxy.mount_approved", "plugin", slug, {
+      mount: mountName,
+      approval_version: result.row.approval_version,
+      normalized_upstream_origin: result.row.normalized_upstream_origin,
+      normalized_upstream_base_path: result.row.normalized_upstream_base_path,
+      approved_address_class: result.row.approved_address_class,
+    });
+    return Response.json({ mount: result.status });
   }
 
   const pluginLogsMatch = path.match(/^plugins\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/logs$/);

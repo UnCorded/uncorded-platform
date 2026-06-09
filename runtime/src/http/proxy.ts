@@ -42,7 +42,9 @@ import {
   hostnameFromOrigin,
   resolveHostClasses,
   requiresReapproval,
+  advisoryUpstreamWarning,
   type HostClassification,
+  type UpstreamAdvisory,
 } from "../proxy/dns";
 import {
   PROXY_LIMITS,
@@ -231,6 +233,162 @@ function readUpstreamValue(deps: ProxyMountDeps, slug: string, setting: PluginSe
   if (row) return String(decodeConfigValue(row.value, row.type as PluginSetting["type"]));
   if (setting.default !== undefined) return String(setting.default);
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Admin mount status + approval (Phase 4). The admin UI reads statuses to render
+// the approval surface; approveMount is the SOLE writer of approval rows.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approval state of a mount relative to its live manifest/setting:
+ *  - `approved`: a row exists and matches the current upstream + mount definition.
+ *  - `pending`:  the upstream normalizes but no approval row exists yet.
+ *  - `drifted`:  a row exists but the plugin version / mount hash / normalized
+ *                upstream has since changed — needs re-approval.
+ *  - `invalid`:  the backing setting is missing or its value doesn't normalize.
+ */
+export type ProxyMountApprovalStatus = "approved" | "pending" | "invalid" | "drifted";
+
+/** Admin-facing status for a single proxy mount. */
+export interface ProxyMountStatus {
+  name: string;
+  access: "members" | "owner";
+  upstream_setting: string;
+  /** Normalized origin + base path, or null when the setting is missing/invalid. */
+  normalized_upstream: string | null;
+  status: ProxyMountApprovalStatus;
+  approved_by_user_id: string | null;
+  approved_at: number | null;
+  approved_address_class: string | null;
+  /** Static "local/private target" advisory for the UI; null when none applies. */
+  warning: UpstreamAdvisory | null;
+}
+
+/** Compute the admin status for one mount. Read-only. */
+export function computeProxyMountStatus(
+  deps: ProxyMountDeps,
+  manifest: PluginManifest,
+  slug: string,
+  mount: ProxyMount,
+): ProxyMountStatus {
+  const approval = new ProxyApprovalStore(deps.coreDb).get(slug, mount.name);
+  const setting = manifest.settings?.find((s) => s.key === mount.upstream_setting);
+
+  let normalizedUpstream: string | null = null;
+  let warning: UpstreamAdvisory | null = null;
+  let status: ProxyMountApprovalStatus;
+
+  if (!setting) {
+    status = "invalid";
+  } else {
+    const normalized = normalizeUpstream(readUpstreamValue(deps, slug, setting));
+    if (!normalized.ok) {
+      status = "invalid";
+    } else {
+      const basePath = normalized.basePath === "/" ? "" : normalized.basePath;
+      normalizedUpstream = `${normalized.origin}${basePath}`;
+      warning = advisoryUpstreamWarning(hostnameFromOrigin(normalized.origin));
+      if (!approval) {
+        status = "pending";
+      } else {
+        const matches =
+          approval.plugin_version === manifest.version &&
+          approval.mount_definition_hash === mountDefinitionHash(mount) &&
+          approval.normalized_upstream_origin === normalized.origin &&
+          approval.normalized_upstream_base_path === normalized.basePath;
+        status = matches ? "approved" : "drifted";
+      }
+    }
+  }
+
+  return {
+    name: mount.name,
+    access: mount.access ?? "members",
+    upstream_setting: mount.upstream_setting,
+    normalized_upstream: normalizedUpstream,
+    status,
+    approved_by_user_id: approval?.approved_by_user_id ?? null,
+    approved_at: approval?.approved_at ?? null,
+    approved_address_class: approval?.approved_address_class ?? null,
+    warning,
+  };
+}
+
+/** Compute admin statuses for every mount a plugin declares. */
+export function computeProxyMountStatuses(
+  deps: ProxyMountDeps,
+  manifest: PluginManifest,
+  slug: string,
+): ProxyMountStatus[] {
+  return (manifest.proxy_mounts ?? []).map((mount) =>
+    computeProxyMountStatus(deps, manifest, slug, mount),
+  );
+}
+
+export type ApproveMountResult =
+  | { ok: true; row: ProxyApprovalRow; status: ProxyMountStatus }
+  | { ok: false; response: Response };
+
+/**
+ * Approve (or re-approve) a mount's CURRENT normalized upstream. This is the only
+ * code path that writes an approval row — config writes may only invalidate, and
+ * resolveMount/the forwarder never create. Callers MUST gate on owner/admin
+ * before invoking (handler.ts level-80 admin gate); identity is supplied here
+ * purely to stamp `approved_by_user_id`.
+ *
+ * Re-approval bumps `approval_version` (via the store), so any previously-minted
+ * proxy-session cookie stops validating. The upstream's connection-time address
+ * class is recorded as the drift baseline; a resolution failure at approval time
+ * is advisory (records a null baseline) rather than blocking — the upstream may
+ * legitimately be offline while an owner sets things up.
+ */
+export async function approveMount(
+  deps: ProxyMountDeps,
+  slug: string,
+  mountName: string,
+  approvedByUserId: string,
+): Promise<ApproveMountResult> {
+  const plugin = deps.getInstalledPlugins().find((p) => p.slug === slug);
+  if (!plugin) return { ok: false, response: proxyError("PLUGIN_NOT_FOUND") };
+
+  const mount = plugin.manifest.proxy_mounts?.find((m) => m.name === mountName);
+  if (!mount) return { ok: false, response: proxyError("MOUNT_NOT_FOUND") };
+
+  const setting = plugin.manifest.settings?.find((s) => s.key === mount.upstream_setting);
+  if (!setting) return { ok: false, response: proxyError("INVALID_UPSTREAM_SETTING") };
+
+  const normalized = normalizeUpstream(readUpstreamValue(deps, slug, setting));
+  if (!normalized.ok) return { ok: false, response: proxyError("INVALID_UPSTREAM") };
+
+  // Record the live address class as the drift baseline. Resolution failure is
+  // advisory at approval time — record null rather than block the owner.
+  const hostname = hostnameFromOrigin(normalized.origin);
+  let approvedAddressClass: string | null = null;
+  try {
+    approvedAddressClass = (await activeResolver()(hostname)).representative;
+  } catch (err) {
+    log.warn("proxy approve dns resolution failed", {
+      slug,
+      mount: mountName,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const row = new ProxyApprovalStore(deps.coreDb).upsert({
+    plugin_slug: slug,
+    plugin_version: plugin.manifest.version,
+    mount_name: mountName,
+    mount_definition_hash: mountDefinitionHash(mount),
+    upstream_setting_key: mount.upstream_setting,
+    normalized_upstream_origin: normalized.origin,
+    normalized_upstream_base_path: normalized.basePath,
+    approved_by_user_id: approvedByUserId,
+    approved_at: Date.now(),
+    approved_address_class: approvedAddressClass,
+  });
+
+  return { ok: true, row, status: computeProxyMountStatus(deps, plugin.manifest, slug, mount) };
 }
 
 function isSecureRequest(request: Request): boolean {

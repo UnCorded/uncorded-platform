@@ -608,3 +608,167 @@ describe("Phase 2: DNS classification & drift", () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4 — admin approve endpoint + mount status
+// ---------------------------------------------------------------------------
+
+const APPROVE_PATH = (mount = "app") =>
+  `/admin/api/plugins/${SLUG}/proxy-mounts/${mount}/approve`;
+
+// Deterministic DNS for approve (records the address-class baseline) without
+// hitting the network.
+function stubLoopbackDns(): void {
+  __setProxyOverridesForTests({
+    resolveHostClasses: async () => ({ addresses: ["127.0.0.1"], classes: ["loopback"], representative: "loopback" }),
+  });
+}
+
+describe("Phase 4: POST proxy-mounts/:mount/approve", () => {
+  test("creates an approval row for a pending mount (owner)", async () => {
+    h = setup({ noApproval: true });
+    stubLoopbackDns();
+    expect(h.approvals.get(SLUG, "app")).toBeNull();
+
+    const res = await fetch(`${h.baseUrl}${APPROVE_PATH()}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { mount: { status: string; approved_by_user_id: string | null } };
+    expect(body.mount.status).toBe("approved");
+    expect(body.mount.approved_by_user_id).toBe("owner-1");
+
+    const row = h.approvals.get(SLUG, "app");
+    expect(row).not.toBeNull();
+    expect(row!.approval_version).toBe(1);
+    expect(row!.approved_by_user_id).toBe("owner-1");
+    expect(row!.approved_address_class).toBe("loopback");
+  });
+
+  test("re-approval bumps approval_version", async () => {
+    h = setup(); // seeds approval_version 1
+    stubLoopbackDns();
+    expect(h.approvals.get(SLUG, "app")!.approval_version).toBe(1);
+
+    const res = await fetch(`${h.baseUrl}${APPROVE_PATH()}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    expect(res.status).toBe(200);
+    expect(h.approvals.get(SLUG, "app")!.approval_version).toBe(2);
+  });
+
+  test("an ordinary member cannot approve (403) and writes no row", async () => {
+    h = setup({ noApproval: true });
+    stubLoopbackDns();
+
+    const res = await fetch(`${h.baseUrl}${APPROVE_PATH()}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer member-token" },
+    });
+    expect(res.status).toBe(403);
+    expect(h.approvals.get(SLUG, "app")).toBeNull();
+  });
+
+  test("returns 404 for an unknown mount", async () => {
+    h = setup();
+    stubLoopbackDns();
+    const res = await fetch(`${h.baseUrl}${APPROVE_PATH("nope")}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("records an audit entry on approval", async () => {
+    h = setup({ noApproval: true });
+    stubLoopbackDns();
+    await fetch(`${h.baseUrl}${APPROVE_PATH()}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    const audit = h.coreDb
+      .query<{ action: string }, []>("SELECT action FROM admin_audit_log")
+      .all();
+    expect(audit.some((a) => a.action === "proxy.mount_approved")).toBe(true);
+  });
+});
+
+describe("Phase 4: settings save never approves", () => {
+  test("PATCH config does not create an approval row", async () => {
+    h = setup({ noApproval: true });
+    expect(h.approvals.get(SLUG, "app")).toBeNull();
+
+    const res = await fetch(`${h.baseUrl}/admin/api/plugins/${SLUG}/config`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer owner-token", "content-type": "application/json" },
+      body: JSON.stringify({ key: "upstream_url", value: "http://newhost:1234" }),
+    });
+    expect(res.status).toBe(200);
+    // Saving a setting must never silently approve.
+    expect(h.approvals.get(SLUG, "app")).toBeNull();
+  });
+});
+
+interface ConfigStatusBody {
+  proxy_mounts?: Array<{
+    name: string;
+    access: string;
+    normalized_upstream: string | null;
+    status: string;
+    approved_by_user_id: string | null;
+    warning: string | null;
+  }>;
+}
+
+describe("Phase 4: GET config proxy mount status", () => {
+  test("reports an approved mount with normalized upstream, access, and warning", async () => {
+    h = setup(); // approved, upstream is http://localhost:<port>
+    const res = await fetch(`${h.baseUrl}/admin/api/plugins/${SLUG}/config`, {
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ConfigStatusBody;
+    expect(body.proxy_mounts).toHaveLength(1);
+    const mount = body.proxy_mounts![0]!;
+    expect(mount.name).toBe("app");
+    expect(mount.access).toBe("members");
+    expect(mount.status).toBe("approved");
+    expect(mount.normalized_upstream).toBe(h.upstreamOrigin);
+    expect(mount.approved_by_user_id).toBe("owner-1");
+    // localhost upstream ⇒ loopback advisory.
+    expect(mount.warning).toBe("loopback");
+  });
+
+  test("reports a pending mount when no approval exists", async () => {
+    h = setup({ noApproval: true });
+    const res = await fetch(`${h.baseUrl}/admin/api/plugins/${SLUG}/config`, {
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    const body = (await res.json()) as ConfigStatusBody;
+    expect(body.proxy_mounts![0]!.status).toBe("pending");
+    expect(body.proxy_mounts![0]!.approved_by_user_id).toBeNull();
+  });
+
+  test("reports an invalid mount when the upstream does not normalize", async () => {
+    h = setup({ noApproval: true, upstreamValue: "not a url" });
+    const res = await fetch(`${h.baseUrl}/admin/api/plugins/${SLUG}/config`, {
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    const body = (await res.json()) as ConfigStatusBody;
+    expect(body.proxy_mounts![0]!.status).toBe("invalid");
+    expect(body.proxy_mounts![0]!.normalized_upstream).toBeNull();
+  });
+
+  test("reports a drifted mount when the live upstream changed since approval", async () => {
+    h = setup(); // approved against the live stub origin
+    // Change the upstream out from under the approval (no re-approval).
+    h.pluginDb.run("UPDATE _config SET value = ? WHERE key = ?", ["http://otherhost:9999", "upstream_url"]);
+    const res = await fetch(`${h.baseUrl}/admin/api/plugins/${SLUG}/config`, {
+      headers: { Authorization: "Bearer owner-token" },
+    });
+    const body = (await res.json()) as ConfigStatusBody;
+    expect(body.proxy_mounts![0]!.status).toBe("drifted");
+  });
+});

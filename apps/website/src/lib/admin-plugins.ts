@@ -18,10 +18,38 @@ export interface AdminPluginRow {
   hasSettings: boolean;
 }
 
+/** Approval state of a proxy mount, mirrored from the runtime. */
+export type ProxyMountApprovalStatus = "approved" | "pending" | "invalid" | "drifted";
+
+/** Static local/private-target advisory category for a mount's upstream. */
+export type ProxyMountWarning =
+  | "loopback"
+  | "rfc1918"
+  | "link-local"
+  | "unique-local"
+  | "cgnat"
+  | "docker-internal"
+  | "mdns";
+
+/** Admin-facing status for one declared proxy mount. */
+export interface ProxyMountStatus {
+  name: string;
+  access: "members" | "owner";
+  upstream_setting: string;
+  normalized_upstream: string | null;
+  status: ProxyMountApprovalStatus;
+  approved_by_user_id: string | null;
+  approved_at: number | null;
+  approved_address_class: string | null;
+  warning: ProxyMountWarning | null;
+}
+
 export interface AdminPluginConfig {
   slug: string;
   settings: PluginSetting[];
   values: Record<string, string | number | boolean>;
+  /** Present only when the plugin declares `proxy_mounts`. */
+  proxy_mounts?: ProxyMountStatus[];
 }
 
 export class AdminPluginError extends Error {
@@ -113,4 +141,25 @@ export async function patchPluginConfig(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key, value }),
   });
+}
+
+/**
+ * Approve (or re-approve) a proxy mount's current upstream. This is an explicit
+ * owner/admin action — distinct from saving settings, which never approves.
+ * Returns the mount's refreshed status.
+ */
+export async function approveProxyMount(
+  serverId: string,
+  tunnelUrl: string,
+  slug: string,
+  mount: string,
+): Promise<ProxyMountStatus> {
+  const res = await adminFetch(
+    serverId,
+    tunnelUrl,
+    `/plugins/${slug}/proxy-mounts/${mount}/approve`,
+    { method: "POST" },
+  );
+  const body = (await res.json()) as { mount: ProxyMountStatus };
+  return body.mount;
 }

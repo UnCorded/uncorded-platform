@@ -91,12 +91,20 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
 - [x] Tests: echo through proxy; oversized frame → 1009, never enters `/ws` router.
 
 ## Phase 4 — Admin UI & Approval Endpoint — commit: `feat(proxy): admin approval`
-- [ ] `POST /admin/api/plugins/:slug/proxy-mounts/:mount/approve` — only writer of
+- [x] `POST /admin/api/plugins/:slug/proxy-mounts/:mount/approve` — only writer of
       approval rows; normalize current upstream, write row, record approver/time,
-      bump `approval_version`.
-- [ ] Admin surface: show mounts + normalized upstream; pending-approval distinct
+      bump `approval_version`. (`approveMount` in `runtime/src/http/proxy.ts`,
+      routed after the level-80 admin gate in `handler.ts`.)
+- [x] Mount status surface: `GET /admin/api/plugins/:slug/config` now returns a
+      `proxy_mounts` array (name, access, normalized upstream, status ∈
+      approved/pending/invalid/drifted, approver/time, address-class warning).
+- [x] Admin surface: show mounts + normalized upstream; pending-approval distinct
       from settings save; warnings for loopback/`host.docker.internal`/RFC1918/
-      link-local/`.local`; show access mode.
+      link-local/`.local`; show access mode. (`plugin-settings-panel.tsx`
+      Proxy Mounts section + `proxy-mount-status.ts` helpers.)
+- [x] Tests: approve creates/bumps approval, member 403, config-save never
+      approves, GET config status (approved/pending/invalid/drifted), advisory
+      warning helper, UI status/label/warning helpers.
 
 ## Phase 5 — Foundry Plugin — commit: `feat(plugins): foundry-vtt`
 - [ ] `plugins/foundry-vtt`: manifest, backend `sidebar.items`, frontend panel.
