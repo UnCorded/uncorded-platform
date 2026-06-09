@@ -13,6 +13,7 @@
 
 export { createPluginFrontend } from "./plugin";
 export { SDK_API_VERSION } from "./version";
+export { PluginError } from "./errors";
 export type {
   PluginFrontend,
   NavigateEvent,
@@ -47,6 +48,11 @@ export type {
   UploadProgress,
   UploadResult,
 } from "./files";
+
+// Reverse-proxy client — see proxy.ts. `sdk.proxy.openMount(mount)` bootstraps
+// a declared proxy mount and returns the iframe + first-party fallback URLs.
+export { ProxyError } from "./proxy";
+export type { ProxyPluginApi, ProxyMountSession } from "./proxy";
 
 // `platform.voice.*` shell ↔ plugin frontend envelope contract — see
 // `.claude/docs/Overview/pr-5-voice-client-contract.md` §3 / §4 (PR-5) and

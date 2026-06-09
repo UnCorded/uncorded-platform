@@ -22,6 +22,7 @@ import { createWsServer } from "./ws/server";
 import type { WsServerHandle } from "./ws/server";
 import type { TokenValidator } from "./ws/types";
 import { createHttpHandler, sweepStaleUploadTmps } from "./http/handler";
+import { createProxyWebSocket } from "./http/proxy-ws";
 import {
   sweepStaleUploadSessions,
   SWEEP_INTERVAL_MS as UPLOAD_SWEEP_INTERVAL_MS,
@@ -1639,6 +1640,19 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
         : undefined,
     isDraining: isDrainingClosure,
     getDrainRetryAfterSeconds: () => drainGraceSeconds,
+    // Reverse-proxy WebSocket bridge (plan §Phase 3). Reuses the same mount
+    // resolver/approval/upstream gates as the HTTP forwarder and shares the
+    // HTTP handler's rate limiter so proxy WS connects and HTTP proxy hits draw
+    // from one bucket family.
+    proxyWebSocket: createProxyWebSocket({
+      deps: {
+        getInstalledPlugins: (): InstalledPluginInfo[] => [...installedPlugins.values()],
+        coreDb: db,
+        getPluginDb: (slug: string) => pluginDbCache.get(slug),
+        getServerId: () => config.server_id,
+      },
+      rateLimiter: httpHandler.rateLimiter,
+    }),
   });
 
   // -----------------------------------------------------------------------

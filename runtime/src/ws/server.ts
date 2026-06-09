@@ -30,6 +30,8 @@ import type { PresenceCallback } from "./router";
 import type { AuthResultMessage } from "@uncorded/protocol";
 import type { JtiRevocationSet } from "./revocation";
 import { RateLimiter, RATE_WS_CONNECT } from "../http/rate-limiter";
+import { isProxyWebSocketUpgrade } from "../http/proxy-ws";
+import type { ProxyWebSocketHandler } from "../http/proxy-ws";
 
 const log = rootLogger.child({ component: "ws.server" });
 
@@ -40,8 +42,9 @@ const log = rootLogger.child({ component: "ws.server" });
 /** Default auth timeout: 10s. See module docstring for rationale. */
 const DEFAULT_AUTH_TIMEOUT_MS = 10_000;
 
-/** Maximum raw WebSocket frame size accepted before closing with 1009. */
-const MAX_WS_FRAME_BYTES = 65_536;
+/** Maximum raw WebSocket frame size accepted before closing with 1009.
+ *  Shared with the reverse-proxy WS bridge so both transports enforce one cap. */
+export const MAX_WS_FRAME_BYTES = 65_536;
 
 /** Default request timeout: 30s. See module docstring for rationale. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -92,6 +95,12 @@ export interface WsServerOptions {
   /** Seconds advertised in `Retry-After` when `isDraining()` is true.
    *  Defaults to 30 — matches the default grace window. */
   getDrainRetryAfterSeconds?: (() => number) | undefined;
+  /** Reverse-proxy WebSocket bridge (plan §Phase 3). When provided, WS upgrade
+   *  requests on `/proxy/:slug/:mount/*` are intercepted and handed to it
+   *  BEFORE the `/ws` branch and BEFORE the httpFetch fallback. Accepted sockets
+   *  carry `ws.data.kind === "proxy"` and are routed to its lifecycle handlers,
+   *  never into the MessageRouter. */
+  proxyWebSocket?: ProxyWebSocketHandler | undefined;
 }
 
 export interface WsServerHandle {
@@ -168,6 +177,14 @@ export function createWsServer(options: WsServerOptions): WsServerHandle {
 
     fetch(req, server) {
       const url = new URL(req.url);
+
+      // Reverse-proxy WebSocket upgrade (plan §Phase 3). Intercepted before the
+      // runtime /ws branch and before the httpFetch fallback. A plain (non-
+      // upgrade) request on the proxy path is NOT matched here and falls through
+      // to httpFetch, where the HTTP forwarder handles it.
+      if (options.proxyWebSocket && isProxyWebSocketUpgrade(req, url.pathname)) {
+        return options.proxyWebSocket.tryUpgrade(req, server, getClientIp(req));
+      }
 
       if (url.pathname === "/ws") {
         // Phase 01 §5.1 step 3 — reject new upgrades during drain. Checked
@@ -277,6 +294,7 @@ export function createWsServer(options: WsServerOptions): WsServerHandle {
         const connectionId = crypto.randomUUID();
         const upgraded = server.upgrade(req, {
           data: {
+            kind: "runtime",
             connectionId,
             authenticated: false,
             connectedAt: Date.now(),
@@ -318,14 +336,29 @@ export function createWsServer(options: WsServerOptions): WsServerHandle {
       sendPings: true,
 
       open(ws) {
-        ws.data.authTimer = setTimeout(() => {
-          if (!ws.data.authenticated) {
+        // Proxy sockets have no auth handshake — hand straight to the bridge.
+        if (ws.data.kind === "proxy") {
+          options.proxyWebSocket?.open(ws);
+          return;
+        }
+        // Capture the narrowed (runtime) data so the closure keeps the type —
+        // TS widens `ws.data` back to the union inside a deferred callback.
+        const runtimeData = ws.data;
+        runtimeData.authTimer = setTimeout(() => {
+          if (!runtimeData.authenticated) {
             ws.close(WS_CLOSE_AUTH_TIMEOUT, "Auth timeout");
           }
         }, authTimeoutMs);
       },
 
       async message(ws, data) {
+        // Proxy frames never enter the protocol decoder or the router — the
+        // bridge pipes them straight upstream.
+        if (ws.data.kind === "proxy") {
+          options.proxyWebSocket?.message(ws, data);
+          return;
+        }
+
         // Reject oversized frames before decoding (RFC 6455 §7.4.1 code 1009)
         const byteLength =
           typeof data === "string"
@@ -494,7 +527,19 @@ export function createWsServer(options: WsServerOptions): WsServerHandle {
         router.handleMessage(ws.data.connectionId, msg);
       },
 
-      close(ws) {
+      drain(ws) {
+        // Backpressure cleared — only the proxy bridge buffers; runtime sockets
+        // rely on the router/codec path and have nothing to flush here.
+        if (ws.data.kind === "proxy") {
+          options.proxyWebSocket?.drain(ws);
+        }
+      },
+
+      close(ws, code, reason) {
+        if (ws.data.kind === "proxy") {
+          options.proxyWebSocket?.close(ws, code, reason);
+          return;
+        }
         if (ws.data.authTimer !== undefined) {
           clearTimeout(ws.data.authTimer);
         }

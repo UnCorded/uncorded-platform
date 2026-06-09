@@ -4,6 +4,8 @@
 // Sends { type: "request", id, plugin: slug, action, params } to the shell.
 // Resolves/rejects when { type: "response", id, result/error } arrives.
 
+import { PluginError } from "./errors";
+
 const REQUEST_TIMEOUT_MS = 30_000;
 
 interface PendingRequest {
@@ -46,7 +48,13 @@ export function createRequestClient(
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`Request "${action}" (${id}) timed out after ${REQUEST_TIMEOUT_MS}ms`));
+        reject(
+          new PluginError(
+            "REQUEST_TIMEOUT",
+            `Request "${action}" (${id}) timed out after ${REQUEST_TIMEOUT_MS}ms`,
+            { context: { action, id, timeoutMs: REQUEST_TIMEOUT_MS } },
+          ),
+        );
       }, REQUEST_TIMEOUT_MS);
 
       pending.set(id, {
@@ -68,9 +76,18 @@ export function createRequestClient(
     pending.delete(id);
     clearTimeout(entry.timer);
 
-    const error = msg["error"] as { code: string; message: string } | undefined;
+    const error = msg["error"] as { code?: unknown; message?: unknown } | undefined;
     if (error) {
-      entry.reject(new Error(`${error.code}: ${error.message}`));
+      const code = typeof error.code === "string" ? error.code : "REQUEST_FAILED";
+      const message =
+        typeof error.message === "string"
+          ? error.message
+          : `Request "${id}" failed`;
+      entry.reject(
+        new PluginError(code, message, {
+          context: { id, response: msg },
+        }),
+      );
     } else {
       entry.resolve(msg["result"]);
     }

@@ -77,6 +77,19 @@ export const RATE_WS_SUBSCRIBE: RateLimitConfig = { tokens: 20, windowMs: 60_000
  */
 export const RATE_PRESENCE: RateLimitConfig = { tokens: 120, windowMs: 1_000 };
 
+// Reverse-proxy HTTP passthrough (per IP, pre-auth). Browser apps issue many
+// sub-resource requests per page, so this is generous — it's a DoS guard, not a
+// usage cap. See docs/reverse-proxy/plugin-reverse-proxy-plan.md §Rate Limiting.
+export const RATE_PROXY_HTTP: RateLimitConfig = { tokens: 600, windowMs: 60_000 };
+
+// Reverse-proxy WebSocket upgrade attempts (per IP). Reserved for Phase 3; named
+// here so the proxy rate-limit family lives in one place.
+export const RATE_PROXY_WS_CONNECT: RateLimitConfig = { tokens: 30, windowMs: 60_000 };
+
+// Reverse-proxy session bootstrap (Bearer-authed, per user). One mint per
+// iframe open; modest bucket.
+export const RATE_PROXY_SESSION: RateLimitConfig = { tokens: 30, windowMs: 60_000 };
+
 /** Consecutive auth failures before short ban */
 export const BAN_THRESHOLD_SHORT = 3;
 /** Short ban duration: 5 minutes */

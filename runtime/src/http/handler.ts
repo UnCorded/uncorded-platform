@@ -9,7 +9,16 @@ import { CapabilityChecker } from "../capabilities/checker";
 import { sniffMime, extensionForMime, INLINE_SAFE_MIMES } from "./mime-sniff";
 import { verifyFileSig } from "../signing/files";
 import { extractAuth, requireMinLevel } from "./auth";
-import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE } from "./rate-limiter";
+import { RateLimiter, RATE_HEALTH, RATE_UPLOAD, RATE_UPLOAD_CHUNK, RATE_ADMIN, RATE_STATIC, RATE_MANIFEST, RATE_VOICE_WEBHOOK, RATE_CHECK_UPDATE, RATE_PROXY_HTTP, RATE_PROXY_SESSION } from "./rate-limiter";
+import {
+  handleProxySessionBootstrap,
+  handleProxyOpen,
+  handleProxyRequest,
+  approveMount,
+  computeProxyMountStatuses,
+  type ProxyMountStatus,
+} from "./proxy";
+import { ProxyApprovalStore } from "../proxy/approvals";
 import {
   handleUploadInit,
   handleUploadStatus,
@@ -94,6 +103,10 @@ interface RouteMatch {
    *  shell/admin origins. The dispatcher echoes the request's Origin in
    *  Access-Control-Allow-Origin only if it matches deps.allowedOrigins. */
   corsAuth?: boolean;
+  /** Allow sandboxed plugin iframes to call this authenticated endpoint.
+   *  Those frames intentionally have an opaque origin, so browsers send
+   *  `Origin: null` for their CORS bootstrap request. */
+  corsOpaqueOrigin?: boolean;
 }
 
 type RouteHandler = (
@@ -317,8 +330,61 @@ function matchRoute(method: string, pathname: string): RouteMatch | null {
     return { handler: handlePutBrowserRecent, params: {}, rateConfig: RATE_WORKSPACE, rateScope: "user", corsAuth: true };
   }
 
+  // Reverse-proxy session bootstrap — Bearer-authed, mints the proxy-session
+  // cookie. Same-origin call from the plugin UI; corsAuth covers the shell.
+  const proxySessionMatch = /^\/proxy-sessions\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(pathname);
+  if (method === "OPTIONS" && proxySessionMatch?.[1] && proxySessionMatch[2]) {
+    return {
+      handler: handleProxySessionPreflight,
+      params: {},
+      rateConfig: RATE_STATIC,
+      rateScope: "ip",
+      corsAuth: true,
+      corsOpaqueOrigin: true,
+    };
+  }
+  if (method === "POST" && proxySessionMatch?.[1] && proxySessionMatch[2]) {
+    return {
+      handler: handleProxySessionBootstrap,
+      params: { slug: proxySessionMatch[1], mount: proxySessionMatch[2] },
+      rateConfig: RATE_PROXY_SESSION,
+      rateScope: "user",
+      corsAuth: true,
+      corsOpaqueOrigin: true,
+    };
+  }
+
+  // Reverse-proxy first-party open handoff — top-level navigation that re-mints
+  // the proxy-session cookie first-party (Safari/WebKit fallback, Phase 0 §4a).
+  // Gated by the signed "open" ticket in the query; IP-scoped, no corsAuth (this
+  // is a navigation, not a fetch).
+  const proxyOpenMatch = /^\/proxy-open\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(pathname);
+  if (method === "GET" && proxyOpenMatch?.[1] && proxyOpenMatch[2]) {
+    return {
+      handler: handleProxyOpen,
+      params: { slug: proxyOpenMatch[1], mount: proxyOpenMatch[2] },
+      rateConfig: RATE_PROXY_HTTP,
+      rateScope: "ip",
+    };
+  }
+
+  // Reverse-proxy passthrough — browser traffic, validated by the proxy-session
+  // cookie only. IP-scoped pre-auth rate limit; the handler fails closed.
+  const proxyMatch = /^\/proxy\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?:\/(.*))?$/.exec(pathname);
+  if (proxyMatch?.[1] && proxyMatch[2] && PROXY_METHODS.has(method)) {
+    return {
+      handler: handleProxyRequest,
+      params: { slug: proxyMatch[1], mount: proxyMatch[2], path: proxyMatch[3] ?? "" },
+      rateConfig: RATE_PROXY_HTTP,
+      rateScope: "ip",
+    };
+  }
+
   return null;
 }
+
+/** HTTP methods the reverse-proxy passthrough forwards. */
+const PROXY_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 
 // ---------------------------------------------------------------------------
 // Handler factory
@@ -375,9 +441,14 @@ export function createHttpHandler(options: HttpHandlerOptions): HttpHandlerHandl
       if (route.cors) {
         response.headers.set("Access-Control-Allow-Origin", "*");
       } else if (route.corsAuth) {
-        const allowedOrigin = resolveAllowedOrigin(request.headers.get("Origin"), deps.allowedOrigins);
+        const allowedOrigin = resolveAllowedOrigin(
+          request.headers.get("Origin"),
+          deps.allowedOrigins,
+          route.corsOpaqueOrigin === true,
+        );
         if (allowedOrigin !== null) {
           response.headers.set("Access-Control-Allow-Origin", allowedOrigin);
+          response.headers.set("Access-Control-Allow-Credentials", "true");
           response.headers.append("Vary", "Origin");
         }
       }
@@ -425,8 +496,10 @@ function rateLimitedResponse(retryAfterMs: number): Response {
 function resolveAllowedOrigin(
   requestOrigin: string | null,
   allowlist: readonly string[],
+  allowOpaqueOrigin = false,
 ): string | null {
   if (!requestOrigin) return null;
+  if (allowOpaqueOrigin && requestOrigin === "null") return "null";
   return allowlist.includes(requestOrigin) ? requestOrigin : null;
 }
 
@@ -1503,7 +1576,16 @@ async function handleAdminApi(
         const stored = rows.find((r) => r.key === setting.key);
         merged[setting.key] = stored && stored.value.length > 0 ? "__redacted__" : "";
       }
-      return Response.json({ slug, settings, values: merged });
+      const payload: {
+        slug: string;
+        settings: PluginSetting[];
+        values: Record<string, string | number | boolean>;
+        proxy_mounts?: ProxyMountStatus[];
+      } = { slug, settings, values: merged };
+      if (plugin.manifest.proxy_mounts && plugin.manifest.proxy_mounts.length > 0) {
+        payload.proxy_mounts = computeProxyMountStatuses(deps, plugin.manifest, slug);
+      }
+      return Response.json(payload);
     }
 
     // PATCH — validate and persist a single key/value.
@@ -1542,6 +1624,18 @@ async function handleAdminApi(
       [key, encoded, setting.type, now, user.id],
     );
 
+    // Invalidate any proxy approval backed by this setting. Changing a mount's
+    // upstream setting disables the mount until an owner re-approves (Phase 4) —
+    // config writes may only invalidate, never create. The runtime also
+    // re-checks the normalized upstream against the approval on every proxy
+    // request, so this is defense-in-depth, not the sole guarantee.
+    if (plugin.manifest.proxy_mounts?.some((m) => m.upstream_setting === key)) {
+      const removed = new ProxyApprovalStore(deps.coreDb).invalidateBySettingKey(slug, key);
+      if (removed > 0) {
+        recordAudit(deps, user, "proxy.approval_invalidated", "plugin", slug, { upstream_setting: key, mounts: removed });
+      }
+    }
+
     // Push core.plugin.config_changed to the live plugin process (if any).
     const proc = deps.getPluginProcess(slug);
     if (proc?.state === "ready") {
@@ -1569,6 +1663,27 @@ async function handleAdminApi(
           : ""
         : typedValue;
     return Response.json({ ok: true, key, value: responseValue });
+  }
+
+  // POST /plugins/:slug/proxy-mounts/:mount/approve — owner/admin approval of a
+  // mount's current normalized upstream. This is the ONLY writer of approval
+  // rows; saving settings never approves (config PATCH may only invalidate).
+  const proxyApproveMatch = path.match(
+    /^plugins\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/proxy-mounts\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/approve$/,
+  );
+  if (proxyApproveMatch && request.method === "POST") {
+    const slug = proxyApproveMatch[1]!;
+    const mountName = proxyApproveMatch[2]!;
+    const result = await approveMount(deps, slug, mountName, user.id);
+    if (!result.ok) return result.response;
+    recordAudit(deps, user, "proxy.mount_approved", "plugin", slug, {
+      mount: mountName,
+      approval_version: result.row.approval_version,
+      normalized_upstream_origin: result.row.normalized_upstream_origin,
+      normalized_upstream_base_path: result.row.normalized_upstream_base_path,
+      approved_address_class: result.row.approved_address_class,
+    });
+    return Response.json({ mount: result.status });
   }
 
   const pluginLogsMatch = path.match(/^plugins\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/logs$/);
@@ -2140,6 +2255,17 @@ function workspaceCorsHeaders(): Headers {
   });
 }
 
+async function handleProxySessionPreflight(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: new Headers({
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Authorization, Content-Type",
+      "Access-Control-Max-Age": "600",
+    }),
+  });
+}
+
 // Preflight CORS headers for /admin/api/*. ACAO is applied by the dispatcher
 // from the configured allowlist; this helper only negotiates methods/headers.
 function adminApiCorsHeaders(): Headers {
@@ -2258,7 +2384,7 @@ async function requestSidebarItems(
       id: corrId,
       action: "sidebar.items",
       params: {},
-      user: { id: user.id, displayName: user.displayName, role: user.role },
+      user: { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl, role: user.role },
     });
   });
 }
@@ -2357,6 +2483,10 @@ async function handlePluginUi(
       "Cache-Control": requestedPath === "index.html"
         ? "no-cache"
         : "public, max-age=3600",
+      // Plugin iframes are sandboxed without allow-same-origin, so native ES
+      // module imports from their own UI asset URLs are CORS-checked as
+      // opaque-origin requests.
+      "Access-Control-Allow-Origin": "*",
     },
   });
 }

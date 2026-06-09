@@ -33,6 +33,7 @@ export const EXPECTED_TABLES: readonly string[] = [
   "categories",
   "voice_config",
   "voice_reachability_state",
+  "proxy_approvals",
 
   // Plugin resource store (runtime/src/plugin-resources/migrations/)
   "plugin_resource_types",
