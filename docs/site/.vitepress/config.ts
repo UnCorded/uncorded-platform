@@ -8,6 +8,10 @@ export default defineConfig({
   description: "Developer documentation for building UnCorded plugins.",
   cleanUrls: true,
   lastUpdated: true,
+  // README.md is repo/deploy documentation, not a published page. Excluding it
+  // keeps it out of the site and out of the dead-link check (it links to
+  // wrangler.jsonc, which isn't a markdown page).
+  srcExclude: ["**/README.md"],
   themeConfig: {
     nav: [{ text: "Plugin SDK", link: "/sdk/reverse-proxy" }],
     sidebar: [
