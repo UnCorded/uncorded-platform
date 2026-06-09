@@ -76,9 +76,18 @@ export function createRequestClient(
     pending.delete(id);
     clearTimeout(entry.timer);
 
-    const error = msg["error"] as { code: string; message: string } | undefined;
+    const error = msg["error"] as { code?: unknown; message?: unknown } | undefined;
     if (error) {
-      entry.reject(new Error(`${error.code}: ${error.message}`));
+      const code = typeof error.code === "string" ? error.code : "REQUEST_FAILED";
+      const message =
+        typeof error.message === "string"
+          ? error.message
+          : `Request "${id}" failed`;
+      entry.reject(
+        new PluginError(code, message, {
+          context: { id, response: msg },
+        }),
+      );
     } else {
       entry.resolve(msg["result"]);
     }
