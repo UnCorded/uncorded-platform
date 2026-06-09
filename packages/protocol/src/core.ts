@@ -237,7 +237,7 @@ export type RuntimeUpdateStatus =
   | "rolling-back"
   | "error";
 
-export type RuntimeUpdateChannel = "stable" | "beta" | "dev";
+export type RuntimeUpdateChannel = "stable" | "test" | "dev";
 
 export type RuntimeUpdateErrorContext =
   | "check"

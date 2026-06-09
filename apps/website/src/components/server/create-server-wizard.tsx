@@ -802,8 +802,8 @@ interface ChannelDescriptor {
 
 const CHANNELS: ReadonlyArray<ChannelDescriptor> = [
   { value: "stable", label: "Stable", blurb: "Production-ready releases. Recommended for daily use." },
-  { value: "beta", label: "Beta", blurb: "Release candidates. New features sooner; some rough edges." },
-  { value: "dev", label: "Dev", blurb: "Bleeding-edge dev builds. Updates frequently." },
+  { value: "test", label: "Test", blurb: "Preview builds for validating new runtime features with testers." },
+  { value: "dev", label: "Dev", blurb: "Bleeding-edge internal builds. Updates frequently." },
 ];
 
 function Step4Runtime(props: { state: WizardState; onChange: (p: StatePatch) => void }) {

@@ -37,22 +37,22 @@ describe("matchesChannel", () => {
   test("stable channel admits only plain X.Y.Z", () => {
     expect(matchesChannel("0.1.0", "stable")).toBe(true);
     expect(matchesChannel("1.10.3", "stable")).toBe(true);
-    expect(matchesChannel("1.0.0-beta.1", "stable")).toBe(false);
+    expect(matchesChannel("1.0.0-test.1", "stable")).toBe(false);
     expect(matchesChannel("1.0.0-rc.1", "stable")).toBe(false);
     expect(matchesChannel("1.0.0-dev.1", "stable")).toBe(false);
   });
 
-  test("beta channel admits stable + -beta.N (not -rc/-dev)", () => {
-    expect(matchesChannel("1.0.0", "beta")).toBe(true);
-    expect(matchesChannel("1.0.0-beta", "beta")).toBe(true);
-    expect(matchesChannel("1.0.0-beta.3", "beta")).toBe(true);
-    expect(matchesChannel("1.0.0-rc.1", "beta")).toBe(false);
-    expect(matchesChannel("1.0.0-dev.1", "beta")).toBe(false);
+  test("test channel admits stable + -test.N (not -rc/-dev)", () => {
+    expect(matchesChannel("1.0.0", "test")).toBe(true);
+    expect(matchesChannel("1.0.0-test", "test")).toBe(true);
+    expect(matchesChannel("1.0.0-test.3", "test")).toBe(true);
+    expect(matchesChannel("1.0.0-rc.1", "test")).toBe(false);
+    expect(matchesChannel("1.0.0-dev.1", "test")).toBe(false);
   });
 
   test("dev channel admits everything that parses as a version", () => {
     expect(matchesChannel("1.0.0", "dev")).toBe(true);
-    expect(matchesChannel("1.0.0-beta.1", "dev")).toBe(true);
+    expect(matchesChannel("1.0.0-test.1", "dev")).toBe(true);
     expect(matchesChannel("1.0.0-rc.1", "dev")).toBe(true);
     expect(matchesChannel("1.0.0-dev.1", "dev")).toBe(true);
     expect(matchesChannel("1.0.0-anything.42", "dev")).toBe(true);
@@ -69,7 +69,7 @@ describe("matchesChannel", () => {
 describe("stripRuntimeTag", () => {
   test("strips runtime- prefix from valid tags", () => {
     expect(stripRuntimeTag("runtime-0.1.0")).toBe("0.1.0");
-    expect(stripRuntimeTag("runtime-1.10.3-beta.2")).toBe("1.10.3-beta.2");
+    expect(stripRuntimeTag("runtime-1.10.3-test.2")).toBe("1.10.3-test.2");
   });
 
   test("returns null for desktop-style tags", () => {
@@ -159,13 +159,13 @@ describe("resolveLatestVersion", () => {
     expect(result).toBe("0.1.5");
   });
 
-  test("filters by channel: stable rejects beta tags", async () => {
+  test("filters by channel: stable rejects test tags", async () => {
     const result = await resolveLatestVersion({
       channel: "stable",
       currentVersion: "0.1.0",
       fetchImpl: fetchReturning(
         jsonResponse([
-          { tag_name: "runtime-0.2.0-beta.1", draft: false, prerelease: true },
+          { tag_name: "runtime-0.2.0-test.1", draft: false, prerelease: true },
           { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
         ]),
       ),
@@ -173,20 +173,20 @@ describe("resolveLatestVersion", () => {
     expect(result).toBe("0.1.5");
   });
 
-  test("filters by channel: beta accepts both stable and -beta.N", async () => {
+  test("filters by channel: test accepts both stable and -test.N", async () => {
     const result = await resolveLatestVersion({
-      channel: "beta",
+      channel: "test",
       currentVersion: "0.1.0",
       fetchImpl: fetchReturning(
         jsonResponse([
-          { tag_name: "runtime-0.2.0-beta.3", draft: false, prerelease: true },
+          { tag_name: "runtime-0.2.0-test.3", draft: false, prerelease: true },
           { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
           { tag_name: "runtime-0.2.0-rc.1", draft: false, prerelease: true },
         ]),
       ),
     });
-    // 0.2.0-beta.3 > 0.1.5 (main triple wins), and -rc.1 is filtered out.
-    expect(result).toBe("0.2.0-beta.3");
+    // 0.2.0-test.3 > 0.1.5 (main triple wins), and -rc.1 is filtered out.
+    expect(result).toBe("0.2.0-test.3");
   });
 
   test("filters by channel: dev accepts everything", async () => {
@@ -197,13 +197,13 @@ describe("resolveLatestVersion", () => {
         jsonResponse([
           { tag_name: "runtime-0.2.0-dev.5", draft: false, prerelease: true },
           { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
-          { tag_name: "runtime-0.2.0-beta.1", draft: false, prerelease: true },
+          { tag_name: "runtime-0.2.0-test.1", draft: false, prerelease: true },
         ]),
       ),
     });
-    // 0.2.0-dev.5 ordering vs 0.2.0-beta.1: alphanumeric "dev" > "beta"
-    // by ASCII (semver §11.4.4). The newest on dev channel is dev.5.
-    expect(result).toBe("0.2.0-dev.5");
+    // 0.2.0-test.1 ordering vs 0.2.0-dev.5: alphanumeric "test" > "dev"
+    // by ASCII (semver section 11.4.4). The newest on dev channel is test.1.
+    expect(result).toBe("0.2.0-test.1");
   });
 
   test("ignores non-runtime tags (e.g. desktop vX.Y.Z)", async () => {
@@ -240,7 +240,7 @@ describe("resolveLatestVersion", () => {
       currentVersion: "0.9.0",
       fetchImpl: fetchReturning(
         jsonResponse([
-          { tag_name: "runtime-1.0.0-beta.5", draft: false, prerelease: true },
+          { tag_name: "runtime-1.0.0-test.5", draft: false, prerelease: true },
           { tag_name: "runtime-1.0.0", draft: false, prerelease: false },
         ]),
       ),

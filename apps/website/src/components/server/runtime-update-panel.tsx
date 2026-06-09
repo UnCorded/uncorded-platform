@@ -447,7 +447,7 @@ function RuntimeHeader(props: {
 
 const CHANNELS: ReadonlyArray<{ value: RuntimeUpdateChannel; label: string }> = [
   { value: "stable", label: "Stable" },
-  { value: "beta", label: "Beta" },
+  { value: "test", label: "Test" },
   { value: "dev", label: "Dev" },
 ];
 

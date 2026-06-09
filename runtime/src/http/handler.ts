@@ -2011,7 +2011,7 @@ const VALID_UPDATE_STATUS = new Set<RuntimeUpdateStatus>([
   "pending-confirm", "backing-up", "downloading", "downloaded",
   "awaiting-restart", "installing", "rolling-back", "error",
 ]);
-const VALID_UPDATE_CHANNEL = new Set<RuntimeUpdateChannel>(["stable", "beta", "dev"]);
+const VALID_UPDATE_CHANNEL = new Set<RuntimeUpdateChannel>(["stable", "test", "dev"]);
 const VALID_UPDATE_ERROR_CONTEXT = new Set<Exclude<RuntimeUpdateErrorContext, null>>([
   "check", "backup", "download", "install", "rollback",
 ]);

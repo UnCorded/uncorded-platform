@@ -39,7 +39,7 @@ import type { CosignSignatureMaterial } from "./cosign-verify";
 import { pullAndVerify, PullPhaseError } from "./pull-verify";
 import type { PreUpdateBackup } from "./runtime-backup";
 
-export type RuntimeUpdateChannel = "stable" | "beta" | "dev";
+export type RuntimeUpdateChannel = "stable" | "test" | "dev";
 
 /** Phase identifier used in error outcomes — matches RuntimeUpdateErrorContext
  *  on the runtime side so clients render the right copy from update-ux.md §4.4. */
