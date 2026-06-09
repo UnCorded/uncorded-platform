@@ -23,7 +23,7 @@ type DropdownMenuContentProps = ComponentProps<typeof KDropdownMenu.Content> & {
 };
 
 function DropdownMenuContent(props: DropdownMenuContentProps) {
-  const [local, others] = splitProps(props, ["class", "side", "align", "sideOffset"]);
+  const [local, others] = splitProps(props, ["class", "side", "align", "sideOffset", "children"]);
   const placement = () => {
     const s = local.side ?? "bottom";
     const a = local.align ?? "center";
@@ -46,6 +46,7 @@ function DropdownMenuContent(props: DropdownMenuContentProps) {
         {...others}
       >
         <CoViewPopoverMount getEl={() => contentEl} />
+        {local.children}
       </KDropdownMenu.Content>
     </KDropdownMenu.Portal>
   );

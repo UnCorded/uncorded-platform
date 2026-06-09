@@ -16,7 +16,7 @@ type ContextMenuContentProps = ComponentProps<typeof KContextMenu.Content> & {
 };
 
 function ContextMenuContent(props: ContextMenuContentProps) {
-  const [local, others] = splitProps(props, ["class", "side", "align", "sideOffset"]);
+  const [local, others] = splitProps(props, ["class", "side", "align", "sideOffset", "children"]);
   const placement = () => {
     const side = local.side ?? "bottom";
     const align = local.align ?? "center";
@@ -48,6 +48,7 @@ function ContextMenuContent(props: ContextMenuContentProps) {
             return { x: r.left, y: r.top };
           }}
         />
+        {local.children}
       </KContextMenu.Content>
     </KContextMenu.Portal>
   );
