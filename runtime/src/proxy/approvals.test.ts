@@ -14,6 +14,7 @@ CREATE TABLE proxy_approvals (
   approved_by_user_id          TEXT    NOT NULL,
   approved_at                  INTEGER NOT NULL,
   approval_version             INTEGER NOT NULL,
+  approved_address_class       TEXT,
   PRIMARY KEY (plugin_slug, mount_name)
 );
 `;
@@ -81,6 +82,15 @@ describe("ProxyApprovalStore", () => {
     store.upsert(seedInput({ mount_name: "admin" }));
     expect(store.deletePlugin("foundry")).toBe(2);
     expect(store.get("foundry", "app")).toBeNull();
+  });
+
+  test("approved_address_class defaults to null and round-trips when set", () => {
+    store.upsert(seedInput({ mount_name: "app" }));
+    expect(store.get("foundry", "app")?.approved_address_class).toBeNull();
+
+    const classified = store.upsert(seedInput({ mount_name: "admin", approved_address_class: "loopback" }));
+    expect(classified.approved_address_class).toBe("loopback");
+    expect(store.get("foundry", "admin")?.approved_address_class).toBe("loopback");
   });
 
   test("mountDefinitionHash is stable and access-sensitive", () => {

@@ -21,10 +21,21 @@ export interface ProxyApprovalRow {
   approved_by_user_id: string;
   approved_at: number;
   approval_version: number;
+  /**
+   * DNS address class resolved at approval time (see proxy/dns.ts). NULL when no
+   * baseline was recorded — the forwarder then treats classification as advisory.
+   */
+  approved_address_class: string | null;
 }
 
-/** Fields supplied when creating/refreshing an approval; the store assigns approval_version. */
-export type ProxyApprovalInput = Omit<ProxyApprovalRow, "approval_version">;
+/**
+ * Fields supplied when creating/refreshing an approval; the store assigns
+ * approval_version. `approved_address_class` is optional and defaults to NULL so
+ * callers that don't classify (Phase 1 seeds) need not supply it.
+ */
+export type ProxyApprovalInput = Omit<ProxyApprovalRow, "approval_version" | "approved_address_class"> & {
+  approved_address_class?: string | null;
+};
 
 /**
  * Stable hash of a mount's definition. Bound into the approval row so a manifest
@@ -61,13 +72,14 @@ export class ProxyApprovalStore {
   upsert(input: ProxyApprovalInput): ProxyApprovalRow {
     const existing = this.get(input.plugin_slug, input.mount_name);
     const approvalVersion = existing ? existing.approval_version + 1 : 1;
+    const addressClass = input.approved_address_class ?? null;
     this.db
       .query(
         `INSERT INTO proxy_approvals (
            plugin_slug, plugin_version, mount_name, mount_definition_hash,
            upstream_setting_key, normalized_upstream_origin, normalized_upstream_base_path,
-           approved_by_user_id, approved_at, approval_version
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           approved_by_user_id, approved_at, approval_version, approved_address_class
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(plugin_slug, mount_name) DO UPDATE SET
            plugin_version = excluded.plugin_version,
            mount_definition_hash = excluded.mount_definition_hash,
@@ -76,7 +88,8 @@ export class ProxyApprovalStore {
            normalized_upstream_base_path = excluded.normalized_upstream_base_path,
            approved_by_user_id = excluded.approved_by_user_id,
            approved_at = excluded.approved_at,
-           approval_version = excluded.approval_version`,
+           approval_version = excluded.approval_version,
+           approved_address_class = excluded.approved_address_class`,
       )
       .run(
         input.plugin_slug,
@@ -89,8 +102,9 @@ export class ProxyApprovalStore {
         input.approved_by_user_id,
         input.approved_at,
         approvalVersion,
+        addressClass,
       );
-    return { ...input, approval_version: approvalVersion };
+    return { ...input, approval_version: approvalVersion, approved_address_class: addressClass };
   }
 
   /**

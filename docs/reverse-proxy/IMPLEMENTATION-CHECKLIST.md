@@ -71,14 +71,14 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
       loads stub upstream HTML.
 
 ## Phase 2 — HTTP Proxy Core — commit: `feat(proxy): http forwarder`
-- [ ] Streamed request/response forwarding.
-- [ ] Header sanitizer (hop-by-hop, auth/cookie strip, forwarded-identity policy,
+- [x] Streamed request/response forwarding.
+- [x] Header sanitizer (hop-by-hop, auth/cookie strip, forwarded-identity policy,
       strip spoofed `x-forwarded-*` / `x-uncorded-*`, set runtime-owned).
-- [ ] Cookie rewriting + mount-scoped cookie forwarding.
-- [ ] Redirect handling: reject cross-origin redirects (`redirect: "manual"`).
-- [ ] Connection-time DNS resolution/classification + re-approval on class change.
-- [ ] Limits/timeouts (constants from plan) + structured proxy errors.
-- [ ] Tests: header policy, cookie rewrite, redirect rejection, streaming, limits,
+- [x] Cookie rewriting + mount-scoped cookie forwarding.
+- [x] Redirect handling: reject cross-origin redirects (`redirect: "manual"`).
+- [x] Connection-time DNS resolution/classification + re-approval on class change.
+- [x] Limits/timeouts (constants from plan) + structured proxy errors.
+- [x] Tests: header policy, cookie rewrite, redirect rejection, streaming, limits,
       SSRF redirect (169.254.169.254) rejected, query-string redaction in logs.
 
 ## Phase 3 — WebSocket Proxy — commit: `feat(proxy): websocket forwarder`

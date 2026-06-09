@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHttpHandler, type HttpHandlerHandle } from "./handler";
+import { __setProxyOverridesForTests, __resetProxyOverridesForTests } from "./proxy";
 import { ENSURE_CONFIG_TABLE_SQL } from "../ipc/handlers";
 import { ProxyApprovalStore, mountDefinitionHash } from "../proxy/approvals";
 import { normalizeUpstream } from "../proxy/upstream";
+import { ProxyConnectionRegistry, PROXY_LIMITS } from "../proxy/limits";
 import type { HttpDependencies, PluginInfo, PluginRegistry } from "./types";
 import type { TokenValidator, AuthenticatedUser, TokenValidationResult } from "../ws/types";
 import type { RolesEngine } from "../roles/engine";
@@ -89,17 +91,22 @@ function setup(options?: {
   upstreamValue?: string;
   /** Skip seeding an approval row. */
   noApproval?: boolean;
+  /** Custom stub-upstream handler (receives the forwarded Request). */
+  upstreamFetch?: (req: Request) => Response | Promise<Response>;
+  /** Baseline address class to seed on the approval row (enables DNS drift checks). */
+  approvedAddressClass?: string;
 }): Harness {
   const mounts = options?.mounts ?? [{ name: "app", upstream_setting: "upstream_url" }];
 
   // Stub upstream server.
+  const defaultUpstreamFetch = (): Response =>
+    new Response("<html><body>STUB UPSTREAM</body></html>", {
+      headers: { "content-type": "text/html" },
+    });
+  const upstreamFetch = options?.upstreamFetch ?? defaultUpstreamFetch;
   const upstream = Bun.serve({
     port: 0,
-    fetch() {
-      return new Response("<html><body>STUB UPSTREAM</body></html>", {
-        headers: { "content-type": "text/html" },
-      });
-    },
+    fetch: (req) => upstreamFetch(req),
   });
   const upstreamOrigin = `http://localhost:${upstream.port}`;
   const upstreamValue = options?.upstreamValue ?? upstreamOrigin;
@@ -117,6 +124,7 @@ function setup(options?: {
       mount_definition_hash TEXT NOT NULL, upstream_setting_key TEXT NOT NULL,
       normalized_upstream_origin TEXT NOT NULL, normalized_upstream_base_path TEXT NOT NULL,
       approved_by_user_id TEXT NOT NULL, approved_at INTEGER NOT NULL, approval_version INTEGER NOT NULL,
+      approved_address_class TEXT,
       PRIMARY KEY (plugin_slug, mount_name)
     );
   `);
@@ -149,6 +157,9 @@ function setup(options?: {
         normalized_upstream_base_path: norm.basePath,
         approved_by_user_id: "owner-1",
         approved_at: Date.now(),
+        ...(options?.approvedAddressClass !== undefined
+          ? { approved_address_class: options.approvedAddressClass }
+          : {}),
       });
     }
   }
@@ -203,6 +214,7 @@ function setup(options?: {
 let h: Harness;
 
 afterEach(() => {
+  __resetProxyOverridesForTests();
   h.handler.dispose();
   h.server.stop(true);
   h.upstream.stop(true);
@@ -214,6 +226,16 @@ afterEach(() => {
 function cookiePair(setCookie: string | null): string {
   if (!setCookie) throw new Error("no Set-Cookie header");
   return setCookie.split(";")[0] ?? "";
+}
+
+/** Bootstrap a proxy session and return the replayable Cookie pair. */
+async function bootstrapCookie(mount = "app", token = "member-token"): Promise<string> {
+  const boot = await fetch(`${h.baseUrl}/proxy-sessions/${SLUG}/${mount}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (boot.status !== 200) throw new Error(`bootstrap failed: ${boot.status}`);
+  return cookiePair(boot.headers.get("set-cookie"));
 }
 
 // ---------------------------------------------------------------------------
@@ -384,5 +406,205 @@ describe("approval invalidation on config change", () => {
     });
     expect(res.status).toBe(200);
     expect(h.approvals.get(SLUG, "app")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 — production forwarder: header policy, cookies, redirects, DNS,
+// limits, streaming.
+// ---------------------------------------------------------------------------
+
+/** An upstream that echoes the forwarded request's headers, method, and body. */
+function echoUpstream() {
+  return async (req: Request): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of req.headers) headers[k.toLowerCase()] = v;
+    const body = await req.text();
+    return Response.json({ headers, method: req.method, body });
+  };
+}
+
+interface EchoBody {
+  headers: Record<string, string>;
+  method: string;
+  body: string;
+}
+
+describe("Phase 2: request header policy", () => {
+  test("strips authorization, proxy-session cookie, and client-spoofed forwarded headers; sets runtime identity", async () => {
+    h = setup({ upstreamFetch: echoUpstream() });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
+      headers: {
+        Cookie: `${cookie}; app_session=keepme`,
+        Authorization: "Bearer member-token",
+        "x-forwarded-for": "1.2.3.4",
+        "x-forwarded-proto": "https",
+        "x-uncorded-user-id": "attacker",
+        connection: "x-secret",
+        "x-secret": "leak",
+      },
+    });
+    expect(res.status).toBe(200);
+    const echo = (await res.json()) as EchoBody;
+
+    // Runtime credentials never reach the upstream.
+    expect(echo.headers["authorization"]).toBeUndefined();
+    // Connection-listed token is dropped as dynamic hop-by-hop. (The transport's
+    // own `connection` header is re-added by the fetch client on the upstream
+    // hop and is not one of ours.)
+    expect(echo.headers["x-secret"]).toBeUndefined();
+
+    // Client-spoofed forwarded identity is replaced with runtime-trusted values.
+    expect(echo.headers["x-forwarded-for"]).toBe("127.0.0.1");
+    expect(echo.headers["x-uncorded-user-id"]).toBe("member-1");
+
+    // The proxy-session cookie is stripped; the app cookie survives.
+    expect(echo.headers["cookie"]).toBe("app_session=keepme");
+  });
+
+  test("rejects an oversized inbound header set with 431", async () => {
+    h = setup({ upstreamFetch: echoUpstream() });
+    __setProxyOverridesForTests({ limits: { ...PROXY_LIMITS, maxRequestHeaderBytes: 8 } });
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`);
+    expect(res.status).toBe(431);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PROXY_REQUEST_HEADERS_TOO_LARGE");
+  });
+});
+
+describe("Phase 2: response cookie rewriting", () => {
+  test("drops Domain and scopes Set-Cookie Path under the mount", async () => {
+    h = setup({
+      upstreamFetch: () => {
+        const headers = new Headers({ "content-type": "text/html" });
+        headers.append("set-cookie", "sid=abc; Domain=evil.example.com; Path=/; HttpOnly; Secure");
+        headers.append("set-cookie", "pref=dark; Path=/settings");
+        return new Response("ok", { headers });
+      },
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    const setCookies = res.headers.getSetCookie();
+
+    const sid = setCookies.find((c) => c.startsWith("sid="));
+    const pref = setCookies.find((c) => c.startsWith("pref="));
+    expect(sid).toBeDefined();
+    expect(pref).toBeDefined();
+    expect(sid!.toLowerCase()).not.toContain("domain=");
+    expect(sid).toContain(`Path=/proxy/${SLUG}/app`);
+    expect(sid).toContain("HttpOnly");
+    expect(sid).toContain("Secure");
+    expect(pref).toContain(`Path=/proxy/${SLUG}/app/settings`);
+  });
+});
+
+describe("Phase 2: redirect policy", () => {
+  test("blocks a cross-origin redirect (SSRF to 169.254.169.254) with 502", async () => {
+    h = setup({
+      upstreamFetch: () =>
+        new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/" } }),
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
+      headers: { Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PROXY_REDIRECT_BLOCKED");
+  });
+
+  test("contains a same-origin redirect under the mount path", async () => {
+    let location = "";
+    h = setup({
+      upstreamFetch: () => new Response(null, { status: 302, headers: { location } }),
+    });
+    // Build the absolute same-origin Location now that the upstream port is known.
+    location = `${h.upstreamOrigin}/dashboard?tab=1`;
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
+      headers: { Cookie: cookie },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/proxy/${SLUG}/app/dashboard?tab=1`);
+  });
+});
+
+describe("Phase 2: streaming body", () => {
+  test("round-trips a POST request body to the upstream", async () => {
+    h = setup({ upstreamFetch: echoUpstream() });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/submit`, {
+      method: "POST",
+      headers: { Cookie: cookie, "content-type": "text/plain" },
+      body: "hello upstream",
+    });
+    expect(res.status).toBe(200);
+    const echo = (await res.json()) as EchoBody;
+    expect(echo.method).toBe("POST");
+    expect(echo.body).toBe("hello upstream");
+  });
+});
+
+describe("Phase 2: concurrency caps", () => {
+  test("returns 503 when the per-user connection cap is exhausted", async () => {
+    h = setup({ upstreamFetch: echoUpstream() });
+    const registry = new ProxyConnectionRegistry({ ...PROXY_LIMITS, maxConcurrentPerUser: 1 });
+    // Pre-occupy member-1's only slot for this mount.
+    const held = registry.acquire("member-1", `${SLUG}/app`);
+    expect(held.ok).toBe(true);
+    __setProxyOverridesForTests({ connections: registry });
+
+    const cookie = await bootstrapCookie();
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("5");
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PROXY_TOO_MANY_CONNECTIONS");
+  });
+});
+
+describe("Phase 2: DNS classification & drift", () => {
+  test("requires re-approval when the live address class drifts from the baseline", async () => {
+    h = setup({ upstreamFetch: echoUpstream(), approvedAddressClass: "loopback" });
+    __setProxyOverridesForTests({
+      resolveHostClasses: async () => ({ addresses: ["8.8.8.8"], classes: ["public"], representative: "public" }),
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PROXY_REAPPROVAL_REQUIRED");
+  });
+
+  test("allows traffic when the live class matches the baseline", async () => {
+    h = setup({ upstreamFetch: echoUpstream(), approvedAddressClass: "loopback" });
+    __setProxyOverridesForTests({
+      resolveHostClasses: async () => ({ addresses: ["127.0.0.1"], classes: ["loopback"], representative: "loopback" }),
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+  });
+
+  test("treats a null baseline as advisory only (never blocks)", async () => {
+    h = setup({ upstreamFetch: echoUpstream() }); // no approvedAddressClass ⇒ null baseline
+    __setProxyOverridesForTests({
+      resolveHostClasses: async () => ({ addresses: ["8.8.8.8"], classes: ["public"], representative: "public" }),
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
   });
 });
