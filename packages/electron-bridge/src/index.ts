@@ -144,7 +144,7 @@ export interface UpdateState {
 // `RuntimeUpdateChannel` mirrors the same union the runtime exposes on
 // /admin/api/update-state — keeping it shared here avoids the renderer
 // having to import a runtime-side type just to render a dropdown.
-export type RuntimeUpdateChannel = "stable" | "beta" | "dev";
+export type RuntimeUpdateChannel = "stable" | "test" | "dev";
 
 // Per-server preferences the renderer reads when rendering the Runtime
 // panel. `channel` lives on the runtime side (persisted in update-state.json

@@ -17,8 +17,8 @@
 //
 // Channel filter:
 //   stable: tag matches /^runtime-\d+\.\d+\.\d+$/
-//   beta:   stable | /^runtime-\d+\.\d+\.\d+-beta(\.\d+)?$/
-//   dev:    any /^runtime-/ (rc / dev / nightly variants all included)
+//   test:   stable | /^runtime-\d+\.\d+\.\d+-test(\.\d+)?$/
+//   dev:    any /^runtime-/ (rc / dev / test / nightly variants all included)
 //
 // Returns null when no published version is greater than the current one
 // (i.e. the operator is already up-to-date on this channel). Throws on
@@ -42,7 +42,7 @@ const TAG_PREFIX = "runtime-";
 // roll our own rather than pull a dep — semver comparison for our own
 // release tags is bounded enough that a stripped-down implementation is
 // more auditable than a fourth-party. Behavior matches semver §11 for the
-// shapes we publish (X.Y.Z and X.Y.Z-beta.N / -dev.N / -rc.N).
+// shapes we publish (X.Y.Z and X.Y.Z-test.N / -dev.N / -rc.N).
 function compareVersions(a: string, b: string): number {
   const [aMain, aPre] = splitPre(a);
   const [bMain, bPre] = splitPre(b);
@@ -96,8 +96,8 @@ function comparePreRelease(a: string, b: string): number {
   return 0;
 }
 
-/** True iff `version` (e.g. "0.2.0", "0.2.0-beta.1") is published on the
- *  channel — used so e.g. dev-channel users can see beta + stable + dev
+/** True iff `version` (e.g. "0.2.0", "0.2.0-test.1") is published on the
+ *  channel — used so e.g. dev-channel users can see test + stable + dev
  *  versions, but stable-channel users only see stable releases. */
 export function matchesChannel(
   version: string,
@@ -106,7 +106,7 @@ export function matchesChannel(
   if (!/^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/.test(version)) return false;
   const isStable = !version.includes("-");
   if (channel === "stable") return isStable;
-  if (channel === "beta") return isStable || /-beta(\.\d+)?$/.test(version);
+  if (channel === "test") return isStable || /-test(\.\d+)?$/.test(version);
   return true; // dev: everything that parses as a version
 }
 

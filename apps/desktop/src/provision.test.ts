@@ -396,13 +396,13 @@ describe("provisionServer — pre-flight check", () => {
 
 describe("provisionServer — runtime channel", () => {
   it("forwards the channel to the orchestrator and persists it after wait-health", async () => {
-    await provisionModule.provisionServer(makeInput({ channel: "beta" }), () => {});
+    await provisionModule.provisionServer(makeInput({ channel: "test" }), () => {});
 
     expect(mockPullVerifyAndTagForFirstBoot.mock.calls.length).toBe(1);
     const [pullArgs] = (mockPullVerifyAndTagForFirstBoot.mock.calls[0] as unknown) as [
       { channel: string },
     ];
-    expect(pullArgs.channel).toBe("beta");
+    expect(pullArgs.channel).toBe("test");
 
     expect(mockSetChannelByEndpoint.mock.calls.length).toBe(1);
     const [serverId, hostPort, ch] = (mockSetChannelByEndpoint.mock.calls[0] as unknown) as [
@@ -412,7 +412,7 @@ describe("provisionServer — runtime channel", () => {
     ];
     expect(serverId).toBe("srv_abc123");
     expect(hostPort).toBe(3000);
-    expect(ch).toBe("beta");
+    expect(ch).toBe("test");
   });
 
   it("defaults to dev when the wizard didn't pick a channel", async () => {

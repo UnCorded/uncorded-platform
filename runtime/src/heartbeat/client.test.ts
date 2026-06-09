@@ -832,7 +832,7 @@ describe("request shape", () => {
       errorContext: null,
       currentVersion: "2.0.0",
       availableVersion: "2.1.0",
-      channel: "beta" as const,
+      channel: "test" as const,
       progress: null,
       lastCheckedAt: 1700000000000,
       errorMessage: null,
@@ -847,7 +847,7 @@ describe("request shape", () => {
     await client.poll();
 
     const body = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>;
-    expect(body["channel"]).toBe("beta");
+    expect(body["channel"]).toBe("test");
     expect(body["update_state"]).toEqual(updateState);
   });
 

@@ -46,7 +46,7 @@ describe("createUpdateStateStore", () => {
       errorContext: null,
       currentVersion: "0.9.0-old", // should be overwritten with currentVersion option
       availableVersion: "1.1.0-test",
-      channel: "beta",
+      channel: "test",
       progress: null,
       lastCheckedAt: 1_699_999_000_000,
       errorMessage: null,
@@ -61,7 +61,7 @@ describe("createUpdateStateStore", () => {
     const state = store.get();
     expect(state.state).toBe("available");
     expect(state.availableVersion).toBe("1.1.0-test");
-    expect(state.channel).toBe("beta");
+    expect(state.channel).toBe("test");
     // currentVersion always reflects THIS image, never what the file said.
     expect(state.currentVersion).toBe("1.0.0-test");
   });

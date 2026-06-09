@@ -1268,7 +1268,7 @@ function registerIpcHandlers(): void {
     // for first-boot until a stable runtime exists. (See plan D4 in
     // .claude/plans/snuggly-wishing-flamingo.md.)
     const channel: RuntimeUpdateChannel =
-      payload.channel === "stable" || payload.channel === "beta" || payload.channel === "dev"
+      payload.channel === "stable" || payload.channel === "test" || payload.channel === "dev"
         ? payload.channel
         : "dev";
     const provisionInput = { ...payload, channel };
@@ -1436,10 +1436,10 @@ function registerIpcHandlers(): void {
     if (typeof serverId !== "string" || serverId.length === 0) {
       throw ipcError(IPC.RUNTIME_UPDATE_SET_CHANNEL, new Error("serverId required"));
     }
-    if (channel !== "stable" && channel !== "beta" && channel !== "dev") {
+    if (channel !== "stable" && channel !== "test" && channel !== "dev") {
       throw ipcError(
         IPC.RUNTIME_UPDATE_SET_CHANNEL,
-        new Error(`channel must be one of stable|beta|dev (got ${String(channel)})`),
+        new Error(`channel must be one of stable|test|dev (got ${String(channel)})`),
       );
     }
     await runtimeOrchestrator.setChannelForServer(serverId, channel);
@@ -1502,10 +1502,10 @@ function registerIpcHandlers(): void {
     _event,
     channel: RuntimeUpdateChannel,
   ): Promise<string | null> => {
-    if (channel !== "stable" && channel !== "beta" && channel !== "dev") {
+    if (channel !== "stable" && channel !== "test" && channel !== "dev") {
       throw ipcError(
         IPC.RUNTIME_RELEASES_RESOLVE_LATEST,
-        new Error("channel must be stable|beta|dev"),
+        new Error("channel must be stable|test|dev"),
       );
     }
     return resolveLatestVersion({ channel, currentVersion: "0.0.0" });
