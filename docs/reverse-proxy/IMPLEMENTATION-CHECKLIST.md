@@ -107,12 +107,25 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
       warning helper, UI status/label/warning helpers.
 
 ## Phase 5 — Foundry Plugin — commit: `feat(plugins): foundry-vtt`
-- [ ] `plugins/foundry-vtt`: manifest, backend `sidebar.items`, frontend panel.
-- [ ] Bootstrap cookie before iframe `src`; "Open in browser" fallback to proxied URL.
-- [ ] **Safari/WebKit (LOCKED, decision §4a):** the cookie does not carry in a
+- [x] `plugins/foundry-vtt`: manifest, backend `sidebar.items`, frontend panel.
+      (Manifest validates via `validateManifest`; SDK global is `window.UncodedPlugin`,
+      not the `UnCordedPlugin` typo in the plan doc — verified against
+      `runtime/public/sdk/plugin-frontend.js`.)
+- [x] Bootstrap cookie before iframe `src`; "Open in browser" fallback to proxied URL.
+      DOM-wiring factored into `frontend/bootstrap.js` and unit-tested in
+      `plugins/foundry-vtt/__tests__/bootstrap.test.ts`.
+- [x] **Safari/WebKit (LOCKED, decision §4a):** the cookie does not carry in a
       cross-site iframe; always offer "Open in browser" (top-level navigation to
-      the proxied URL, verified to work). Optional later: `requestStorageAccess()`.
-- [ ] Manual test against real Foundry (operator checklist in plan §Phase 5).
+      the proxied URL, verified to work). Link is pre-seeded with the proxied
+      route even before/when bootstrap fails. Optional later: `requestStorageAccess()`.
+- [x] Stub-upstream verification (no real Foundry/license required):
+      `runtime/src/http/foundry-proxy.test.ts` composes one server (HTTP proxy +
+      WS proxy) driven by the real shipped manifest and proves: approve mount,
+      bootstrap cookie, iframe loads proxied HTML, static asset loads, app cookie
+      persists through the proxy rewrite, WebSocket connects through the proxy,
+      and "Open in browser" points to the proxied route (not the upstream).
+- [x] Manual QA for real Foundry: `docs/reverse-proxy/foundry-manual-qa.md`
+      (owner setup, world login/assets/websocket/reload, Safari/WebKit fallback).
 
 ---
 
