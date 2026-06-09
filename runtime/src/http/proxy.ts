@@ -121,25 +121,48 @@ function rateLimited(retryAfterMs: number): Response {
 // Mount resolution — shared by bootstrap + forwarder.
 // ---------------------------------------------------------------------------
 
-interface ResolvedMount {
+export interface ResolvedMount {
   manifest: PluginManifest;
   mount: ProxyMount;
   upstream: NormalizedUpstream;
   approval: ProxyApprovalRow;
 }
 
-type ResolveResult =
+export type ResolveResult =
   | { ok: true; value: ResolvedMount }
   | { ok: false; response: Response };
+
+/** The transport capability a mount resolution gates on. */
+export type ProxyTransportCapability = "proxy.http:self" | "proxy.websocket:self";
+
+/**
+ * The subset of {@link HttpDependencies} mount resolution needs. Narrowed so the
+ * WebSocket proxy (which holds only a handful of closures, not the full HTTP
+ * dependency bag) can reuse this resolver. `HttpDependencies` satisfies it
+ * structurally, so existing callers pass unchanged.
+ */
+export type ProxyMountDeps = Pick<
+  HttpDependencies,
+  "getInstalledPlugins" | "coreDb" | "getPluginDb"
+>;
 
 /**
  * Resolve a proxy mount to its live upstream + current approval, applying every
  * fail-closed gate EXCEPT identity (cookie/bearer) and the owner access policy,
  * which the callers apply with the identity they hold.
  *
+ * `capability` selects which transport permission the mount must declare — HTTP
+ * callers pass `proxy.http:self` (the default), the WS upgrade path passes
+ * `proxy.websocket:self`.
+ *
  * Member-facing errors never include the private upstream hostname.
  */
-function resolveMount(deps: HttpDependencies, slug: string, mountName: string): ResolveResult {
+export function resolveMount(
+  deps: ProxyMountDeps,
+  slug: string,
+  mountName: string,
+  capability: ProxyTransportCapability = "proxy.http:self",
+): ResolveResult {
   const plugin = deps.getInstalledPlugins().find((p) => p.slug === slug);
   if (!plugin) {
     return { ok: false, response: proxyError("PLUGIN_NOT_FOUND") };
@@ -159,9 +182,9 @@ function resolveMount(deps: HttpDependencies, slug: string, mountName: string): 
     return { ok: false, response: proxyError("MOUNT_NOT_FOUND") };
   }
 
-  // Phase 2 is HTTP-only; the HTTP transport capability is required.
+  // The requested transport capability must be declared by the plugin.
   const checker = new CapabilityChecker(slug, plugin.manifest.permissions);
-  if (!checker.isAllowed("proxy.http:self")) {
+  if (!checker.isAllowed(capability)) {
     return { ok: false, response: proxyError("PROXY_CAPABILITY_MISSING") };
   }
 
@@ -199,7 +222,7 @@ function resolveMount(deps: HttpDependencies, slug: string, mountName: string): 
 }
 
 /** Read the upstream setting's current value, falling back to its manifest default. */
-function readUpstreamValue(deps: HttpDependencies, slug: string, setting: PluginSetting): string | null {
+function readUpstreamValue(deps: ProxyMountDeps, slug: string, setting: PluginSetting): string | null {
   const db = deps.getPluginDb(slug);
   db.exec(ENSURE_CONFIG_TABLE_SQL);
   const row = db

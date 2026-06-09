@@ -82,13 +82,13 @@ Throwaway harness, **no production proxy code**. Gates all cookie work.
       SSRF redirect (169.254.169.254) rejected, query-string redaction in logs.
 
 ## Phase 3 — WebSocket Proxy — commit: `feat(proxy): websocket forwarder`
-- [ ] Proxy upgrade detected before the `/ws` branch; `ws.data.kind` tagging.
-- [ ] Branch `open`/`message`/`drain`/`close`; proxy frames never hit `router`.
-- [ ] Reuse mount resolver + upstream validator; gate on `proxy.websocket:self`;
+- [x] Proxy upgrade detected before the `/ws` branch; `ws.data.kind` tagging.
+- [x] Branch `open`/`message`/`drain`/`close`; proxy frames never hit `router`.
+- [x] Reuse mount resolver + upstream validator; gate on `proxy.websocket:self`;
       cookie + approval check before upstream connect.
-- [ ] Pipe both directions; frame-size cap (1009), idle timeout, close propagation,
+- [x] Pipe both directions; frame-size cap (1009), idle timeout, close propagation,
       safe subprotocols, backpressure (`send()===-1`, `drain`, `bufferedAmount`).
-- [ ] Tests: echo through proxy; oversized frame → 1009, never enters `/ws` router.
+- [x] Tests: echo through proxy; oversized frame → 1009, never enters `/ws` router.
 
 ## Phase 4 — Admin UI & Approval Endpoint — commit: `feat(proxy): admin approval`
 - [ ] `POST /admin/api/plugins/:slug/proxy-mounts/:mount/approve` — only writer of
