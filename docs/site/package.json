@@ -1,0 +1,15 @@
+{
+  "name": "uncorded-docs-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Source for docs.uncorded.app — built by Cloudflare Pages on push.",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}
