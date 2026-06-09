@@ -164,6 +164,12 @@ function startStubUpstream(): StubUpstream {
         });
       }
 
+      if (url.pathname === "/assets/app.css") {
+        return new Response("body{background-image:url(/assets/bg.png)}\n", {
+          headers: { "content-type": "text/css" },
+        });
+      }
+
       if (url.pathname === "/whoami") {
         return Response.json({ cookie: req.headers.get("cookie") ?? "" });
       }
@@ -181,6 +187,7 @@ function startStubUpstream(): StubUpstream {
       headers.append("set-cookie", `${APP_COOKIE_NAME}=${APP_COOKIE_VALUE}; Path=/; HttpOnly`);
       return new Response(
         '<!doctype html><html><head><title>Foundry Virtual Tabletop</title>' +
+          '<link rel="stylesheet" href="/assets/app.css">' +
           '<script src="/assets/app.js"></script></head>' +
           "<body><main>Foundry Virtual Tabletop</main></body></html>",
         { headers },
@@ -451,7 +458,10 @@ describe("foundry-vtt proxy end-to-end (stub upstream)", () => {
     const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/${MOUNT}/`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(await res.text()).toContain("Foundry Virtual Tabletop");
+    const html = await res.text();
+    expect(html).toContain("Foundry Virtual Tabletop");
+    expect(html).toContain(`href="/proxy/${SLUG}/${MOUNT}/assets/app.css"`);
+    expect(html).toContain(`src="/proxy/${SLUG}/${MOUNT}/assets/app.js"`);
   });
 
   test("4. static asset loads through the proxy", async () => {
@@ -465,6 +475,19 @@ describe("foundry-vtt proxy end-to-end (stub upstream)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("javascript");
     expect(await res.text()).toContain("FOUNDRY");
+  });
+
+  test("4b. root-relative CSS urls are contained under the mount", async () => {
+    h = setup();
+    await approveFoundryMount();
+    const { cookie } = await bootstrap();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/${MOUNT}/assets/app.css`, {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/css");
+    expect(await res.text()).toContain(`url(/proxy/${SLUG}/${MOUNT}/assets/bg.png)`);
   });
 
   test("5. app cookie persists through the proxy rewrite and replays upstream", async () => {

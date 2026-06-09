@@ -72,6 +72,9 @@ const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
+// Text response types where path-prefix rewriting is safe and expected.
+const REWRITEABLE_TEXT_TYPES = ["text/html", "application/xhtml+xml", "text/css"];
+
 // ---------------------------------------------------------------------------
 // Test seams. The forwarder resolves real DNS and shares a process-wide
 // connection registry; tests inject deterministic substitutes via these hooks.
@@ -784,6 +787,25 @@ async function forwardToUpstream(args: ForwardArgs): Promise<Response> {
     return new Response(null, { status, headers: outHeaders });
   }
 
+  const rewriteKind = rewriteKindFor(outHeaders);
+  if (rewriteKind !== null) {
+    try {
+      const rewritten = rewriteTextBody(await upstreamRes.text(), mountPath, rewriteKind);
+      outHeaders.delete("content-length");
+      outHeaders.delete("content-encoding");
+      release();
+      return new Response(rewritten, { status, headers: outHeaders });
+    } catch (err) {
+      release();
+      log.warn("proxy response rewrite failed", {
+        slug,
+        mount: mountName,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return proxyError("PROXY_UPSTREAM_ERROR");
+    }
+  }
+
   // Stream the body with an idle deadline; the connection slot is held until the
   // stream settles (close, error, or client cancel).
   const guarded = withIdleTimeout(upstreamRes.body, limits.idleStreamTimeoutMs, {
@@ -866,4 +888,53 @@ function buildUpstreamTarget(request: Request, upstream: NormalizedUpstream, suf
     search = "";
   }
   return `${upstream.origin}${path}${search}`;
+}
+
+type RewriteKind = "html" | "css";
+
+function rewriteKindFor(headers: Headers): RewriteKind | null {
+  const raw = headers.get("content-type")?.toLowerCase() ?? "";
+  if (!REWRITEABLE_TEXT_TYPES.some((type) => raw.includes(type))) return null;
+  return raw.includes("css") ? "css" : "html";
+}
+
+function rewriteTextBody(body: string, mountPath: string, kind: RewriteKind): string {
+  if (kind === "css") return rewriteCssUrls(body, mountPath);
+  return rewriteHtmlUrls(rewriteCssUrls(body, mountPath), mountPath);
+}
+
+function mountAbsolutePath(path: string, mountPath: string): string {
+  if (!path.startsWith("/") || path.startsWith("//")) return path;
+  if (path === mountPath || path.startsWith(`${mountPath}/`) || path.startsWith("/proxy/")) return path;
+  return `${mountPath}${path}`.replace(/\/{2,}/g, "/");
+}
+
+function rewriteHtmlUrls(html: string, mountPath: string): string {
+  return html
+    .replace(
+      /\b(href|src|action|poster|data)=("|')\/(?!\/)([^"']*)\2/gi,
+      (_all, attr: string, quote: string, rest: string) =>
+        `${attr}=${quote}${mountAbsolutePath(`/${rest}`, mountPath)}${quote}`,
+    )
+    .replace(/\bsrcset=("|')([^"']*)\1/gi, (_all, quote: string, value: string) => {
+      const rewritten = value
+        .split(",")
+        .map((candidate) => {
+          const leading = candidate.match(/^\s*/)?.[0] ?? "";
+          const trimmed = candidate.trimStart();
+          if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return candidate;
+          const [urlPart, ...descriptor] = trimmed.split(/\s+/);
+          return `${leading}${mountAbsolutePath(urlPart ?? "", mountPath)}${descriptor.length ? ` ${descriptor.join(" ")}` : ""}`;
+        })
+        .join(",");
+      return `srcset=${quote}${rewritten}${quote}`;
+    });
+}
+
+function rewriteCssUrls(css: string, mountPath: string): string {
+  return css.replace(
+    /url\(\s*(["']?)\/(?!\/)([^)"']*)\1\s*\)/gi,
+    (_all, quote: string, rest: string) =>
+      `url(${quote}${mountAbsolutePath(`/${rest}`, mountPath)}${quote})`,
+  );
 }
