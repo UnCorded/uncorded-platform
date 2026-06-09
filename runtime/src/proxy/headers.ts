@@ -1,10 +1,16 @@
 // Request/response header sanitizer for the HTTP forwarder.
 //
 // Policy (docs/reverse-proxy/plugin-reverse-proxy-plan.md §Header Policy):
-//   request  — strip hop-by-hop, authorization, cookie, and all client-supplied
-//              x-forwarded-* / x-uncorded-* headers; set runtime-owned forwarded
-//              identity headers; set Host to the upstream host; attach only the
-//              reconstructed mount-scoped upstream Cookie.
+//   request  — strip hop-by-hop, authorization, cookie, referer, and all
+//              client-supplied x-forwarded-* / x-uncorded-* headers; set
+//              runtime-owned forwarded identity headers; set Host to the upstream
+//              host; attach only the reconstructed mount-scoped upstream Cookie.
+//
+// Referer is stripped because a browser may carry a runtime-internal URL there
+// (notably the /proxy-open handoff URL, which embeds a single-use session
+// ticket); forwarding it would leak that ticket into the upstream app and its
+// logs. A Referer pointing at the runtime origin is also useless to the upstream,
+// which only ever sees same-origin requests through the proxy.
 //   response — strip hop-by-hop; drop Set-Cookie (rewritten separately); keep
 //              everything else, INCLUDING content-security-policy and
 //              x-frame-options (iframe policy belongs to the upstream app).
@@ -79,6 +85,9 @@ export function sanitizeRequestHeaders(
     if (HOP_BY_HOP.has(name)) continue;
     if (dynamicHopByHop.has(name)) continue;
     if (name === "authorization" || name === "cookie") continue;
+    // Referer can carry the /proxy-open handoff URL (with its session ticket);
+    // never forward it upstream. See module header.
+    if (name === "referer") continue;
     if (name === "host") continue;
     if (isForwardedIdentity(name)) continue;
     out.append(rawName, value);

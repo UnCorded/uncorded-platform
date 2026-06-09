@@ -24,6 +24,7 @@ describe("sanitizeRequestHeaders", () => {
     inbound.set("cookie", "uncorded-proxy-x-app=tok; app=1");
     inbound.set("host", "central.uncorded.app");
     inbound.set("transfer-encoding", "chunked");
+    inbound.set("referer", "https://central.uncorded.app/proxy-open/x/app?ticket=secret");
     inbound.set("x-forwarded-for", "1.2.3.4");
     inbound.set("x-uncorded-user-id", "attacker");
 
@@ -33,6 +34,8 @@ describe("sanitizeRequestHeaders", () => {
     expect(out.get("content-type")).toBe("application/json");
     expect(out.get("authorization")).toBeNull();
     expect(out.get("transfer-encoding")).toBeNull();
+    // Referer is stripped — it can carry the /proxy-open handoff ticket.
+    expect(out.get("referer")).toBeNull();
 
     // Forwarded identity is runtime-owned, not client-supplied.
     expect(out.get("host")).toBe("upstream.internal:30000");

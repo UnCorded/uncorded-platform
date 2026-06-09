@@ -374,12 +374,13 @@ describe("GET /proxy-open/:slug/:mount", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
   });
 
-  test("the open ticket reflects the LIVE approval version after re-approval", async () => {
+  test("a stale ticket minted before a re-approval is rejected (cannot mint a fresh session)", async () => {
     h = setup();
-    const openUrl = await bootstrapOpenUrl();
+    const openUrl = await bootstrapOpenUrl(); // ticket bound to approval_version 1
 
-    // Re-approve → approval_version becomes 2. A cookie minted by the handoff
-    // must carry the NEW version (resolveMount re-reads it), so it still works.
+    // Re-approve → approval_version becomes 2. The pre-existing ticket is now
+    // stale; exchanging it for a fresh 1-hour session would let a member who
+    // grabbed a ticket before the change ride the new approval. Must fail closed.
     const norm = normalizeUpstream(h.upstreamOrigin);
     if (!norm.ok) throw new Error("normalize failed");
     h.approvals.upsert({
@@ -395,12 +396,18 @@ describe("GET /proxy-open/:slug/:mount", () => {
     });
 
     const res = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(res.headers.get("set-cookie")).toBeNull(); // minted nothing
+    expect(await res.text()).toContain("no longer valid");
+  });
+
+  test("the 302 carries Referrer-Policy: no-referrer so the ticket URL never leaks as Referer", async () => {
+    h = setup();
+    const openUrl = await bootstrapOpenUrl();
+    const res = await fetch(`${h.baseUrl}${openUrl}`, { redirect: "manual" });
     expect(res.status).toBe(302);
-    const proxied = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
-      headers: { Cookie: cookiePair(res.headers.get("set-cookie")) },
-    });
-    // Fresh cookie carries approval_version 2 → not stale.
-    expect(proxied.status).toBe(200);
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   test("renders the HTML error page when the mount is no longer approved", async () => {
@@ -557,6 +564,7 @@ describe("Phase 2: request header policy", () => {
       headers: {
         Cookie: `${cookie}; app_session=keepme`,
         Authorization: "Bearer member-token",
+        Referer: `${h.baseUrl}/proxy-open/${SLUG}/app?ticket=leaky-ticket`,
         "x-forwarded-for": "1.2.3.4",
         "x-forwarded-proto": "https",
         "x-uncorded-user-id": "attacker",
@@ -569,6 +577,8 @@ describe("Phase 2: request header policy", () => {
 
     // Runtime credentials never reach the upstream.
     expect(echo.headers["authorization"]).toBeUndefined();
+    // Referer is stripped so a /proxy-open handoff ticket can't leak upstream.
+    expect(echo.headers["referer"]).toBeUndefined();
     // Connection-listed token is dropped as dynamic hop-by-hop. (The transport's
     // own `connection` header is re-added by the fetch client on the upstream
     // hop and is not one of ours.)

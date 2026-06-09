@@ -500,8 +500,7 @@ export async function handleProxyOpen(
   }
 
   // Re-resolve against current state: the mount must still exist, be approved,
-  // and have a valid upstream. The minted cookie carries the LIVE approval
-  // version so a re-approval since the ticket was issued is reflected.
+  // and have a valid upstream.
   const resolved = resolveMount(deps, slug, mountName);
   if (!resolved.ok) {
     return proxyOpenErrorPage(
@@ -509,6 +508,18 @@ export async function handleProxyOpen(
     );
   }
   const { approval } = resolved.value;
+
+  // The ticket is bound to the approval version in effect when the bootstrap
+  // owner/access gate passed. If the mount has been re-approved since (which
+  // also covers an access-policy change to owner-only, since that drifts the
+  // mount definition and forces re-approval), a stale ticket must NOT be
+  // exchanged for a fresh live session — re-run the bootstrap instead. This
+  // mirrors the forwarder's own stale-cookie check.
+  if (verified.claims.approvalVersion !== approval.approval_version) {
+    return proxyOpenErrorPage(
+      "This link is no longer valid because the proxy mount changed. Re-open the plugin panel and try again.",
+    );
+  }
 
   const token = mintProxySession(
     {
@@ -524,7 +535,13 @@ export async function handleProxyOpen(
   const secure = isSecureRequest(request);
   const response = new Response(null, {
     status: 302,
-    headers: { Location: `/proxy/${slug}/${mountName}/` },
+    headers: {
+      Location: `/proxy/${slug}/${mountName}/`,
+      // Keep the ticket URL (this request's URL) out of the Referer the browser
+      // would otherwise attach to the redirected /proxy request. Belt-and-braces
+      // with the forwarder stripping Referer; this stops the leak at the source.
+      "Referrer-Policy": "no-referrer",
+    },
   });
   response.headers.append("Set-Cookie", buildProxySetCookie(slug, mountName, token, secure, PROXY_SESSION_TTL_SECONDS));
   return response;
