@@ -42,20 +42,21 @@ describe("matchesChannel", () => {
     expect(matchesChannel("1.0.0-dev.1", "stable")).toBe(false);
   });
 
-  test("test channel admits stable + -test.N (not -rc/-dev)", () => {
-    expect(matchesChannel("1.0.0", "test")).toBe(true);
+  test("test channel admits ONLY -test.N (not stable/-rc/-dev)", () => {
     expect(matchesChannel("1.0.0-test", "test")).toBe(true);
     expect(matchesChannel("1.0.0-test.3", "test")).toBe(true);
+    expect(matchesChannel("1.0.0", "test")).toBe(false);
     expect(matchesChannel("1.0.0-rc.1", "test")).toBe(false);
     expect(matchesChannel("1.0.0-dev.1", "test")).toBe(false);
   });
 
-  test("dev channel admits everything that parses as a version", () => {
-    expect(matchesChannel("1.0.0", "dev")).toBe(true);
-    expect(matchesChannel("1.0.0-test.1", "dev")).toBe(true);
-    expect(matchesChannel("1.0.0-rc.1", "dev")).toBe(true);
+  test("dev channel admits ONLY -dev.N (not stable/-test/-rc)", () => {
+    expect(matchesChannel("1.0.0-dev", "dev")).toBe(true);
     expect(matchesChannel("1.0.0-dev.1", "dev")).toBe(true);
-    expect(matchesChannel("1.0.0-anything.42", "dev")).toBe(true);
+    expect(matchesChannel("1.0.0", "dev")).toBe(false);
+    expect(matchesChannel("1.0.0-test.1", "dev")).toBe(false);
+    expect(matchesChannel("1.0.0-rc.1", "dev")).toBe(false);
+    expect(matchesChannel("1.0.0-anything.42", "dev")).toBe(false);
   });
 
   test("garbage is rejected on every channel", () => {
@@ -159,13 +160,14 @@ describe("resolveLatestVersion", () => {
     expect(result).toBe("0.1.5");
   });
 
-  test("filters by channel: stable rejects test tags", async () => {
+  test("filters by channel: stable rejects test AND dev tags", async () => {
     const result = await resolveLatestVersion({
       channel: "stable",
       currentVersion: "0.1.0",
       fetchImpl: fetchReturning(
         jsonResponse([
           { tag_name: "runtime-0.2.0-test.1", draft: false, prerelease: true },
+          { tag_name: "runtime-0.3.0-dev.1", draft: false, prerelease: true },
           { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
         ]),
       ),
@@ -173,37 +175,57 @@ describe("resolveLatestVersion", () => {
     expect(result).toBe("0.1.5");
   });
 
-  test("filters by channel: test accepts both stable and -test.N", async () => {
+  test("filters by channel: test accepts ONLY -test.N (not stable/dev/rc)", async () => {
     const result = await resolveLatestVersion({
       channel: "test",
       currentVersion: "0.1.0",
       fetchImpl: fetchReturning(
         jsonResponse([
           { tag_name: "runtime-0.2.0-test.3", draft: false, prerelease: true },
-          { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
+          { tag_name: "runtime-0.9.0", draft: false, prerelease: false },
+          { tag_name: "runtime-0.9.0-dev.1", draft: false, prerelease: true },
           { tag_name: "runtime-0.2.0-rc.1", draft: false, prerelease: true },
         ]),
       ),
     });
-    // 0.2.0-test.3 > 0.1.5 (main triple wins), and -rc.1 is filtered out.
+    // Only -test.N survives the filter, so the higher stable/dev/rc tags are
+    // invisible and 0.2.0-test.3 wins its own lane.
     expect(result).toBe("0.2.0-test.3");
   });
 
-  test("filters by channel: dev accepts everything", async () => {
+  test("filters by channel: dev accepts ONLY -dev.N (not stable/test/rc)", async () => {
     const result = await resolveLatestVersion({
       channel: "dev",
       currentVersion: "0.1.0",
       fetchImpl: fetchReturning(
         jsonResponse([
           { tag_name: "runtime-0.2.0-dev.5", draft: false, prerelease: true },
-          { tag_name: "runtime-0.1.5", draft: false, prerelease: false },
-          { tag_name: "runtime-0.2.0-test.1", draft: false, prerelease: true },
+          { tag_name: "runtime-0.9.0", draft: false, prerelease: false },
+          { tag_name: "runtime-0.9.0-test.1", draft: false, prerelease: true },
+          { tag_name: "runtime-0.2.0-rc.1", draft: false, prerelease: true },
         ]),
       ),
     });
-    // 0.2.0-test.1 ordering vs 0.2.0-dev.5: alphanumeric "test" > "dev"
-    // by ASCII (semver section 11.4.4). The newest on dev channel is test.1.
-    expect(result).toBe("0.2.0-test.1");
+    // Strict isolation: only -dev.N is visible to a dev client, so the higher
+    // stable/test/rc tags are filtered out and 0.2.0-dev.5 wins its own lane.
+    expect(result).toBe("0.2.0-dev.5");
+  });
+
+  test("dev channel on dev.39 resolves to dev.40, NOT a higher-sorting test.N", async () => {
+    // Regression guard for the lived bug: 0.1.0-test.1 sorts above
+    // 0.1.0-dev.40 by semver prerelease ordering, but with strict channels a
+    // dev client must never cross into the test lane. It stays on dev.40.
+    const result = await resolveLatestVersion({
+      channel: "dev",
+      currentVersion: "0.1.0-dev.39",
+      fetchImpl: fetchReturning(
+        jsonResponse([
+          { tag_name: "runtime-0.1.0-dev.40", draft: false, prerelease: true },
+          { tag_name: "runtime-0.1.0-test.1", draft: false, prerelease: true },
+        ]),
+      ),
+    });
+    expect(result).toBe("0.1.0-dev.40");
   });
 
   test("ignores non-runtime tags (e.g. desktop vX.Y.Z)", async () => {
@@ -234,18 +256,21 @@ describe("resolveLatestVersion", () => {
     expect(result).toBe("1.10.0");
   });
 
-  test("stable > prerelease at same main triple (semver §11.4)", async () => {
+  test("within a lane, numeric prerelease ordering: dev.10 > dev.9", async () => {
+    // Strict channels mean every candidate shares a suffix shape, so the
+    // load-bearing comparison is now same-lane numeric prerelease ordering.
+    // dev.10 must beat dev.9 numerically (not lexicographically).
     const result = await resolveLatestVersion({
       channel: "dev",
-      currentVersion: "0.9.0",
+      currentVersion: "1.0.0-dev.1",
       fetchImpl: fetchReturning(
         jsonResponse([
-          { tag_name: "runtime-1.0.0-test.5", draft: false, prerelease: true },
-          { tag_name: "runtime-1.0.0", draft: false, prerelease: false },
+          { tag_name: "runtime-1.0.0-dev.9", draft: false, prerelease: true },
+          { tag_name: "runtime-1.0.0-dev.10", draft: false, prerelease: true },
         ]),
       ),
     });
-    expect(result).toBe("1.0.0");
+    expect(result).toBe("1.0.0-dev.10");
   });
 
   test("non-200, non-404 response throws so caller surfaces error state", async () => {

@@ -15,10 +15,16 @@
 // tags coexist on the same repo without cross-talk — `stripRuntimeTag`
 // returns null for any tag missing the prefix.
 //
-// Channel filter:
-//   stable: tag matches /^runtime-\d+\.\d+\.\d+$/
-//   test:   stable | /^runtime-\d+\.\d+\.\d+-test(\.\d+)?$/
-//   dev:    any /^runtime-/ (rc / dev / test / nightly variants all included)
+// Channel filter — strict isolation, NO tier inheritance. A client only
+// ever sees releases tagged for its own channel:
+//   stable: /^runtime-\d+\.\d+\.\d+$/             (no prerelease suffix)
+//   test:   /^runtime-\d+\.\d+\.\d+-test(\.\d+)?$/
+//   dev:    /^runtime-\d+\.\d+\.\d+-dev(\.\d+)?$/
+// A dev client is NOT offered test or stable builds; a test client is NOT
+// offered dev or stable builds. Channels are lanes, not tiers — to move
+// between them the operator switches channel explicitly. (This is why a
+// dev user on 0.1.0-dev.39 resolves to 0.1.0-dev.40 and never jumps to a
+// 0.1.0-test.N that happens to sort higher.)
 //
 // Returns null when no published version is greater than the current one
 // (i.e. the operator is already up-to-date on this channel). Throws on
@@ -96,18 +102,18 @@ function comparePreRelease(a: string, b: string): number {
   return 0;
 }
 
-/** True iff `version` (e.g. "0.2.0", "0.2.0-test.1") is published on the
- *  channel — used so e.g. dev-channel users can see test + stable + dev
- *  versions, but stable-channel users only see stable releases. */
+/** True iff `version` (e.g. "0.2.0", "0.2.0-test.1") belongs to `channel`.
+ *  Channels are isolated lanes, not nested tiers: stable matches only plain
+ *  X.Y.Z, test matches only `-test.N`, dev matches only `-dev.N`. A dev
+ *  client is never offered a test or stable build, and vice versa. */
 export function matchesChannel(
   version: string,
   channel: RuntimeUpdateChannel,
 ): boolean {
   if (!/^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/.test(version)) return false;
-  const isStable = !version.includes("-");
-  if (channel === "stable") return isStable;
-  if (channel === "test") return isStable || /-test(\.\d+)?$/.test(version);
-  return true; // dev: everything that parses as a version
+  if (channel === "stable") return !version.includes("-");
+  if (channel === "test") return /-test(\.\d+)?$/.test(version);
+  return /-dev(\.\d+)?$/.test(version); // dev: dev-tagged builds only
 }
 
 /** Strip the `runtime-` prefix from a release tag, returning null if the
