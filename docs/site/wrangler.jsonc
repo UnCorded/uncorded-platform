@@ -1,0 +1,13 @@
+{
+  // Assets-only Worker (no script) that serves the built VitePress site.
+  // Cloudflare's "Workers Builds" git integration runs `bun run build` then
+  // `npx wrangler deploy` from this directory (the configured Root directory),
+  // so `assets.directory` is relative to docs/site.
+  "name": "docs",
+  "compatibility_date": "2025-06-06",
+  "assets": {
+    "directory": "./.vitepress/dist",
+    // VitePress emits a real 404.html; serve it for unknown paths.
+    "not_found_handling": "404-page"
+  }
+}

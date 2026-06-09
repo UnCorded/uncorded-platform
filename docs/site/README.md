@@ -13,24 +13,29 @@ bun run dev        # http://localhost:5173
 bun run build      # outputs .vitepress/dist
 ```
 
-## Cloudflare Pages settings
+## Cloudflare Workers Builds settings
 
-Create once (Workers & Pages → Create → Pages → Connect to Git →
-`UnCorded/uncorded-platform`), then it auto-deploys on push:
+Deployed as an **assets-only Worker** via Cloudflare's Workers Builds git
+integration (Workers & Pages → Create → Workers → Connect to Git →
+`UnCorded/uncorded-platform`). Auto-deploys on push to `main`:
 
 | Setting | Value |
 | --- | --- |
 | Production branch | `main` |
 | Root directory | `docs/site` |
 | Build command | `bun run build` |
-| Build output directory | `.vitepress/dist` |
+| Deploy command | `npx wrangler deploy` |
 | Env var | `NODE_VERSION = 20` |
 
-- A committed `bun.lock` makes Cloudflare use Bun for install automatically.
-- Custom domain: add `docs.uncorded.app` under the Pages project's **Custom
-  domains** (DNS is already on Cloudflare, so the CNAME is created for you).
-- Do **not** enable HTML "Auto Minify" — it strips the comments VitePress/Vue
-  need for hydration.
+The Worker name, compatibility date, and the assets directory
+(`./.vitepress/dist`) come from [`wrangler.jsonc`](./wrangler.jsonc) — that file
+is what makes `wrangler deploy` deterministic (otherwise it auto-guesses the
+output dir and gets it wrong). A committed `bun.lock` makes the install step
+use Bun automatically.
+
+- Custom domain: add `docs.uncorded.app` to the `docs` Worker under
+  **Settings → Domains & Routes** (DNS is already on Cloudflare, so the record
+  is created for you).
 
 ## Adding pages
 
