@@ -100,4 +100,9 @@ export const IPC = {
   // Plugin file downloads — main calls webContents.downloadURL() directly
   // so the Linux popup-intercept failure mode is bypassed entirely.
   DOWNLOADS_START: "desktop:downloads:start",
+
+  // Reverse-proxy <webview> guest registration — the renderer registers each
+  // host-owned proxy surface as its webview attaches so main can pin the
+  // guest's navigation to its mount and gate its permission requests.
+  PROXY_GUEST_REGISTER: "proxy:guest-register",
 } as const satisfies IpcChannelMap;
