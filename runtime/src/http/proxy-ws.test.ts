@@ -390,6 +390,40 @@ describe("proxy WebSocket bridge", () => {
     expect(rt.routerCalls()).toBe(0);
   });
 
+  test("a mount's max_frame_bytes raises the cap and relays a larger frame", async () => {
+    const up = newUpstream();
+    const rt = setupRuntime(up.origin, {
+      mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 256 * 1024 }],
+    });
+    const cookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    const ws = new WsClient(wsUrl(rt.port), { headers: { Cookie: cookie } });
+    await waitOpen(ws);
+
+    // 70 KiB would close at the 64 KiB default, but this mount allows 256 KiB —
+    // the frame must be relayed and echoed back intact.
+    const payload = "x".repeat(70 * 1024);
+    ws.send(payload);
+    expect(await nextFrame(ws)).toBe(payload);
+    ws.close();
+  });
+
+  test("a mount's max_frame_bytes still closes 1009 above its raised cap", async () => {
+    const up = newUpstream();
+    const rt = setupRuntime(up.origin, {
+      mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 256 * 1024 }],
+    });
+    const cookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    const ws = new WsClient(wsUrl(rt.port), { headers: { Cookie: cookie } });
+    await waitOpen(ws);
+
+    // 300 KiB > this mount's 256 KiB cap → 1009.
+    ws.send("x".repeat(300 * 1024));
+    const close = await nextClose(ws);
+    expect(close.code).toBe(1009);
+  });
+
   test("propagates an upstream close (code) to the client", async () => {
     const up = newUpstream();
     const rt = setupRuntime(up.origin);
