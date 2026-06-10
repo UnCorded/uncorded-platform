@@ -360,6 +360,12 @@ authenticated by session cookie, like Foundry's, sees its session), any
 `X-Forwarded-Prefix`. You don't configure any of this; it mirrors the HTTP path
 automatically.
 
+> **Token auth over WebSockets:** browsers can't set an `Authorization` header on
+> a `WebSocket()` — so token-auth realtime apps pass the token in the connection
+> URL's query string or a `Sec-WebSocket-Protocol` subprotocol. Both pass through
+> the proxy untouched. (The forwarded `Authorization` above covers non-browser ws
+> clients and server-to-server sockets.)
+
 > **Origin checks:** the runtime composes the upstream socket itself, so a WS
 > server that enforces a strict `Origin` allowlist (some `socket.io` configs,
 > Jupyter) may need the upstream's own origin allowed. Most apps authenticate the
