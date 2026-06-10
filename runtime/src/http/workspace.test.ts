@@ -139,7 +139,6 @@ const VALID_LAYOUT: WorkspaceLayout = {
     "panel-1": {
       type: "plugin",
       serverId: "srv1",
-      tunnelUrl: "https://example.com",
       slug: "text-channels",
       itemId: "ch1",
       itemLabel: "general",

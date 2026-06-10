@@ -105,7 +105,11 @@ export type PanelContent =
   | {
       type: "plugin";
       serverId: string;
-      tunnelUrl: string;
+      // No tunnelUrl: panels resolve the live tunnel URL from the reactive
+      // servers() store by serverId at render time (see channel-view.tsx).
+      // Persisting it by value froze a dead URL across tunnel rotation. Old
+      // saved layouts may still carry the field; the runtime validator
+      // tolerates and drops it (runtime/src/core/layout.ts).
       slug: string;
       itemId: string;
       itemLabel: string;

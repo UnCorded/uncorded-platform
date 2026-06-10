@@ -9,7 +9,6 @@ const validSinglePanel: WorkspaceLayout = {
     p1: {
       type: "plugin",
       serverId: "srv1",
-      tunnelUrl: "https://example.com",
       slug: "text-channels",
       itemId: "ch1",
       itemLabel: "general",
@@ -31,7 +30,6 @@ const validSplitLayout: WorkspaceLayout = {
     p1: {
       type: "plugin",
       serverId: "srv1",
-      tunnelUrl: "https://example.com",
       slug: "text-channels",
       itemId: "ch1",
       itemLabel: "general",
@@ -39,7 +37,6 @@ const validSplitLayout: WorkspaceLayout = {
     p2: {
       type: "plugin",
       serverId: "srv1",
-      tunnelUrl: "https://example.com",
       slug: "text-channels",
       itemId: "ch2",
       itemLabel: "random",
@@ -73,6 +70,28 @@ describe("validateLayout", () => {
 
   it("accepts a valid split layout", () => {
     expect(validateLayout(validSplitLayout)).toEqual({ ok: true });
+  });
+
+  it("tolerates a legacy plugin panel that still carries tunnelUrl", () => {
+    // Back-compat: tunnelUrl was dropped from PanelContent (panels now resolve
+    // the URL live by serverId), but layouts saved before that change still
+    // carry the field. The validator must tolerate-and-ignore it rather than
+    // reject the whole layout — the field disappears on the next re-save.
+    const legacy = {
+      version: 1,
+      root: { type: "leaf", id: "p1" },
+      panels: {
+        p1: {
+          type: "plugin",
+          serverId: "srv1",
+          tunnelUrl: "https://example.com",
+          slug: "text-channels",
+          itemId: "ch1",
+          itemLabel: "general",
+        },
+      },
+    };
+    expect(validateLayout(legacy)).toEqual({ ok: true });
   });
 
   it("accepts a valid tabbed browser layout", () => {

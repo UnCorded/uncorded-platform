@@ -109,7 +109,6 @@ function shallowEqualPanel(a: PanelContent, b: PanelContent): boolean {
   if (a.type !== b.type) return false;
   if (a.type === "plugin" && b.type === "plugin") {
     return a.serverId === b.serverId
-      && a.tunnelUrl === b.tunnelUrl
       && a.slug === b.slug
       && a.itemId === b.itemId
       && a.itemLabel === b.itemLabel
@@ -399,7 +398,6 @@ function App() {
         next[leafId] = {
           type: "plugin",
           serverId: content.serverId,
-          tunnelUrl: content.tunnelUrl,
           slug: content.slug,
           itemId: content.itemId,
           itemLabel: fresh.label,
@@ -1008,7 +1006,6 @@ function App() {
     const content: PanelContent = {
       type: "plugin",
       serverId: server.id,
-      tunnelUrl: server.tunnel_url,
       slug: item.slug,
       itemId: item.id,
       itemLabel: item.label,
@@ -1276,7 +1273,6 @@ function App() {
     const content: PanelContent = {
       type: "plugin",
       serverId: server.id,
-      tunnelUrl: server.tunnel_url,
       slug: item.slug,
       itemId: item.id,
       itemLabel: item.label,

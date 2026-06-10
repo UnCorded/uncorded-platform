@@ -21,11 +21,15 @@ const RATIO_MAX = 1.0;
 const MAX_DEPTH = 32;
 const REQUIRED_STRING_FIELDS: { field: string; maxLen: number }[] = [
   { field: "serverId", maxLen: 128 },
-  { field: "tunnelUrl", maxLen: 512 },
   { field: "slug", maxLen: 64 },
   { field: "itemId", maxLen: 128 },
   { field: "itemLabel", maxLen: 256 },
 ];
+// `tunnelUrl` is no longer part of PanelContent — panels resolve the live URL by
+// serverId at render time. It stays in the allowed-keys set (but out of
+// REQUIRED_STRING_FIELDS) purely for back-compat: layouts saved before the
+// change still carry it, and we tolerate-and-ignore it rather than reject the
+// whole layout. It vanishes the next time the layout is re-saved.
 const PLUGIN_ALLOWED_KEYS = new Set(["type", "serverId", "tunnelUrl", "slug", "itemId", "itemLabel", "itemIcon"]);
 const BROWSER_LEGACY_ALLOWED_KEYS = new Set(["type", "url", "title"]);
 const BROWSER_TABBED_ALLOWED_KEYS = new Set(["type", "tabs", "activeTabId", "recent"]);

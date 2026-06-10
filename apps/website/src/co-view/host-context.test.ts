@@ -63,7 +63,6 @@ describe("host controller — basics", () => {
     const content = {
       type: "plugin" as const,
       serverId: "srv",
-      tunnelUrl: "https://srv.example",
       slug: "text-channels",
       itemId: "ch-1",
       itemLabel: "general",

@@ -5,8 +5,8 @@
 // A reverse-proxy plugin iframe calls `sdk.proxy.reserveMount(mount, el)`, which
 // reports the placeholder's rect to the shell via `platform.proxy.*-viewport`
 // envelopes. PluginFrame (channel-view.tsx) routes those here, supplying the
-// trusted identity (serverId, slug, tunnelUrl, frameKey, iframe) from its own
-// closure — never from the untrusted payload — plus the validated mount name
+// trusted identity (serverId, slug, frameKey, iframe) from its own closure —
+// never from the untrusted payload — plus the validated mount name
 // and rect. The proxy-mount overlay renders one host-owned surface (a dedicated
 // Electron <webview> on desktop, a sandboxed <iframe> on web) per entry,
 // positioned over the reported rect.
@@ -34,7 +34,6 @@ export interface ProxyMountEntry {
   iframe: HTMLIFrameElement;
   serverId: string;
   slug: string;
-  tunnelUrl: string;
   mountName: string;
   /** Iframe-local rect reported by the plugin; mutated in place on update. */
   rect: ViewportRect;
@@ -88,7 +87,6 @@ export function register(input: {
   iframe: HTMLIFrameElement;
   serverId: string;
   slug: string;
-  tunnelUrl: string;
   mountName: string;
   rect: ViewportRect;
 }): void {
