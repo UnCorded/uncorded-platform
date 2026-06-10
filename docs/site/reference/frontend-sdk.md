@@ -154,16 +154,35 @@ once the upload lands, so the backend can record it in its own DB.
 
 ## proxy
 
+Two ways to render a proxied mount. They differ in **who owns the surface** —
+your iframe, or the shell. Pick one per panel; don't combine them for the same
+mount. Full guide, including which to choose: [Reverse-proxy plugins](/sdk/reverse-proxy#two-ways-to-render-a-mount).
+
 ```ts
 sdk.proxy.openMount(mount: string): Promise<{ iframeUrl: string; openUrl: string }>
 ```
 
-Bootstrap a manifest [`proxy_mounts`](/reference/manifest#proxy_mounts) entry:
-mints the proxy-session cookie and returns `iframeUrl` (set as a nested iframe
-`src`) and `openUrl` (an "Open in browser" fallback, required under Safari ITP).
-Throws [`ProxyError`](#errors) (`NOT_FOUND`, `NOT_APPROVED`, `FORBIDDEN`,
-`UNAUTHORIZED`, `RATE_LIMITED`, …). Full guide:
-[Reverse-proxy plugins](/sdk/reverse-proxy).
+**Self-embed.** *Your* panel owns a nested `<iframe>`. Bootstraps a manifest
+[`proxy_mounts`](/reference/manifest#proxy_mounts) entry: mints the proxy-session
+cookie and returns `iframeUrl` (set as the iframe `src`) and `openUrl` (an "Open
+in browser" fallback, required under Safari ITP). Same render on desktop and web.
+Fails when the upstream blocks framing (`X-Frame-Options: DENY` /
+restrictive `frame-ancestors` CSP). Throws [`ProxyError`](#errors) (`NOT_FOUND`,
+`NOT_APPROVED`, `FORBIDDEN`, `UNAUTHORIZED`, `RATE_LIMITED`, …).
+
+```ts
+sdk.proxy.reserveMount(mount: string, el: HTMLElement): () => void
+```
+
+**Host-owned surface.** The *shell* renders the proxied app over a placeholder
+element you supply: a dedicated, hardened Electron `<webview>` on **desktop**
+(escapes `X-Frame-Options`/`frame-ancestors`, isolated per-server session, native
+permission prompts), a sandboxed `<iframe>` on **web**. You pass the placeholder;
+the SDK reports its layout rect to the shell (rAF-coalesced, tracks scroll/resize)
+and the shell bootstraps the session and positions the surface over it. Synchronous
+— it returns an **idempotent dispose function**; call it (or let the panel unmount)
+to release the viewport. Bootstrap/`ProxyError` failures surface in the shell-owned
+surface (e.g. an "Open in browser" prompt on web), not as a throw here.
 
 ## platform
 

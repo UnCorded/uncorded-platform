@@ -12,8 +12,11 @@ The proxy is **runtime-owned**. Your plugin never proxies bytes itself. You:
 1. **Declare** one or more `proxy_mounts` in the manifest, each pointing at a
    setting that holds the upstream URL.
 2. **Surface** a sidebar item from the backend (a few lines — no proxy logic).
-3. **Open** the mount from the frontend panel: call `sdk.proxy.openMount(name)`,
-   get back `{ iframeUrl, openUrl }`, and point an `<iframe>` at `iframeUrl`.
+3. **Render** the mount from the frontend panel. Two choices, covered in
+   [Two ways to render a mount](#two-ways-to-render-a-mount): let the **host**
+   render it in its own surface — `sdk.proxy.reserveMount(name, el)`, a hardened
+   `<webview>` on desktop / sandboxed `<iframe>` on web — or **self-embed** a
+   nested iframe yourself — `sdk.proxy.openMount(name)`.
 
 The runtime handles approval gating, session cookies, access policy, and the
 actual HTTP/WebSocket forwarding under `/proxy/<slug>/<mount>/*`.
@@ -23,7 +26,7 @@ manifest proxy_mount ──▶ owner approves ──▶ runtime serves upstream
    (upstream_setting)     (Server settings)    /proxy/<slug>/<mount>/*
         │                                              ▲
         ▼                                              │
-   backend: sidebar item ──▶ frontend: sdk.proxy.openMount() ──▶ iframe.src
+   backend: sidebar item ──▶ frontend: reserveMount() / openMount()
 ```
 
 > The backend SDK has **no** proxy API. Don't look for `createProxyMount()` —
@@ -156,8 +159,42 @@ That means:
 
 ## 3. Frontend
 
-The panel HTML loads the frontend SDK, opens the mount, and points an iframe at
-the result. Adapted from [`plugins/foundry-vtt/frontend`](https://github.com/UnCorded/uncorded-platform/tree/main/plugins/foundry-vtt/frontend):
+The panel HTML loads the frontend SDK and renders the mount. **First decide how
+the proxied app is rendered** — that choice drives the rest of the panel.
+
+### Two ways to render a mount
+
+`sdk.proxy` offers two render models, differing in **who owns the surface** the
+upstream loads into. Use one per panel.
+
+| | `openMount` — self-embed | `reserveMount` — host-owned surface |
+| --- | --- | --- |
+| Who renders | **your** panel owns a nested `<iframe>` | the **shell** renders the surface; you only reserve a rect |
+| Desktop (Electron) | a nested `<iframe>` | a dedicated **hardened `<webview>`** — escapes `X-Frame-Options`/`frame-ancestors`, isolated per-server session, native permission prompts, navigation pinned to the mount |
+| Web (browser) | a nested `<iframe>` | a host-owned **sandboxed `<iframe>`** + "Open in browser" fallback |
+| Framing-hostile upstream (`X-Frame-Options: DENY`, strict `frame-ancestors`) | ❌ won't load (especially on desktop) | ✅ loads on desktop; web shows the open-in-browser prompt |
+| You get back | `{ iframeUrl, openUrl }` (async) | an idempotent dispose function (sync) |
+| Failures | throws `ProxyError` you handle | surfaced in the shell-owned UI |
+
+**Which to use:**
+
+- Reach for **`reserveMount`** when the upstream refuses to be framed, when you
+  want camera/mic/location behind a real permission prompt, or simply to get the
+  best desktop experience. This is the recommended default for "load a whole
+  self-hosted app" panels (Foundry VTT, dashboards, admin panels).
+- Reach for **`openMount`** when you want your panel to own the iframe directly —
+  to overlay your own chrome, read load events, or embed a cooperative app that
+  frames fine. Simpler, but desktop gets a plain iframe and a framing-hostile
+  upstream won't load.
+
+Both honor the same manifest, permissions, and [approval](#approval-mounts-fail-closed);
+only the render surface differs. The runtime routes and headers in sections 5–7
+below apply identically to both.
+
+### Option A — self-embed with `openMount`
+
+*Your* panel owns a nested iframe, sets its `src`, and shows an "Open in browser"
+fallback. Adapted from [`plugins/foundry-vtt/frontend`](https://github.com/UnCorded/uncorded-platform/tree/main/plugins/foundry-vtt/frontend):
 
 ```html
 <!-- frontend/index.html -->
@@ -194,9 +231,7 @@ the result. Adapted from [`plugins/foundry-vtt/frontend`](https://github.com/UnC
 </body>
 ```
 
-### `sdk.proxy.openMount(name)`
-
-Returns a `ProxyMountSession`:
+`sdk.proxy.openMount(name)` returns a `ProxyMountSession`:
 
 | Field | Use |
 | --- | --- |
@@ -205,6 +240,61 @@ Returns a `ProxyMountSession`:
 
 Always render the `openUrl` affordance. It's the only path that works when the
 framed cookie is blocked.
+
+### Option B — host-owned surface with `reserveMount`
+
+The **shell** renders the proxied app — a hardened `<webview>` on desktop, a
+sandboxed `<iframe>` on web — over a placeholder element you reserve. Your panel
+never sets a `src`; it lays out a box and hands it to the SDK.
+
+```html
+<!-- frontend/index.html -->
+<body>
+  <!-- The shell paints the proxied app over this element's rect. Give it a real
+       size (here it fills the panel); the SDK reports its layout to the shell. -->
+  <div id="mount" style="position:absolute; inset:0;"></div>
+
+  <!-- Served by the runtime; do not bundle it yourself. -->
+  <script src="/sdk/plugin-frontend.js"></script>
+  <script type="module">
+    const MOUNT = "demo"; // must equal a proxy_mounts[].name
+
+    const sdk = await window.UncodedPlugin.createPluginFrontend();
+    const el = document.getElementById("mount");
+
+    // The shell bootstraps the session and positions the surface over `el`.
+    // Returns an idempotent dispose fn that releases the viewport.
+    const release = sdk.proxy.reserveMount(MOUNT, el);
+
+    // Optional: release on teardown. The shell also cleans up when the iframe is
+    // destroyed, so this is belt-and-suspenders.
+    window.addEventListener("pagehide", () => release(), { once: true });
+  </script>
+</body>
+```
+
+`reserveMount(name, el)` is **synchronous** and returns an idempotent dispose
+function — there's no session object to read, because the shell owns the surface.
+Pass a non-empty mount name (it throws `ProxyError("INVALID_ARGUMENT")` otherwise);
+all other failures (bootstrap, not-approved, framing) surface in the shell-owned
+UI, not as a throw here. What the shell does for you, by platform:
+
+| | Desktop (Electron) | Web (browser) |
+| --- | --- | --- |
+| Surface | dedicated hardened `<webview>` | host-owned sandboxed `<iframe>` |
+| Framing-hostile upstream | loads — a webview isn't bound by `X-Frame-Options`/`frame-ancestors` | can't be framed → shows an **Open in browser** prompt |
+| Session isolation | own per-server partition (`persist:proxy:<serverId>`), separate cookie jar from the in-app browser | the browser's normal cookie rules; bootstrap uses the first-party path |
+| Camera / mic / location / notifications / MIDI | **native allow/deny dialog**, remembered per mount | the browser's own prompt, subject to the iframe `allow` policy |
+| Off-mount navigation | links to other origins open in the **system browser**, not in-surface | normal sandboxed-iframe behavior |
+| Bootstrap URL | the first-party `openUrl` ticket, so the cookie lands inside the webview partition | the in-place `url`; the bootstrap `Set-Cookie` authorizes it |
+
+You don't choose webview-vs-iframe — the shell picks based on whether it's running
+in the desktop app. The dispose function is the only thing you manage.
+
+> The mount name and the placeholder element are the **only** things your plugin
+> supplies. The shell derives the server, plugin slug, and tunnel origin from the
+> trusted panel context — never from the iframe's messages — and owns the
+> surface's positioning, lifecycle, and teardown.
 
 ### `ProxyError`
 
