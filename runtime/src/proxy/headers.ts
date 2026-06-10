@@ -3,8 +3,9 @@
 // Policy (docs/reverse-proxy/plugin-reverse-proxy-plan.md §Header Policy):
 //   request  — strip hop-by-hop, authorization, cookie, referer, and all
 //              client-supplied x-forwarded-* / x-uncorded-* headers; set
-//              runtime-owned forwarded identity headers; set Host to the upstream
-//              host; attach only the reconstructed mount-scoped upstream Cookie.
+//              runtime-owned forwarded identity headers (including
+//              x-forwarded-prefix, the public mount path); set Host to the
+//              upstream host; attach only the reconstructed mount-scoped Cookie.
 //
 // Referer is stripped because a browser may carry a runtime-internal URL there
 // (notably the /proxy-open handoff URL, which embeds a single-use session
@@ -39,6 +40,14 @@ export interface ForwardedContext {
   forwardedFor: string;
   /** Authenticated principal id (for `x-uncorded-user-id`). */
   userId: string;
+  /**
+   * The public path the app is served under — `/proxy/:slug/:mount`, sent as
+   * `x-forwarded-prefix`. A reverse-proxy-aware upstream can read this to emit
+   * URLs under the mount path instead of root-absolute ones (which would escape
+   * the mount). Apps that don't honor it must set their own route prefix to this
+   * value. See docs/site/sdk/reverse-proxy.md.
+   */
+  forwardedPrefix: string;
 }
 
 /**
@@ -100,6 +109,7 @@ export function sanitizeRequestHeaders(
   out.set("x-forwarded-proto", ctx.forwardedProto);
   out.set("x-forwarded-for", ctx.forwardedFor);
   out.set("x-uncorded-user-id", ctx.userId);
+  out.set("x-forwarded-prefix", ctx.forwardedPrefix);
 
   if (upstreamCookie) out.set("cookie", upstreamCookie);
 

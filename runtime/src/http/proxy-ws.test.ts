@@ -127,7 +127,7 @@ interface SetupOptions {
   /** Skip seeding the approval row. */
   noApproval?: boolean;
   /** Override the upstream connector (tests inject a fake non-opening socket). */
-  connectUpstream?: (url: string, protocols: string[]) => WebSocket;
+  connectUpstream?: (url: string, protocols: string[], headers?: Record<string, string>) => WebSocket;
   /** Per-direction bounded-buffer cap override. */
   maxBufferBytes?: number;
 }
@@ -414,6 +414,85 @@ describe("proxy WebSocket bridge", () => {
     });
     await waitOpen(ws);
     expect(ws.protocol).toBe("chat");
+    ws.close();
+  });
+
+  test("forwards upstream app cookies on the handshake, stripping the proxy-session cookie", async () => {
+    // Regression: cookie-authenticated realtime apps (Foundry et al.) authenticate
+    // their socket by session cookie. The HTTP forwarder carries app cookies; the
+    // WS handshake must too, or the upstream sees no session and reload-loops.
+    const up = newUpstream();
+    let captured: Record<string, string> | undefined;
+    const capturing = (
+      url: string,
+      protocols: string[],
+      headers?: Record<string, string>,
+    ): WebSocket => {
+      captured = headers;
+      return new WebSocket(url, protocols);
+    };
+    const rt = setupRuntime(up.origin, { connectUpstream: capturing });
+    const sessionCookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    // The browser replays BOTH the runtime proxy-session cookie (Path=/) and the
+    // app's own mount-scoped cookies on the upgrade request.
+    const ws = new WsClient(wsUrl(rt.port), {
+      headers: { Cookie: `${sessionCookie}; foundry_session=xyz; sid=42` },
+    });
+    await waitOpen(ws);
+
+    // Upstream sees the app cookies, never the runtime's proxy-session cookie.
+    expect(captured?.cookie).toBe("foundry_session=xyz; sid=42");
+    expect(captured?.cookie ?? "").not.toContain("uncorded-proxy-");
+    ws.close();
+  });
+
+  test("omits the cookie header but still forwards identity context when only the proxy-session cookie is present", async () => {
+    const up = newUpstream();
+    let captured: Record<string, string> | undefined;
+    const capturing = (
+      url: string,
+      protocols: string[],
+      headers?: Record<string, string>,
+    ): WebSocket => {
+      captured = headers;
+      return new WebSocket(url, protocols);
+    };
+    const rt = setupRuntime(up.origin, { connectUpstream: capturing });
+    const sessionCookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    const ws = new WsClient(wsUrl(rt.port), { headers: { Cookie: sessionCookie } });
+    await waitOpen(ws);
+
+    // No app cookies ⇒ no cookie header, but the forwarded identity is still sent.
+    expect(captured?.cookie).toBeUndefined();
+    expect(captured?.["x-uncorded-user-id"]).toBe(MEMBER.id);
+    ws.close();
+  });
+
+  test("forwards x-forwarded-* identity and the mount path as x-forwarded-prefix", async () => {
+    const up = newUpstream();
+    let captured: Record<string, string> | undefined;
+    const capturing = (
+      url: string,
+      protocols: string[],
+      headers?: Record<string, string>,
+    ): WebSocket => {
+      captured = headers;
+      return new WebSocket(url, protocols);
+    };
+    const rt = setupRuntime(up.origin, { connectUpstream: capturing });
+    const cookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    const ws = new WsClient(wsUrl(rt.port), { headers: { Cookie: cookie } });
+    await waitOpen(ws);
+
+    // The handshake carries the same forwarded identity as the HTTP path, plus
+    // the public mount path so a prefix-aware upstream emits correct URLs.
+    expect(captured?.["x-forwarded-prefix"]).toBe(`/proxy/${SLUG}/app`);
+    expect(captured?.["x-uncorded-user-id"]).toBe(MEMBER.id);
+    expect(captured?.["x-forwarded-proto"]).toBe("http");
+    expect(captured?.["x-forwarded-host"]).toContain("localhost");
     ws.close();
   });
 
