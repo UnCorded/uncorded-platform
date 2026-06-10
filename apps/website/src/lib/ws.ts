@@ -24,6 +24,7 @@ import { storeToken, clearToken, getCachedToken } from "./tokens";
 import { bootTrace } from "./boot-trace";
 import { ApiError } from "../api/types";
 import type { Server } from "../api/types";
+import { serverById } from "../stores/servers";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_PENDING_REQUESTS = 100;
@@ -598,6 +599,21 @@ async function openConnectionInner(
   backoff: number,
 ): Promise<void> {
   if (!server.tunnel_url) return;
+
+  // Expired-tunnel gate. A demo tunnel that hit its 24h TTL (WS3) reports
+  // tunnel_state="expired" and the runtime falls its public URL back to a
+  // local one that no remote client can reach. Refuse to dial — and don't
+  // mint a token — so we don't burn reconnect cycles on a dead address; the
+  // active-server view shows the blocking "restart the desktop app" gate
+  // instead. Re-resolve live from the store because the `server` captured by
+  // a pending scheduleReconnect timer can be stale (still "demo"); fall back
+  // to the passed value when the store hasn't loaded it. Detect via
+  // tunnel_state ONLY — never by string-matching the tunnel hostname.
+  const liveState = (serverById(server.id) ?? server).tunnel_state;
+  if (liveState === "expired") {
+    bootTrace("ws.open.expiredGate", { serverId: server.id });
+    return;
+  }
 
   let tokenData: { token: string; expires_at: number };
   // Reuse the cached token across transient reconnects. The cache survives

@@ -83,6 +83,7 @@ function mockTunnelProvider(): TunnelProvider {
     async start() { return "https://test.trycloudflare.com"; },
     async stop() {},
     getUrl() { return "https://test.trycloudflare.com"; },
+    getState() { return "demo"; },
     async healthCheck() { return true; },
   };
 }

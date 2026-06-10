@@ -25,7 +25,6 @@ function baseInput(over: Partial<Parameters<typeof register>[0]> = {}) {
     iframe,
     serverId: "srv-1",
     slug: "foundry-vtt",
-    tunnelUrl: "https://srv-1.tunnel.example",
     mountName: "vtt",
     rect: RECT,
     ...over,

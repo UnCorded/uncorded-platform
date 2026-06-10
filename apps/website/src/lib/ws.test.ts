@@ -113,6 +113,7 @@ function makeServer(id = "srv-err") {
     visibility: "public" as const,
     owner_id: "owner",
     tunnel_url: "https://tunnel.example",
+    tunnel_state: null,
     runtime_version: "1.0.0",
     connected_users: 0,
     plugin_count: 0,
@@ -182,6 +183,41 @@ describe("openConnection error branches", () => {
     await flushPurgeImport();
     expect(purgeServer).not.toHaveBeenCalled();
     wsModule.abortReconnect("srv-net");
+  });
+});
+
+describe("expired-tunnel gate (WS4)", () => {
+  test("connect() refuses to dial or mint a token when tunnel_state is expired", async () => {
+    // No getServerToken mock is programmed; if the gate failed to short-circuit,
+    // the beforeEach default rejection would route through the catch and we'd
+    // see a reconnect scheduled. The gate must return before the token fetch.
+    const server = { ...makeServer("srv-expired"), tunnel_state: "expired" as const };
+    await wsModule.connect(server);
+    expect(FakeWebSocket.instances.length).toBe(0);
+    expect(getServerToken).not.toHaveBeenCalled();
+    // Defensive: nothing should have been scheduled, but clear just in case so
+    // a regression doesn't leak a timer into a sibling test.
+    wsModule.abortReconnect("srv-expired");
+  });
+
+  test("forceReconnect() refuses to dial when tunnel_state is expired", async () => {
+    const server = { ...makeServer("srv-expired-force"), tunnel_state: "expired" as const };
+    await wsModule.forceReconnect(server);
+    expect(FakeWebSocket.instances.length).toBe(0);
+    expect(getServerToken).not.toHaveBeenCalled();
+    wsModule.abortReconnect("srv-expired-force");
+  });
+
+  test("connect() still dials when tunnel_state is demo (not expired)", async () => {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    });
+    FakeWebSocket.autoOpen = true;
+    const server = { ...makeServer("srv-demo"), tunnel_state: "demo" as const };
+    await wsModule.connect(server);
+    expect(FakeWebSocket.instances.length).toBe(1);
+    wsModule.disconnect("srv-demo");
   });
 });
 

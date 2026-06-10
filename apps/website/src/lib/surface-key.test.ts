@@ -23,7 +23,6 @@ afterEach(() => {
 const plugin = (overrides: Partial<Extract<PanelContent, { type: "plugin" }>> = {}): PanelContent => ({
   type: "plugin",
   serverId: "srv-1",
-  tunnelUrl: "https://example.tunnel",
   slug: "text-channels",
   itemId: "item-1",
   itemLabel: "general",
@@ -56,12 +55,6 @@ describe("surfaceKeyOf (plugin)", () => {
   test("itemIcon does not affect key", () => {
     const a = surfaceKeyOf(plugin({ itemIcon: "hash" }));
     const b = surfaceKeyOf(plugin());
-    expect(a).toBe(b);
-  });
-
-  test("tunnelUrl does not affect key (host-level identity)", () => {
-    const a = surfaceKeyOf(plugin({ tunnelUrl: "https://a.tunnel" }));
-    const b = surfaceKeyOf(plugin({ tunnelUrl: "https://b.tunnel" }));
     expect(a).toBe(b);
   });
 

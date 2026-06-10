@@ -46,6 +46,7 @@ import * as proxyMountManager from "@/lib/proxy-mount-manager";
 import * as portalHost from "@/lib/portal-host";
 import { emitPluginPanelFocus, emitPluginPanelOpen } from "@/lib/plugin-panel-events";
 import { surfaceKeyOf } from "@/lib/surface-key";
+import { serverById } from "@/stores/servers";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { awaitCapabilities, getPluginRuntimeCapabilities } from "@/stores/sidebar";
 
@@ -61,6 +62,13 @@ interface Handle {
   // itemId) doesn't cause the plugin to re-fetch messages and burn its
   // per-plugin rate limit.
   lastSentItemId: string | null;
+  // The tunnel URL currently loaded into iframe.src. Panels no longer persist a
+  // URL by value — they resolve it live from servers() by serverId — so this
+  // tracks what's actually loaded and lets the reload effect skip redundant
+  // src writes (a redundant write would reload the iframe and lose plugin
+  // state). null until the first non-null URL is applied (cold start before
+  // servers() loads, or an expired/offline server with no live URL).
+  appliedUrl: string | null;
 }
 
 // Module-level handle registry — keyed by the iframe element (not the mount
@@ -125,6 +133,21 @@ export function PluginFrame(props: { content: PluginContent; panelId: string }) 
     handle.lastSentItemId = itemId;
   });
 
+  // Reload effect: the self-heal on tunnel rotation. Tracks the live tunnel URL
+  // for this panel's server from the reactive servers() store. When it changes
+  // to a new non-null value — a quick tunnel rotated, or servers() finished
+  // loading after a cold-start mount — point the iframe at the new URL. The
+  // appliedUrl guard makes a no-op rerun (same URL) skip the write so we don't
+  // gratuitously reload a live plugin. A null URL (expired/offline) leaves the
+  // last-loaded frame in place; the expired-state gate is Workstream 4's job.
+  createEffect(() => {
+    const url = serverById(props.content.serverId)?.tunnel_url ?? null;
+    if (handle === null || url === null) return;
+    if (handle.appliedUrl === url) return;
+    handle.appliedUrl = url;
+    handle.iframe.src = `${url}/plugins/${props.content.slug}/ui/`;
+  });
+
   onCleanup(() => {
     if (handle !== null) {
       // Hide-only: portalHost.unmount drops refcount and hides the iframe.
@@ -149,7 +172,11 @@ function createPluginHandle(
   panelId: string,
   placeholder: HTMLElement,
 ): Handle {
-  const { serverId, tunnelUrl, slug, itemId, itemLabel } = content;
+  const { serverId, slug, itemId, itemLabel } = content;
+  // Live tunnel-URL resolution — never a by-value snapshot. Every read goes
+  // through servers() so a rotated/expired URL is reflected immediately. The
+  // reload effect in PluginFrame watches the same source to reload on change.
+  const getTunnelUrl = (): string | null => serverById(serverId)?.tunnel_url ?? null;
 
   // Adoption short-circuit: portal-host has a mount under this key already
   // (focus collapse, workspace switch, panel rearrange, or cross-workspace
@@ -302,13 +329,15 @@ function createPluginHandle(
       const rawUrl = typeof raw["url"] === "string" ? raw["url"] : null;
       const rawName = typeof raw["name"] === "string" ? raw["name"] : null;
       if (rawUrl === null || rawName === null) return;
+      const liveUrl = getTunnelUrl();
+      if (liveUrl === null) return;
       let parsed: URL;
       try {
-        parsed = new URL(rawUrl, tunnelUrl);
+        parsed = new URL(rawUrl, liveUrl);
       } catch {
         return;
       }
-      const runtimeOrigin = new URL(tunnelUrl).origin;
+      const runtimeOrigin = new URL(liveUrl).origin;
       if (parsed.origin !== runtimeOrigin) return;
       if (!parsed.pathname.startsWith("/files/")) return;
       const name = rawName.slice(0, 512);
@@ -330,13 +359,15 @@ function createPluginHandle(
       const rawUrl = typeof raw["url"] === "string" ? raw["url"] : null;
       const rawName = typeof raw["name"] === "string" ? raw["name"] : null;
       if (rawUrl === null || rawName === null) return;
+      const liveUrl = getTunnelUrl();
+      if (liveUrl === null) return;
       let parsed: URL;
       try {
-        parsed = new URL(rawUrl, tunnelUrl);
+        parsed = new URL(rawUrl, liveUrl);
       } catch {
         return;
       }
-      const runtimeOrigin = new URL(tunnelUrl).origin;
+      const runtimeOrigin = new URL(liveUrl).origin;
       if (parsed.origin !== runtimeOrigin) return;
       if (!parsed.pathname.startsWith("/files/")) return;
       const name = rawName.slice(0, 512);
@@ -370,7 +401,6 @@ function createPluginHandle(
         content: {
           type: "plugin",
           serverId,
-          tunnelUrl,
           slug,
           itemId,
           itemLabel,
@@ -409,9 +439,10 @@ function createPluginHandle(
     // `platform.proxy.*-viewport` envelopes reserve a host-owned proxy mount
     // surface over a rect the plugin reports (sdk.proxy.reserveMount). Same
     // trust model as voice screen-slots: the identity that drives the
-    // bootstrap and surface key — serverId/slug/tunnelUrl/frameKey/iframe —
-    // comes from this closure, never the payload; only `mountName` and `rect`
-    // are read from the (validated) message.
+    // bootstrap and surface key — serverId/slug/frameKey/iframe — comes from
+    // this closure, never the payload; only `mountName` and `rect` are read
+    // from the (validated) message. The tunnel URL is resolved live by
+    // serverId at bootstrap time (proxy-mount-surface.tsx), not carried here.
     if (typeof msg.type === "string" && msg.type.startsWith("platform.proxy.")) {
       const raw = ev.data as Record<string, unknown>;
       const mountName = proxyMountManager.parseMountName(raw["mountName"]);
@@ -419,7 +450,7 @@ function createPluginHandle(
       if (msg.type === "platform.proxy.register-viewport") {
         const rect = proxyMountManager.parseViewportRect(raw["rect"]);
         if (rect === null) return;
-        proxyMountManager.register({ frameKey: key, iframe, serverId, slug, tunnelUrl, mountName, rect });
+        proxyMountManager.register({ frameKey: key, iframe, serverId, slug, mountName, rect });
       } else if (msg.type === "platform.proxy.update-viewport") {
         const rect = proxyMountManager.parseViewportRect(raw["rect"]);
         if (rect === null) return;
@@ -453,6 +484,7 @@ function createPluginHandle(
     iframe,
     ready: false,
     lastSentItemId: null,
+    appliedUrl: null,
   };
   handlesByIframe.set(iframe, handle);
   handleRef.h = handle;
@@ -467,7 +499,16 @@ function createPluginHandle(
     placeholder,
     element: iframe,
     onAttached: () => {
-      iframe.src = `${tunnelUrl}/plugins/${slug}/ui/`;
+      // First load. Resolve the URL live; if servers() hasn't loaded yet the
+      // URL is null and we leave src unset — the PluginFrame reload effect sets
+      // it the moment a non-null URL appears. Record appliedUrl so that effect,
+      // which runs right after this synchronous mount, sees the same value and
+      // skips a redundant reload.
+      const url = getTunnelUrl();
+      if (url !== null) {
+        iframe.src = `${url}/plugins/${slug}/ui/`;
+        handle.appliedUrl = url;
+      }
     },
     onDestroy: () => {
       window.removeEventListener("message", onMessage);

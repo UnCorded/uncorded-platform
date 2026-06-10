@@ -20,6 +20,13 @@ export interface Server {
   visibility: "public" | "private";
   owner_id: string;
   tunnel_url: string | null;
+  /**
+   * Tunnel lifecycle reported by the runtime heartbeat: "demo" (ephemeral quick
+   * tunnel), "named" (stable authenticated tunnel), "local" (no public tunnel),
+   * or "expired" (a demo tunnel killed at its 24h TTL). null until the first
+   * heartbeat carries it. Drives the temp-URL banner and expired-restart gate.
+   */
+  tunnel_state: "demo" | "named" | "local" | "expired" | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;

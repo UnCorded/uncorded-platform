@@ -8,6 +8,18 @@ const RATE_SERVER_GET: RateLimitConfig = { maxTokens: 60, refillRate: 1 };
 const RATE_SERVER_UPDATE: RateLimitConfig = { maxTokens: 20, refillRate: 20 / 60 };
 const RATE_SERVER_DELETE: RateLimitConfig = { maxTokens: 10, refillRate: 10 / 60 };
 
+// Liveness window. A server counts as online only if it heartbeat within this
+// interval. Central never sets is_online=false on a missed heartbeat (nothing
+// pushes; heartbeats stop silently), so the truthful online flag is *derived*
+// from last_heartbeat_at at read time — correct even if the background sweeper
+// is dead. 30 min = 60 missed 30s heartbeats: long enough to ride out a
+// container/desktop restart or a brief network blip, short enough that dead
+// servers drop from the directory fast (a stale listing erodes trust). This is
+// the single source — the directory filter, the derived flag, and
+// sweepStaleServers all reference it so they can't drift apart. Passed as a
+// parameter cast to interval (`${SERVER_STALE_INTERVAL}::interval`).
+const SERVER_STALE_INTERVAL = "30 minutes";
+
 // --- Helpers ---
 
 interface ServerRow {
@@ -17,6 +29,7 @@ interface ServerRow {
   visibility: string;
   owner_id: string;
   tunnel_url: string | null;
+  tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;
@@ -34,6 +47,7 @@ function serverJson(row: ServerRow) {
     visibility: row.visibility,
     owner_id: row.owner_id,
     tunnel_url: row.tunnel_url ?? null,
+    tunnel_state: row.tunnel_state ?? null,
     runtime_version: row.runtime_version ?? null,
     connected_users: row.connected_users,
     plugin_count: row.plugin_count,
@@ -42,6 +56,22 @@ function serverJson(row: ServerRow) {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+// Sweep servers that have gone quiet past the liveness window, flipping their
+// stored is_online flag to false. This is column hygiene only — the directory
+// and serverJson derive online-ness from last_heartbeat_at directly, so they're
+// already correct without this. Runs on a short cadence (see index.ts) so the
+// stored column doesn't lag far behind the derived truth. Returns the row count.
+export async function sweepStaleServers(
+  sql: RouteContext["sql"],
+): Promise<number> {
+  const result = await sql`
+    UPDATE servers SET is_online = false
+    WHERE is_online = true
+      AND last_heartbeat_at < now() - ${SERVER_STALE_INTERVAL}::interval
+  `;
+  return result.count;
 }
 
 // --- POST /v1/servers ---
@@ -152,14 +182,27 @@ export async function handleListServers(
   let servers;
   let countResult;
 
+  // Directory hygiene: only list servers that are actually reachable right now.
+  //   - is_online = true AND last_heartbeat_at within the liveness window —
+  //     a server that heartbeat once then died must not linger as "available".
+  //   - tunnel_url IS NOT NULL — a registered-but-never-tunneled server has no
+  //     endpoint to join.
+  //   - tunnel_state <> 'expired' — a demo tunnel past its 24h TTL was killed;
+  //     don't advertise the dead public URL.
+  // is_online is also re-derived in the SELECT so the returned flag is truthful
+  // even in the (impossible-here, but cheap) case the filter and column diverge.
   if (search) {
     const pattern = `%${search}%`;
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url,
-             runtime_version, connected_users, plugin_count, is_online,
+      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+             runtime_version, connected_users, plugin_count,
+             (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
       WHERE visibility = 'public' AND is_online = true
+        AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
+        AND tunnel_url IS NOT NULL
+        AND tunnel_state IS DISTINCT FROM 'expired'
         AND name ILIKE ${pattern}
       ORDER BY connected_users DESC, name ASC
       LIMIT ${perPage} OFFSET ${offset}
@@ -167,21 +210,31 @@ export async function handleListServers(
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
       WHERE visibility = 'public' AND is_online = true
+        AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
+        AND tunnel_url IS NOT NULL
+        AND tunnel_state IS DISTINCT FROM 'expired'
         AND name ILIKE ${pattern}
     `;
   } else {
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url,
-             runtime_version, connected_users, plugin_count, is_online,
+      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+             runtime_version, connected_users, plugin_count,
+             (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
       WHERE visibility = 'public' AND is_online = true
+        AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
+        AND tunnel_url IS NOT NULL
+        AND tunnel_state IS DISTINCT FROM 'expired'
       ORDER BY connected_users DESC, name ASC
       LIMIT ${perPage} OFFSET ${offset}
     `;
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
       WHERE visibility = 'public' AND is_online = true
+        AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
+        AND tunnel_url IS NOT NULL
+        AND tunnel_state IS DISTINCT FROM 'expired'
     `;
   }
 
@@ -207,9 +260,14 @@ export async function handleGetServer(
     ctx.rateLimiter.consume(`server-get:${account.id}`, RATE_SERVER_GET);
   if (!getAllowed) return rateLimited(getRetryAfter);
 
+  // Owner/detail view is NOT filtered out when stale — the owner still needs to
+  // find their server to manage it — but its is_online reads truthfully (false
+  // once heartbeats stop past the liveness window), derived the same way as the
+  // directory so a stale server can't show a green dot.
   const rows = await ctx.sql`
-    SELECT id, name, description, visibility, owner_id, tunnel_url,
-           runtime_version, connected_users, plugin_count, is_online,
+    SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+           runtime_version, connected_users, plugin_count,
+           (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
            last_heartbeat_at, created_at, updated_at
     FROM servers WHERE id = ${serverId}
   `;
@@ -300,8 +358,9 @@ export async function handleUpdateServer(
       visibility = COALESCE(${visibility ?? null}, visibility),
       updated_at = now()
     WHERE id = ${serverId}
-    RETURNING id, name, description, visibility, owner_id, tunnel_url,
-              runtime_version, connected_users, plugin_count, is_online,
+    RETURNING id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+              runtime_version, connected_users, plugin_count,
+              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
               last_heartbeat_at, created_at, updated_at
   `;
 

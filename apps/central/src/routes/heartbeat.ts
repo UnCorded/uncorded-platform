@@ -13,6 +13,7 @@ interface HeartbeatBody {
   server_secret: unknown;
   last_sync_version: unknown;
   tunnel_url: unknown;
+  tunnel_state: unknown;
   runtime_version: unknown;
   connected_users: unknown;
   plugin_count: unknown;
@@ -71,6 +72,8 @@ export async function handleHeartbeat(
   // Update server fields
   const tunnelUrl =
     typeof body.tunnel_url === "string" ? body.tunnel_url : null;
+  const tunnelState =
+    typeof body.tunnel_state === "string" ? body.tunnel_state : null;
   const runtimeVersion =
     typeof body.runtime_version === "string" ? body.runtime_version : null;
   const connectedUsers =
@@ -104,6 +107,7 @@ export async function handleHeartbeat(
   await ctx.sql`
     UPDATE servers SET
       tunnel_url = ${tunnelUrl},
+      tunnel_state = ${tunnelState},
       runtime_version = ${runtimeVersion},
       connected_users = ${connectedUsers},
       plugin_count = ${pluginCount},
@@ -111,6 +115,7 @@ export async function handleHeartbeat(
     WHERE id = ${serverId}
       AND (
         tunnel_url IS DISTINCT FROM ${tunnelUrl}
+        OR tunnel_state IS DISTINCT FROM ${tunnelState}
         OR runtime_version IS DISTINCT FROM ${runtimeVersion}
         OR connected_users IS DISTINCT FROM ${connectedUsers}
         OR plugin_count IS DISTINCT FROM ${pluginCount}

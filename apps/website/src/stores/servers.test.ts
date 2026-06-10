@@ -17,6 +17,7 @@ function makeServer(id: string, name: string): Server {
     visibility: "public",
     owner_id: "owner",
     tunnel_url: "https://tunnel.example/s",
+    tunnel_state: null,
     runtime_version: "1.0.0",
     connected_users: 0,
     plugin_count: 0,
@@ -164,6 +165,31 @@ describe("loadServers reconcile", () => {
     expect(storeModule.serversError()).toBe("network down");
     // Previous servers are NOT wiped.
     expect(storeModule.servers().length).toBe(2);
+  });
+});
+
+describe("serverById (live resolution)", () => {
+  test("returns the matching server, or null when absent", async () => {
+    await seedServers([makeServer("a", "A"), makeServer("b", "B")]);
+    expect(storeModule.serverById("a")?.id).toBe("a");
+    expect(storeModule.serverById("missing")).toBe(null);
+  });
+
+  test("reflects a rotated tunnel_url — panels resolve live, never a frozen snapshot", async () => {
+    // The whole point of dropping PanelContent.tunnelUrl: a panel resolves the
+    // server's URL through serverById at render time, so when a quick tunnel
+    // rotates and the next loadServers() carries the new URL, serverById hands
+    // back the fresh value rather than a stale by-value copy.
+    await seedServers([makeServer("a", "A")]);
+    expect(storeModule.serverById("a")?.tunnel_url).toBe("https://tunnel.example/s");
+
+    const rotated = makeServer("a", "A");
+    rotated.tunnel_url = "https://rotated.trycloudflare.com";
+    listServers.mockResolvedValueOnce([rotated]);
+    await storeModule.loadServers();
+    storeModule.stopPolling();
+
+    expect(storeModule.serverById("a")?.tunnel_url).toBe("https://rotated.trycloudflare.com");
   });
 });
 

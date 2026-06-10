@@ -157,3 +157,12 @@ export function activeServer(): Server | null {
   if (!id) return null;
   return servers().find((s) => s.id === id) ?? null;
 }
+
+// Live resolution of a server by id from the reactive servers() store. This is
+// the single point panels use to resolve a tunnel URL at render time — never a
+// by-value snapshot — so a rotated/expired tunnel URL is picked up reactively
+// (the heartbeat re-advertises every 30s → Central → servers()). Returns null
+// when the server isn't in the store (not loaded yet, or removed/purged).
+export function serverById(id: string): Server | null {
+  return servers().find((s) => s.id === id) ?? null;
+}

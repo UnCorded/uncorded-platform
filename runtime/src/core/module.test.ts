@@ -194,7 +194,6 @@ describe("CoreModule workspace layouts", () => {
         panel1: {
           type: "plugin" as const,
           serverId: "srv1",
-          tunnelUrl: "https://example.com",
           slug: "text-channels",
           itemId: "ch1",
           itemLabel: "general",
@@ -218,7 +217,6 @@ describe("CoreModule workspace layouts", () => {
         "admin-panel": {
           type: "plugin" as const,
           serverId: "srv1",
-          tunnelUrl: "https://example.com",
           slug: "text-channels",
           itemId: "ch99",
           itemLabel: "announcements",
@@ -241,7 +239,6 @@ describe("CoreModule workspace layouts", () => {
         def: {
           type: "plugin" as const,
           serverId: "srv1",
-          tunnelUrl: "https://example.com",
           slug: "text-channels",
           itemId: "ch1",
           itemLabel: "default-channel",

@@ -12,6 +12,8 @@
     "migrate:002:vault": "bun run scripts/dev-secrets.ts bun run migrations/002-session-sliding.ts",
     "migrate:004": "bun run migrations/004-voice-reachability.ts",
     "migrate:004:vault": "bun run scripts/dev-secrets.ts bun run migrations/004-voice-reachability.ts",
+    "migrate:005": "bun run migrations/005-tunnel-state.ts",
+    "migrate:005:vault": "bun run scripts/dev-secrets.ts bun run migrations/005-tunnel-state.ts",
     "nudge-runtimes:vault": "bun run scripts/dev-secrets.ts bun run scripts/nudge-runtimes-after-key-rotation.ts",
     "restore-db-password": "bun run scripts/restore-db-password.ts"
   },

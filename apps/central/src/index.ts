@@ -5,6 +5,7 @@ import { createRouter } from "./routes";
 import { createEmailClient } from "./email";
 import { createR2Client } from "./r2";
 import { sweepExpiredTransfers } from "./routes/server-transfer";
+import { sweepStaleServers } from "./routes/servers";
 import { getPostLoginRedirect, isAllowedPostLoginRedirect } from "./post-login";
 import { wrapWithAccessLog } from "./access-log";
 import { runShutdown } from "./shutdown";
@@ -113,6 +114,7 @@ const sql = createDb({
 // pool and logs a misleading error during otherwise-clean shutdown.
 let rotationInterval: ReturnType<typeof setInterval> | null = null;
 let transferSweepInterval: ReturnType<typeof setInterval> | null = null;
+let staleSweepInterval: ReturnType<typeof setInterval> | null = null;
 
 if (process.env["SIGNING_KEY_SECRET"]) {
   await ensureSigningKey(sql);
@@ -148,6 +150,25 @@ transferSweepInterval = setInterval(() => {
       }),
     );
 }, TRANSFER_SWEEP_INTERVAL_MS);
+
+// Periodic sweep of stale servers — flips is_online=false for servers that
+// stopped heartbeating past the liveness window. Pure column hygiene: the
+// directory and serverJson derive online-ness from last_heartbeat_at directly,
+// so reads are already correct without this. Runs every 5 minutes (not hourly
+// like the transfer sweep) so the stored column doesn't lag ~90 min behind the
+// 30-minute liveness threshold.
+const STALE_SERVER_SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+staleSweepInterval = setInterval(() => {
+  sweepStaleServers(sql)
+    .then((count) => {
+      if (count > 0) log.info("stale servers swept offline", { count });
+    })
+    .catch((err: unknown) =>
+      log.error("stale server sweep failed", {
+        err: err instanceof Error ? err.message : String(err),
+      }),
+    );
+}, STALE_SERVER_SWEEP_INTERVAL_MS);
 
 if (!process.env["RESEND_API_KEY"]) {
   log.warn("RESEND_API_KEY not set — verification emails will be logged to stdout instead of sent");
@@ -188,6 +209,7 @@ function shutdown() {
     clearTimers: () => {
       if (rotationInterval !== null) clearInterval(rotationInterval);
       if (transferSweepInterval !== null) clearInterval(transferSweepInterval);
+      if (staleSweepInterval !== null) clearInterval(staleSweepInterval);
     },
     stopServer: () => server.stop(),
     endDb: () => sql.end(),

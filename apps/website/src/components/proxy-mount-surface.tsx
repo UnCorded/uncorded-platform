@@ -38,6 +38,7 @@ import { isElectron } from "@/lib/electron";
 import * as portalHost from "@/lib/portal-host";
 import { projectViewportRect, type OverlayRect } from "@/lib/proxy-mount-geometry";
 import type { ProxyMountEntry } from "@/lib/proxy-mount-manager";
+import { serverById } from "@/stores/servers";
 import { IframeSurface, WebviewSurface } from "@/components/browser-panel";
 
 export function ProxyMountSurface(props: {
@@ -65,13 +66,19 @@ export function ProxyMountSurface(props: {
     return projectViewportRect(r, frameRect);
   });
 
-  // Bootstrap the proxy session once. `props.entry` is a stable reference for
-  // the reservation's lifetime (the manager mutates rect in place, never the
-  // object), so the source never churns and the POST fires exactly once.
+  // Live tunnel URL for this mount's server, resolved from the reactive
+  // servers() store rather than carried on the entry — so a rotated/expired
+  // tunnel re-bootstraps the proxy session against the new URL instead of
+  // wedging on a dead one. null (server not loaded / no live URL) suspends the
+  // resource until a URL appears.
+  const tunnelUrl = createMemo(() => serverById(props.entry.serverId)?.tunnel_url ?? null);
+
+  // Bootstrap the proxy session, keyed on the resolved tunnel URL. While the URL
+  // is stable the source doesn't churn and the POST fires exactly once; when it
+  // rotates, the resource refetches against the new URL.
   const [bootstrap] = createResource(
-    () => props.entry,
-    (entry) =>
-      bootstrapProxyMount(entry.tunnelUrl, entry.serverId, entry.slug, entry.mountName),
+    tunnelUrl,
+    (url) => bootstrapProxyMount(url, props.entry.serverId, props.entry.slug, props.entry.mountName),
   );
 
   // Can the proxied URL be framed on the web? An upstream that sends

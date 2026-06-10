@@ -5,6 +5,7 @@ import {
   registerAndLogin,
   type TestServer,
 } from "../test-helpers";
+import { sweepStaleServers } from "./servers";
 
 let ts: TestServer;
 let ownerToken: string;
@@ -84,7 +85,17 @@ describe("GET /v1/servers", () => {
     });
     const body = await res.json();
     publicServerId = body.server_id;
-    await ts.sql`UPDATE servers SET is_online = true WHERE id = ${publicServerId}`;
+    // Directory listing now requires a fresh heartbeat AND a non-null tunnel_url
+    // (see SERVER_STALE_INTERVAL hygiene filters), so a server marked online must
+    // also carry both to be advertised.
+    await ts.sql`
+      UPDATE servers
+      SET is_online = true,
+          last_heartbeat_at = now(),
+          tunnel_url = 'https://public-online.trycloudflare.com',
+          tunnel_state = 'named'
+      WHERE id = ${publicServerId}
+    `;
 
     // Create a private server
     await fetch(`${ts.url}/v1/servers`, {
@@ -123,6 +134,125 @@ describe("GET /v1/servers", () => {
   test("returns 401 without session", async () => {
     const res = await fetch(`${ts.url}/v1/servers`);
     expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /v1/servers — directory hygiene", () => {
+  // Helper: create a public server and force its liveness/tunnel columns to an
+  // arbitrary state, bypassing the heartbeat path so each case is isolated.
+  async function makeServer(
+    name: string,
+    cols: {
+      is_online: boolean;
+      heartbeatAgo: string; // SQL interval, e.g. "1 minute" / "31 minutes"
+      tunnel_url: string | null;
+      tunnel_state: string | null;
+    },
+  ): Promise<string> {
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      body: JSON.stringify({ name, visibility: "public" }),
+    });
+    const id = (await res.json()).server_id as string;
+    await ts.sql`
+      UPDATE servers
+      SET is_online = ${cols.is_online},
+          last_heartbeat_at = now() - ${cols.heartbeatAgo}::interval,
+          tunnel_url = ${cols.tunnel_url},
+          tunnel_state = ${cols.tunnel_state}
+      WHERE id = ${id}
+    `;
+    return id;
+  }
+
+  async function directoryNames(): Promise<string[]> {
+    const res = await fetch(`${ts.url}/v1/servers?per_page=100`, {
+      headers: authHeaders(ownerToken),
+    });
+    const body = await res.json();
+    return body.servers.map((s: { name: string }) => s.name);
+  }
+
+  test("excludes a server whose last heartbeat is older than the liveness window", async () => {
+    const id = await makeServer("Stale Directory Server", {
+      is_online: true,
+      heartbeatAgo: "31 minutes",
+      tunnel_url: "https://stale.trycloudflare.com",
+      tunnel_state: "demo",
+    });
+    expect(await directoryNames()).not.toContain("Stale Directory Server");
+
+    // And its detail view reports is_online=false (derived from staleness),
+    // even though the stored column still says true.
+    const detail = await fetch(`${ts.url}/v1/servers/${id}`, {
+      headers: authHeaders(ownerToken),
+    });
+    expect((await detail.json()).is_online).toBe(false);
+  });
+
+  test("excludes a fresh server with a null tunnel_url", async () => {
+    await makeServer("Null Tunnel Server", {
+      is_online: true,
+      heartbeatAgo: "1 minute",
+      tunnel_url: null,
+      tunnel_state: null,
+    });
+    expect(await directoryNames()).not.toContain("Null Tunnel Server");
+  });
+
+  test("excludes a fresh server whose tunnel_state is expired", async () => {
+    await makeServer("Expired Tunnel Server", {
+      is_online: true,
+      heartbeatAgo: "1 minute",
+      tunnel_url: "https://expired.trycloudflare.com",
+      tunnel_state: "expired",
+    });
+    expect(await directoryNames()).not.toContain("Expired Tunnel Server");
+  });
+
+  test("includes a fresh, tunneled, non-expired server and surfaces tunnel_state", async () => {
+    await makeServer("Healthy Directory Server", {
+      is_online: true,
+      heartbeatAgo: "1 minute",
+      tunnel_url: "https://healthy.trycloudflare.com",
+      tunnel_state: "demo",
+    });
+    const res = await fetch(`${ts.url}/v1/servers?per_page=100`, {
+      headers: authHeaders(ownerToken),
+    });
+    const body = await res.json();
+    const row = body.servers.find(
+      (s: { name: string }) => s.name === "Healthy Directory Server",
+    );
+    expect(row).toBeDefined();
+    expect(row.tunnel_state).toBe("demo");
+    expect(row.is_online).toBe(true);
+  });
+
+  test("sweepStaleServers flips is_online=false for quiet servers and leaves fresh ones", async () => {
+    const staleId = await makeServer("Sweep Stale", {
+      is_online: true,
+      heartbeatAgo: "31 minutes",
+      tunnel_url: "https://sweep-stale.trycloudflare.com",
+      tunnel_state: "demo",
+    });
+    const freshId = await makeServer("Sweep Fresh", {
+      is_online: true,
+      heartbeatAgo: "1 minute",
+      tunnel_url: "https://sweep-fresh.trycloudflare.com",
+      tunnel_state: "demo",
+    });
+
+    const swept = await sweepStaleServers(ts.sql);
+    expect(swept).toBeGreaterThanOrEqual(1);
+
+    const staleRow =
+      await ts.sql`SELECT is_online FROM servers WHERE id = ${staleId}`;
+    expect(staleRow[0]!.is_online).toBe(false);
+    const freshRow =
+      await ts.sql`SELECT is_online FROM servers WHERE id = ${freshId}`;
+    expect(freshRow[0]!.is_online).toBe(true);
   });
 });
 

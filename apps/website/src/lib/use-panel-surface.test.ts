@@ -82,7 +82,6 @@ function buildContent(slug: string): PanelContent {
   return {
     type: "plugin",
     serverId: "srv",
-    tunnelUrl: "https://t.example",
     slug,
     itemId: "item",
     itemLabel: "Test",

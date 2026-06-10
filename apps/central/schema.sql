@@ -66,6 +66,12 @@ CREATE TABLE servers (
   owner_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   server_secret_hash TEXT NOT NULL,
   tunnel_url TEXT,
+  -- Tunnel lifecycle as reported by the runtime heartbeat: 'demo' (ephemeral
+  -- quick tunnel), 'named' (stable authenticated tunnel), 'local' (no public
+  -- tunnel), or 'expired' (a demo tunnel that hit its 24h TTL and was killed).
+  -- NULL until the first heartbeat that carries it. Directory listings exclude
+  -- 'expired'; clients surface a banner/restart gate off this value.
+  tunnel_state TEXT,
   runtime_version TEXT,
   connected_users INT NOT NULL DEFAULT 0,
   plugin_count INT NOT NULL DEFAULT 0,
