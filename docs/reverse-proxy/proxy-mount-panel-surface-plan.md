@@ -2,7 +2,7 @@
 
 **Status:** Proposed (design doc, pre-implementation)
 **Scope:** Render axis only. The subpath / `routePrefix` (path axis) is unchanged
-and still required — see [Path axis is unchanged](#path-axis-is-unchanged).
+and still required — see [Path axis is unchanged](#5-path-axis-is-unchanged).
 **Companion docs:** `plugin-reverse-proxy-plan.md`, `phase-0-cookie-topology-decision.md`,
 `foundry-manual-qa.md`.
 
@@ -140,7 +140,7 @@ return shape stays compatible for hybrid plugins that still want to embed
 
 The portal-hosted mount surface is keyed independently of `PanelContent`:
 
-```
+```text
 proxy-mount:${serverId}:${slug}:${mountName}
 ```
 
@@ -206,7 +206,7 @@ The host renders this surface over the plugin-reserved viewport rect (§3.1).
 Model on `WebviewViewport`/`WebviewSurface` (`browser-panel.tsx:950-1036`) and
 `IframeViewport`/`IframeSurface` (`:712-846`), **minus** the nav bar and tabs:
 
-```
+```text
 ProxyMountSurface({ serverId, slug, mountName, rect })
   bootstrap = useBootstrapProxyMount(serverId, slug, mountName)  // §4.1
   key = `proxy-mount:${serverId}:${slug}:${mountName}`           // §3.2
