@@ -26,7 +26,7 @@ export interface Server {
    * or "expired" (a demo tunnel killed at its 24h TTL). null until the first
    * heartbeat carries it. Drives the temp-URL banner and expired-restart gate.
    */
-  tunnel_state: string | null;
+  tunnel_state: "demo" | "named" | "local" | "expired" | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;

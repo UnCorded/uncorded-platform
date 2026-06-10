@@ -191,7 +191,7 @@ describe("expired-tunnel gate (WS4)", () => {
     // No getServerToken mock is programmed; if the gate failed to short-circuit,
     // the beforeEach default rejection would route through the catch and we'd
     // see a reconnect scheduled. The gate must return before the token fetch.
-    const server = { ...makeServer("srv-expired"), tunnel_state: "expired" };
+    const server = { ...makeServer("srv-expired"), tunnel_state: "expired" as const };
     await wsModule.connect(server);
     expect(FakeWebSocket.instances.length).toBe(0);
     expect(getServerToken).not.toHaveBeenCalled();
@@ -201,7 +201,7 @@ describe("expired-tunnel gate (WS4)", () => {
   });
 
   test("forceReconnect() refuses to dial when tunnel_state is expired", async () => {
-    const server = { ...makeServer("srv-expired-force"), tunnel_state: "expired" };
+    const server = { ...makeServer("srv-expired-force"), tunnel_state: "expired" as const };
     await wsModule.forceReconnect(server);
     expect(FakeWebSocket.instances.length).toBe(0);
     expect(getServerToken).not.toHaveBeenCalled();
@@ -214,7 +214,7 @@ describe("expired-tunnel gate (WS4)", () => {
       expires_at: Math.floor(Date.now() / 1000) + 3600,
     });
     FakeWebSocket.autoOpen = true;
-    const server = { ...makeServer("srv-demo"), tunnel_state: "demo" };
+    const server = { ...makeServer("srv-demo"), tunnel_state: "demo" as const };
     await wsModule.connect(server);
     expect(FakeWebSocket.instances.length).toBe(1);
     wsModule.disconnect("srv-demo");

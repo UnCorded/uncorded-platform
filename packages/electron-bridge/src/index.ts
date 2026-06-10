@@ -60,7 +60,7 @@ export interface Server {
   /** Tunnel lifecycle reported by the runtime heartbeat: "demo" | "named" |
    *  "local" | "expired", or null until the first heartbeat carries it.
    *  Mirrors the website `Server` type so the bridge array stays assignable. */
-  tunnel_state: string | null;
+  tunnel_state: "demo" | "named" | "local" | "expired" | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;

@@ -290,6 +290,22 @@ const LOCAL_FALLBACK_URL = process.env["UNCORDED_PUBLIC_URL"] ?? `http://localho
 const DEMO_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 const TUNNEL_START_TIMEOUT_MS = 30_000;
 
+// Typed tunnel error — CLAUDE.md mandates typed errors with code/message/context
+// over raw `new Error`. Mirrors BootError's (code, message) throwable shape and
+// adds an optional context bag for machine-readable diagnostics. boot() in
+// main.ts rewraps the `.message` into BootError("TUNNEL_FAILED", ...); the code
+// and context survive on the thrown instance for logs and inspection.
+export class TunnelError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly context?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "TunnelError";
+  }
+}
+
 // cloudflared embeds a level marker (`INF`/`WRN`/`ERR`/`FTL`/`DBG`) in each
 // stderr line. Without parsing it we'd log every warning and error at INFO,
 // burying real problems under the boot-time chatter. Lines without a marker
@@ -371,7 +387,13 @@ async function spawnDemoTunnel(): Promise<string> {
     const deadline = setTimeout(() => {
       proc.kill();
       cloudflaredProc = null;
-      reject(new Error("cloudflared quick tunnel did not provide a URL within 30 seconds"));
+      reject(
+        new TunnelError(
+          "TUNNEL_TIMEOUT",
+          "cloudflared quick tunnel did not provide a URL within 30 seconds",
+          { timeoutMs: TUNNEL_START_TIMEOUT_MS, port: PORT },
+        ),
+      );
     }, TUNNEL_START_TIMEOUT_MS);
 
     let resolved = false;
@@ -381,7 +403,12 @@ async function spawnDemoTunnel(): Promise<string> {
         const stderrStream = proc.stderr as ReadableStream<Uint8Array> | null;
         if (!stderrStream) {
           clearTimeout(deadline);
-          reject(new Error("cloudflared stderr stream unavailable"));
+          reject(
+            new TunnelError("STDERR_UNAVAILABLE", "cloudflared stderr stream unavailable", {
+              mode: "demo",
+              port: PORT,
+            }),
+          );
           return;
         }
 
@@ -413,7 +440,11 @@ async function spawnDemoTunnel(): Promise<string> {
 
       if (!resolved) {
         clearTimeout(deadline);
-        reject(new Error("cloudflared exited without providing a tunnel URL"));
+        reject(
+          new TunnelError("TUNNEL_NO_URL", "cloudflared exited without providing a tunnel URL", {
+            port: PORT,
+          }),
+        );
       }
     })();
   });
@@ -445,7 +476,10 @@ async function spawnAuthenticatedTunnel(token: string, publicUrl: string): Promi
   if (!stderrStream) {
     proc.kill();
     cloudflaredProc = null;
-    throw new Error("cloudflared stderr stream unavailable");
+    throw new TunnelError("STDERR_UNAVAILABLE", "cloudflared stderr stream unavailable", {
+      mode: "authenticated",
+      publicUrl,
+    });
   }
 
   try {
@@ -491,9 +525,11 @@ const tunnelProvider: TunnelProvider = {
         log.info("cloudflare quick tunnel ready", { url: currentTunnelUrl });
         return currentTunnelUrl;
       } catch (err) {
-        throw new Error(
-          `Cloudflare demo tunnel failed to start: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        const cause = err instanceof Error ? err.message : String(err);
+        throw new TunnelError("TUNNEL_START_FAILURE", `Cloudflare demo tunnel failed to start: ${cause}`, {
+          mode: "demo",
+          cause,
+        });
       }
     }
 
@@ -514,16 +550,24 @@ const tunnelProvider: TunnelProvider = {
         const raw = await Bun.file(config.credentials_file).text();
         const parsed = JSON.parse(raw) as Record<string, unknown>;
         if (typeof parsed["tunnel_token"] !== "string" || !parsed["tunnel_token"]) {
-          throw new Error("tunnel.json is missing 'tunnel_token' field");
+          throw new TunnelError("TUNNEL_MISSING_TOKEN", "tunnel.json is missing 'tunnel_token' field", {
+            credentials_file: config.credentials_file,
+          });
         }
         tunnelToken = parsed["tunnel_token"];
         if (typeof parsed["public_hostname"] === "string" && parsed["public_hostname"]) {
           publicHostname = parsed["public_hostname"];
         }
       } catch (err) {
-        throw new Error(
-          `Failed to read tunnel credentials from ${config.credentials_file}: ` +
-            `${err instanceof Error ? err.message : String(err)}`,
+        // A missing-token TunnelError thrown above is already typed — propagate
+        // it unchanged so its distinct code survives instead of being flattened
+        // into the read-failure wrapper.
+        if (err instanceof TunnelError) throw err;
+        const cause = err instanceof Error ? err.message : String(err);
+        throw new TunnelError(
+          "TUNNEL_READ_FAILURE",
+          `Failed to read tunnel credentials from ${config.credentials_file}: ${cause}`,
+          { credentials_file: config.credentials_file, cause },
         );
       }
 
@@ -540,8 +584,11 @@ const tunnelProvider: TunnelProvider = {
         log.info("cloudflare authenticated tunnel ready", { url: currentTunnelUrl });
         return currentTunnelUrl;
       } catch (err) {
-        throw new Error(
-          `Cloudflare authenticated tunnel failed to start: ${err instanceof Error ? err.message : String(err)}`,
+        const cause = err instanceof Error ? err.message : String(err);
+        throw new TunnelError(
+          "TUNNEL_START_FAILURE",
+          `Cloudflare authenticated tunnel failed to start: ${cause}`,
+          { mode: "authenticated", publicUrl, cause },
         );
       }
     }
