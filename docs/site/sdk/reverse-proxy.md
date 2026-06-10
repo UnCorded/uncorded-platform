@@ -94,7 +94,7 @@ logic of its own).
 | `name` | string | Slug-safe and unique within the plugin: lowercase, **starts with a letter**, hyphen-separated segments (`[a-z][a-z0-9]*(-[a-z0-9]+)*` — no leading/trailing or doubled hyphens). Appears in the URL: `/proxy/<slug>/<name>/*`. |
 | `upstream_setting` | string | **Key of a setting in this same manifest** (type `string` or `secret`) whose value is the upstream URL. The manifest never carries the URL directly. |
 | `access` | `"members"` \| `"owner"` | Optional, defaults to `"members"`. `owner` restricts the mount to the server owner/admins. |
-| `max_frame_bytes` | integer | Optional. Caps the size of a single **WebSocket** frame relayed in either direction (bytes). Defaults to **65536** (64 KiB); raise it for sockets that bulk-sync. Range **1024**–**16777216** (1 KiB–16 MiB). See [WebSockets](#websockets). |
+| `max_frame_bytes` | integer | Optional. Caps the size of a single **WebSocket** frame relayed in either direction (bytes). Defaults to **65536** (64 KiB); raise it for sockets that bulk-sync. Range **1024**–**16777216** (1 KiB–16 MiB). See [Real-time apps (WebSockets)](#real-time-apps-websockets). |
 
 ### Permissions
 
