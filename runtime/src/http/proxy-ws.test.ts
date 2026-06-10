@@ -496,6 +496,32 @@ describe("proxy WebSocket bridge", () => {
     ws.close();
   });
 
+  test("forwards the app's own Authorization on the handshake so token-auth sockets work", async () => {
+    const up = newUpstream();
+    let captured: Record<string, string> | undefined;
+    const capturing = (
+      url: string,
+      protocols: string[],
+      headers?: Record<string, string>,
+    ): WebSocket => {
+      captured = headers;
+      return new WebSocket(url, protocols);
+    };
+    const rt = setupRuntime(up.origin, { connectUpstream: capturing });
+    const cookie = rt.cookieFor("app", rt.approvalVersion("app"));
+
+    // A non-browser ws client can set Authorization; the proxy forwards it
+    // verbatim so a token-auth upstream can authenticate the socket — exactly
+    // as the HTTP forwarder does for token-auth apps.
+    const ws = new WsClient(wsUrl(rt.port), {
+      headers: { Cookie: cookie, Authorization: "Bearer app-ws-jwt" },
+    });
+    await waitOpen(ws);
+
+    expect(captured?.authorization).toBe("Bearer app-ws-jwt");
+    ws.close();
+  });
+
   test("bounds the client→upstream buffer and closes 1011 on overflow", async () => {
     const up = newUpstream();
     // Inject an upstream socket that never opens, so client frames pile into the

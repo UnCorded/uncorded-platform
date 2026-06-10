@@ -378,6 +378,13 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
       "x-forwarded-prefix": `/proxy/${slug}/${mount}`,
     };
     if (upstreamCookie) upstreamHeaders.cookie = upstreamCookie;
+    // Mirror the HTTP forwarder: pass the proxied app's own Authorization through.
+    // A browser can't set Authorization on the WebSocket() handshake, but a
+    // non-browser client (or the app's own server-side ws) can — and the runtime
+    // principal never rides Authorization (it's the cookie + x-uncorded-user-id),
+    // so forwarding the app's token here can't leak our identity upstream.
+    const inboundAuth = req.headers.get("authorization");
+    if (inboundAuth) upstreamHeaders.authorization = inboundAuth;
 
     let upstreamSocket: WebSocket;
     try {
