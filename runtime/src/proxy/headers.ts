@@ -1,11 +1,14 @@
 // Request/response header sanitizer for the HTTP forwarder.
 //
 // Policy (docs/reverse-proxy/plugin-reverse-proxy-plan.md §Header Policy):
-//   request  — strip hop-by-hop, authorization, cookie, referer, and all
-//              client-supplied x-forwarded-* / x-uncorded-* headers; set
-//              runtime-owned forwarded identity headers (including
+//   request  — strip hop-by-hop, cookie, referer, and all client-supplied
+//              x-forwarded-* / x-uncorded-* headers; force Accept-Encoding:
+//              identity (the runtime decodes and rewrites bodies itself, so
+//              asking upstream to compress only buys a header lie to undo);
+//              set runtime-owned forwarded identity headers (including
 //              x-forwarded-prefix, the public mount path); set Host to the
 //              upstream host; attach only the reconstructed mount-scoped Cookie.
+//              Authorization IS forwarded — see sanitizeRequestHeaders for why.
 //
 // Referer is stripped because a browser may carry a runtime-internal URL there
 // (notably the /proxy-open handoff URL, which embeds a single-use session
@@ -93,12 +96,23 @@ export function sanitizeRequestHeaders(
     const name = rawName.toLowerCase();
     if (HOP_BY_HOP.has(name)) continue;
     if (dynamicHopByHop.has(name)) continue;
-    if (name === "authorization" || name === "cookie") continue;
+    // The inbound Cookie is dropped; the mount-scoped jar is rebuilt below and
+    // re-attached as a single trusted value.
+    if (name === "cookie") continue;
     // Referer can carry the /proxy-open handoff URL (with its session ticket);
     // never forward it upstream. See module header.
     if (name === "referer") continue;
     if (name === "host") continue;
+    // Normalize away inbound Accept-Encoding; we force `identity` below.
+    if (name === "accept-encoding") continue;
     if (isForwardedIdentity(name)) continue;
+    // Authorization is intentionally forwarded. On the /proxy/* data path it can
+    // only have been set by the proxied app's own JS — browsers never auto-attach
+    // Authorization (unlike cookies), and the UnCorded principal travels as the
+    // proxy-session cookie + x-uncorded-user-id, not a Bearer. Forwarding it lets
+    // token-auth apps reach their own backend out of the box. The bootstrap route
+    // (POST /proxy-sessions, which carries the UnCorded Bearer) does not pass
+    // through this sanitizer, so that token never reaches the upstream.
     out.append(rawName, value);
   }
 
@@ -110,6 +124,11 @@ export function sanitizeRequestHeaders(
   out.set("x-forwarded-for", ctx.forwardedFor);
   out.set("x-uncorded-user-id", ctx.userId);
   out.set("x-forwarded-prefix", ctx.forwardedPrefix);
+  // The runtime reads/rewrites text bodies and Bun's fetch decodes compressed
+  // responses itself, leaving the content-encoding/-length headers describing the
+  // compressed bytes — a mismatch on the streamed passthrough. Asking upstream for
+  // identity keeps the framing honest. See forwardToUpstream's streaming branch.
+  out.set("accept-encoding", "identity");
 
   if (upstreamCookie) out.set("cookie", upstreamCookie);
 

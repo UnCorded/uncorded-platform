@@ -17,14 +17,14 @@ const CTX: ForwardedContext = {
 };
 
 describe("sanitizeRequestHeaders", () => {
-  test("strips hop-by-hop, authorization, cookie, host, and forwarded-identity headers", () => {
+  test("strips hop-by-hop, cookie, host, and forwarded-identity; forces identity encoding", () => {
     const inbound = new Headers();
     inbound.set("accept", "text/html");
     inbound.set("content-type", "application/json");
-    inbound.set("authorization", "Bearer secret");
     inbound.set("cookie", "uncorded-proxy-x-app=tok; app=1");
     inbound.set("host", "central.uncorded.app");
     inbound.set("transfer-encoding", "chunked");
+    inbound.set("accept-encoding", "gzip, br, zstd");
     inbound.set("referer", "https://central.uncorded.app/proxy-open/x/app?ticket=secret");
     inbound.set("x-forwarded-for", "1.2.3.4");
     inbound.set("x-uncorded-user-id", "attacker");
@@ -34,8 +34,10 @@ describe("sanitizeRequestHeaders", () => {
 
     expect(out.get("accept")).toBe("text/html");
     expect(out.get("content-type")).toBe("application/json");
-    expect(out.get("authorization")).toBeNull();
     expect(out.get("transfer-encoding")).toBeNull();
+    // Accept-Encoding is normalized to identity — the runtime decodes/rewrites
+    // bodies itself, so upstream compression only buys a header lie to undo.
+    expect(out.get("accept-encoding")).toBe("identity");
     // Referer is stripped — it can carry the /proxy-open handoff ticket.
     expect(out.get("referer")).toBeNull();
 
@@ -55,6 +57,13 @@ describe("sanitizeRequestHeaders", () => {
   test("forwards the reconstructed upstream cookie when provided", () => {
     const out = sanitizeRequestHeaders(new Headers(), "app=1; pref=dark", CTX);
     expect(out.get("cookie")).toBe("app=1; pref=dark");
+  });
+
+  test("forwards the app's own Authorization so token-auth apps work", () => {
+    const inbound = new Headers();
+    inbound.set("authorization", "Bearer app-jwt-from-localStorage");
+    const out = sanitizeRequestHeaders(inbound, null, CTX);
+    expect(out.get("authorization")).toBe("Bearer app-jwt-from-localStorage");
   });
 
   test("drops headers named by the Connection token list", () => {
