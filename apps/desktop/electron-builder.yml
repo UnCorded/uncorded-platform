@@ -2,6 +2,11 @@
 # and auto-update identity all key off the packaged app id.
 appId: app.uncorded.desktop
 productName: UnCorded
+# Explicit so the Linux AppImage binary isn't derived from the npm package name
+# (@uncorded/desktop → "@uncordeddesktop"), which electron-builder 26 rejects:
+# "executableName contains characters that cannot be safely used in file paths".
+# Matches productName, so the Windows exe stays UnCorded.exe (unchanged).
+executableName: UnCorded
 protocols:
   - name: UnCorded
     schemes:
