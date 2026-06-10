@@ -26,8 +26,9 @@
 import type { Server, ServerWebSocket } from "bun";
 import { rootLogger } from "@uncorded/shared";
 import { RateLimiter, RATE_PROXY_WS_CONNECT } from "./rate-limiter";
-import { resolveMount, type ProxyMountDeps } from "./proxy";
+import { resolveMount, isSecureRequest, safeHost, type ProxyMountDeps } from "./proxy";
 import { readProxyCookie, verifyProxySession } from "../proxy/session";
+import { buildUpstreamCookieHeader } from "../proxy/cookies";
 import {
   hostnameFromOrigin,
   resolveHostClasses,
@@ -57,6 +58,15 @@ export const PROXY_WS_PATH_RE =
 /** RFC 7230 token — the only shape a subprotocol label may take. */
 const TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+// Bun's WebSocket accepts a non-standard init `{ headers, protocols }` that the
+// DOM lib type doesn't model (it only types the 2nd arg as `string | string[]`).
+// Narrow the constructor through a typed shim so we can pass upstream headers
+// without resorting to `any`.
+type BunWsInit = { headers?: Record<string, string>; protocols?: string[] };
+const BunWebSocket = WebSocket as unknown as {
+  new (url: string, init: BunWsInit): WebSocket;
+};
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -74,7 +84,9 @@ export interface ProxyWebSocketOptions {
   /** Per-direction bounded-buffer byte cap. */
   maxBufferBytes?: number | undefined;
   /** Upstream connector override (tests inject a fake socket). */
-  connectUpstream?: ((url: string, protocols: string[]) => WebSocket) | undefined;
+  connectUpstream?:
+    | ((url: string, protocols: string[], headers?: Record<string, string>) => WebSocket)
+    | undefined;
 }
 
 export interface ProxyWebSocketHandler {
@@ -116,7 +128,12 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
   const maxFrameBytes = options.maxFrameBytes ?? MAX_WS_FRAME_BYTES;
   const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
   const connect =
-    options.connectUpstream ?? ((url, protocols) => new WebSocket(url, protocols));
+    options.connectUpstream ??
+    ((url, protocols, headers) =>
+      // Pass the runtime-owned forwarded headers (identity + optional app cookie)
+      // on the handshake via Bun's `headers` option. The positional form is a
+      // defensive fallback for a caller that supplies none.
+      headers ? new BunWebSocket(url, { protocols, headers }) : new WebSocket(url, protocols));
 
   // -------------------------------------------------------------------------
   // Bridging helpers (closures over the configured caps).
@@ -340,9 +357,31 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
     const chosen = pickSubprotocol(parseSubprotocols(req.headers.get("sec-websocket-protocol")));
     const upstreamUrl = toWebSocketUrl(upstream.origin, upstream.basePath, suffix, url.search);
 
+    // Mirror the HTTP forwarder's identity context on the handshake so the
+    // upstream sees a consistent view across HTTP and WS:
+    //   - x-forwarded-* / x-uncorded-user-id: trusted forwarded identity;
+    //   - x-forwarded-prefix: the public mount path, so a prefix-aware upstream
+    //     emits URLs under the mount instead of escaping it;
+    //   - cookie: the app's mount-scoped cookies (buildUpstreamCookieHeader
+    //     strips the runtime's own proxy-session cookies — they must never reach
+    //     upstream), so a cookie-authenticated socket (Foundry et al.) sees its
+    //     session.
+    // Unlike the HTTP path we ALLOWLIST — only these runtime-owned headers are
+    // added; Bun composes the rest of the handshake (Host, Origin, Sec-*) itself,
+    // so no inbound client header is forwarded verbatim onto the upstream socket.
+    const upstreamCookie = buildUpstreamCookieHeader(req.headers.get("cookie"));
+    const upstreamHeaders: Record<string, string> = {
+      "x-forwarded-host": req.headers.get("host") ?? safeHost(req),
+      "x-forwarded-proto": isSecureRequest(req) ? "https" : "http",
+      "x-forwarded-for": clientIp,
+      "x-uncorded-user-id": userId,
+      "x-forwarded-prefix": `/proxy/${slug}/${mount}`,
+    };
+    if (upstreamCookie) upstreamHeaders.cookie = upstreamCookie;
+
     let upstreamSocket: WebSocket;
     try {
-      upstreamSocket = connect(upstreamUrl, chosen ? [chosen] : []);
+      upstreamSocket = connect(upstreamUrl, chosen ? [chosen] : [], upstreamHeaders);
       upstreamSocket.binaryType = "arraybuffer";
     } catch (err) {
       log.warn("proxy ws upstream connect failed", {

@@ -396,7 +396,7 @@ export async function approveMount(
   return { ok: true, row, status: computeProxyMountStatus(deps, plugin.manifest, slug, mount) };
 }
 
-function isSecureRequest(request: Request): boolean {
+export function isSecureRequest(request: Request): boolean {
   const proto = request.headers.get("x-forwarded-proto");
   if (proto) return (proto.split(",")[0] ?? "").trim().toLowerCase() === "https";
   try {
@@ -710,6 +710,7 @@ async function forwardToUpstream(args: ForwardArgs): Promise<Response> {
     forwardedProto: isSecureRequest(request) ? "https" : "http",
     forwardedFor: clientIp,
     userId,
+    forwardedPrefix: `/proxy/${slug}/${mountName}`,
   };
   const upstreamCookie = buildUpstreamCookieHeader(request.headers.get("cookie"));
   const fwdHeaders = sanitizeRequestHeaders(request.headers, upstreamCookie, ctx);
@@ -868,7 +869,7 @@ function isTimeoutError(err: unknown): boolean {
   return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
 }
 
-function safeHost(request: Request): string {
+export function safeHost(request: Request): string {
   try {
     return new URL(request.url).host;
   } catch {

@@ -13,6 +13,7 @@ const CTX: ForwardedContext = {
   forwardedProto: "https",
   forwardedFor: "203.0.113.7",
   userId: "user-42",
+  forwardedPrefix: "/proxy/x/app",
 };
 
 describe("sanitizeRequestHeaders", () => {
@@ -27,6 +28,7 @@ describe("sanitizeRequestHeaders", () => {
     inbound.set("referer", "https://central.uncorded.app/proxy-open/x/app?ticket=secret");
     inbound.set("x-forwarded-for", "1.2.3.4");
     inbound.set("x-uncorded-user-id", "attacker");
+    inbound.set("x-forwarded-prefix", "/spoofed");
 
     const out = sanitizeRequestHeaders(inbound, null, CTX);
 
@@ -43,6 +45,8 @@ describe("sanitizeRequestHeaders", () => {
     expect(out.get("x-forwarded-host")).toBe("central.uncorded.app");
     expect(out.get("x-forwarded-proto")).toBe("https");
     expect(out.get("x-uncorded-user-id")).toBe("user-42");
+    // The public mount path is runtime-owned; a client-supplied value is dropped.
+    expect(out.get("x-forwarded-prefix")).toBe("/proxy/x/app");
 
     // No cookie supplied ⇒ none forwarded.
     expect(out.get("cookie")).toBeNull();
