@@ -99,6 +99,9 @@ const IPC = {
 
   // Plugin file downloads
   DOWNLOADS_START: "desktop:downloads:start",
+
+  // Reverse-proxy <webview> guest registration
+  PROXY_GUEST_REGISTER: "proxy:guest-register",
 } as const satisfies IpcChannelMap;
 
 function ipcInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -243,6 +246,20 @@ contextBridge.exposeInMainWorld("electron", {
     // does this automatically on WS reconnect).
     setHostname(serverId: string, hostname: string | null): Promise<{ containerId: string }> {
       return ipcInvoke<{ containerId: string }>(IPC.VOICE_SET_HOSTNAME, serverId, hostname);
+    },
+  },
+
+  proxy: {
+    // Register a host-owned reverse-proxy <webview> guest as it attaches, so
+    // the main process can pin its navigation to the mount and gate its
+    // permission requests. Keyed by session partition; re-registering the
+    // same partition updates the pin.
+    registerGuest(input: {
+      partition: string;
+      mountOrigin: string;
+      mountPathPrefix: string;
+    }): Promise<void> {
+      return ipcInvoke<void>(IPC.PROXY_GUEST_REGISTER, input);
     },
   },
 

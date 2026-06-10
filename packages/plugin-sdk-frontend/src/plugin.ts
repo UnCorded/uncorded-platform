@@ -68,7 +68,7 @@ export async function createPluginFrontend(
     // so opaque-origin (`Origin: null`) requests succeed.
     runtimeOrigin: window.location.origin,
   });
-  const proxyClient = createProxyClient({ slug, token });
+  const proxyClient = createProxyClient({ slug, token, send });
   const navigateHandlers: NavigateHandlerEntry[] = [];
   let currentNavigation: NavigateEvent | null = initialNavigation ?? null;
 

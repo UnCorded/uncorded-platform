@@ -36,7 +36,7 @@ function makeClient(fetchImpl: typeof fetch, sink?: FetchCall[]) {
   // sink is captured by the closure passed to fetchReturning; kept in the
   // signature only for symmetry with callers that build their own fetch.
   void sink;
-  return createProxyClient({ slug: "foundry-vtt", token: "tok-123", fetchImpl });
+  return createProxyClient({ slug: "foundry-vtt", token: "tok-123", send: () => {}, fetchImpl });
 }
 
 describe("createProxyClient.openMount", () => {
@@ -73,6 +73,7 @@ describe("createProxyClient.openMount", () => {
     const client = createProxyClient({
       slug: "with space",
       token: "t",
+      send: () => {},
       fetchImpl: fetchReturning(jsonResponse(200, { url: "/u", openUrl: "/o" }), calls),
     });
     await client.openMount("mount/evil");

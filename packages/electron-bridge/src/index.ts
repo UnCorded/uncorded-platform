@@ -317,6 +317,20 @@ export interface ElectronBridge {
   voice: {
     setHostname(serverId: string, hostname: string | null): Promise<{ containerId: string }>;
   };
+  proxy: {
+    /**
+     * Register a host-owned reverse-proxy <webview> guest with the main
+     * process so it can pin the guest's navigation to its mount and gate its
+     * permission requests. Called once per guest as the <webview> attaches.
+     * Keyed by session partition (`persist:proxy:<serverId>`); re-registering
+     * the same partition updates the pin.
+     */
+    registerGuest(input: {
+      partition: string;
+      mountOrigin: string;
+      mountPathPrefix: string;
+    }): Promise<void>;
+  };
   runtimeUpdate: {
     /**
      * Always `true` when the renderer is running inside the desktop shell
@@ -565,6 +579,9 @@ export interface IpcChannelMap {
 
   // Plugin file downloads
   readonly DOWNLOADS_START: "desktop:downloads:start";
+
+  // Reverse-proxy <webview> guest registration
+  readonly PROXY_GUEST_REGISTER: "proxy:guest-register";
 }
 
 declare global {

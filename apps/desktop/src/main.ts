@@ -11,6 +11,7 @@ import {
   shell,
   systemPreferences,
   Tray,
+  webContents,
   type WebContents,
 } from "electron";
 import path from "path";
@@ -40,6 +41,11 @@ import {
 } from "./auto-update";
 import * as runtimeOrchestrator from "./runtime-orchestrator";
 import { resolveLatestVersion } from "./runtime-releases";
+import {
+  isProxyNavAllowed,
+  proxyPermissionDecision,
+  type ProxyMountRegistration,
+} from "./proxy-guest-guards";
 import type {
   RuntimeCheckOutcome,
   RuntimeUpdateChannel,
@@ -56,6 +62,48 @@ let tray: Tray | null = null;
 // hide() and swallow the quit. When false, window `close` events are
 // intercepted and routed to hide-to-tray.
 let isQuittingForReal = false;
+
+// Reverse-proxy <webview> mounts, keyed `${partition}::${mountPathPrefix}`.
+// The renderer registers each guest as its webview attaches
+// (PROXY_GUEST_REGISTER); main uses the registration to pin the guest's
+// navigation to its mount and to recognise a partition as a proxy partition
+// when wiring per-guest hardening. A server's mounts share one partition by
+// design but live under distinct `/proxy/<slug>/<mount>/` prefixes, so keying
+// by (partition, prefix) keeps each mount's pin distinct — otherwise a second
+// mount's registration would clobber the first's and over-restrict its
+// in-surface navigation. Entries are intentionally process-lifetime: a
+// partition's session is long-lived and a stale entry only ever over-restricts
+// (opens externally).
+const proxyGuestRegistry = new Map<string, ProxyMountRegistration>();
+
+function proxyMountKey(partition: string, mountPathPrefix: string): string {
+  return `${partition}::${mountPathPrefix}`;
+}
+
+// Remembered allow/deny permission decisions for proxy guests, keyed
+// `${partition}::${permission}`. A proxied third-party app must never silently
+// obtain camera/mic/location; the host asks once via a native dialog and
+// remembers the answer here so it doesn't re-prompt on every request.
+const proxyPermissionMemory = new Map<string, boolean>();
+
+// Partitions whose session handlers have already been installed, so
+// hardenProxyPartition() stays idempotent across repeated registrations.
+const hardenedProxyPartitions = new Set<string>();
+
+// Guest webContents whose navigation guards are already attached, so we never
+// double-bind will-navigate / setWindowOpenHandler on the same guest.
+const guardedProxyContents = new WeakSet<WebContents>();
+
+// Human-readable labels for the permissions a proxy guest may prompt for, used
+// in the native allow/deny dialog. Anything not promptable is denied without a
+// dialog, so it never needs a label here.
+const PROXY_PERMISSION_LABELS: Record<string, string> = {
+  media: "camera and microphone",
+  geolocation: "your location",
+  notifications: "notifications",
+  midi: "MIDI devices",
+  midiSysex: "MIDI devices",
+};
 
 // Dev loads the website's Vite dev server for HMR. In packaged builds we point
 // the window at the public web shell rather than bundling a stale copy of
@@ -409,6 +457,203 @@ function attachWindowSecurityGuards(target: BrowserWindow): void {
       });
     }
   });
+}
+
+// Find the proxy-mount registration a guest webContents is currently loaded
+// under. Matches by session partition AND by the mount the guest's current URL
+// sits in, so a server's two mounts (same partition, distinct prefixes) each
+// resolve to their own pin instead of clobbering one another. Falls back to any
+// same-partition registration when the current URL is uninformative (e.g.
+// `about:blank` before first load). Returns null for any non-proxy webview
+// (e.g. a Browser Panel guest on `persist:browser`), which is how the nav
+// guards stay inert for everything but proxy mounts.
+function proxyRegistrationForContents(contents: WebContents): ProxyMountRegistration | null {
+  let currentUrl = "";
+  try {
+    currentUrl = contents.getURL();
+  } catch {
+    currentUrl = "";
+  }
+  let samePartitionFallback: ProxyMountRegistration | null = null;
+  for (const reg of proxyGuestRegistry.values()) {
+    if (contents.session !== session.fromPartition(reg.partition)) continue;
+    if (currentUrl && isProxyNavAllowed(currentUrl, reg)) return reg;
+    samePartitionFallback ??= reg;
+  }
+  return samePartitionFallback;
+}
+
+// Any registration on a partition — used only to name the app's host in the
+// permission dialog, where the specific mount doesn't matter (all mounts on a
+// server share an origin).
+function proxyRegistrationForPartition(partition: string): ProxyMountRegistration | null {
+  for (const reg of proxyGuestRegistry.values()) {
+    if (reg.partition === partition) return reg;
+  }
+  return null;
+}
+
+// True when `contents` is a webview guest running on a hardened proxy
+// partition. Used by the global web-contents-created hook to attach nav guards
+// to a guest that attaches AFTER its registration landed (the registration's
+// own getAllWebContents() sweep covers the reverse ordering).
+function isProxyGuestContents(contents: WebContents): boolean {
+  if (contents.getType() !== "webview") return false;
+  for (const partition of hardenedProxyPartitions) {
+    if (contents.session === session.fromPartition(partition)) return true;
+  }
+  return false;
+}
+
+// Pin a proxy guest's navigation to its mount. An in-surface navigation that
+// leaves the mount (different origin, or off the `/proxy/<slug>/<mount>/` path)
+// is treated as an external link: prevented and handed to the OS browser. New
+// windows are always denied and routed externally — a proxied app never opens
+// an in-app window. This is the guest analogue of attachWindowSecurityGuards,
+// origin-pinned to the mount rather than the shell. Idempotent per guest.
+function attachProxyGuestNavGuards(contents: WebContents): void {
+  if (guardedProxyContents.has(contents)) return;
+  guardedProxyContents.add(contents);
+
+  contents.on("will-navigate", (event, navigationUrl) => {
+    const reg = proxyRegistrationForContents(contents);
+    // Not a proxy guest, or its registration is gone — leave navigation to the
+    // default policy rather than blocking a Browser Panel guest.
+    if (!reg) return;
+    if (isProxyNavAllowed(navigationUrl, reg)) return;
+    event.preventDefault();
+    void shell.openExternal(navigationUrl).catch((err) => {
+      log.warn("failed to open external proxy navigation", {
+        url: navigationUrl,
+        err: errorMessage(err),
+      });
+    });
+  });
+
+  contents.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === "https:" || u.protocol === "http:") {
+        void shell.openExternal(url).catch((err) => {
+          log.warn("failed to open external proxy popup", {
+            url,
+            err: errorMessage(err),
+          });
+        });
+      } else {
+        log.warn("blocked proxy guest window.open to non-http url", { url });
+      }
+    } catch (err) {
+      log.warn("blocked proxy guest window.open with malformed url", {
+        url,
+        err: errorMessage(err),
+      });
+    }
+    return { action: "deny" };
+  });
+}
+
+// Native allow/deny dialog for a proxy guest permission request. The proxied
+// app is third-party, so we never silently grant camera/mic/location — the host
+// asks the user, naming the app's host, and the answer is remembered per
+// (partition, permission) so we don't re-prompt.
+async function promptProxyPermission(partition: string, permission: string): Promise<boolean> {
+  const reg = proxyRegistrationForPartition(partition);
+  let host = partition;
+  if (reg) {
+    try {
+      host = new URL(reg.mountOrigin).host;
+    } catch {
+      host = reg.mountOrigin;
+    }
+  }
+  const what = PROXY_PERMISSION_LABELS[permission] ?? permission;
+  const options: Electron.MessageBoxOptions = {
+    type: "question",
+    buttons: ["Deny", "Allow"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: "Permission request",
+    message: `Allow access to ${what}?`,
+    detail: `The app at ${host} is requesting access to ${what}. This choice is remembered for this app.`,
+  };
+  const result =
+    win && !win.isDestroyed()
+      ? await dialog.showMessageBox(win, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1;
+}
+
+// Harden a proxy guest's session and pin every live guest on it. Called from
+// the PROXY_GUEST_REGISTER handler. Two layers:
+//   1. Per-partition session handlers (permissions, downloads) — installed once
+//      per partition, idempotent via hardenedProxyPartitions.
+//   2. Per-guest navigation guards — attached to every webview currently live
+//      on this partition. This covers the attach-before-register ordering (the
+//      guest already exists when registration lands). The register-before-
+//      attach ordering — the common one, since the renderer fires the register
+//      IPC synchronously as it appends the <webview>, before Electron has
+//      asynchronously created the guest webContents — is covered by the global
+//      web-contents-created hook (whenReady), which attaches the same guards
+//      once the guest appears on a now-hardened partition.
+// The global will-attach-webview block (whenReady) already forces sandbox /
+// contextIsolation / no-Node / no-preload on every guest; this adds the
+// proxy-specific navigation pin and permission gating on top.
+function hardenProxyPartition(partition: string): void {
+  if (!hardenedProxyPartitions.has(partition)) {
+    hardenedProxyPartitions.add(partition);
+    const sess = session.fromPartition(partition);
+
+    sess.setPermissionRequestHandler((_wc, permission, callback) => {
+      const remembered = proxyPermissionMemory.get(`${partition}::${permission}`);
+      const decision = proxyPermissionDecision(remembered, permission);
+      if (decision === "allow") {
+        callback(true);
+        return;
+      }
+      if (decision === "deny") {
+        callback(false);
+        return;
+      }
+      void promptProxyPermission(partition, permission)
+        .then((granted) => {
+          proxyPermissionMemory.set(`${partition}::${permission}`, granted);
+          callback(granted);
+        })
+        .catch((err) => {
+          log.warn("proxy permission prompt failed — denying", {
+            partition,
+            permission,
+            err: errorMessage(err),
+          });
+          callback(false);
+        });
+    });
+
+    // The synchronous check handler (navigator.permissions.query and friends)
+    // must never prompt; surface only an explicitly remembered allow.
+    sess.setPermissionCheckHandler((_wc, permission) => {
+      return proxyPermissionMemory.get(`${partition}::${permission}`) === true;
+    });
+
+    // Never silently write a download to disk. Leaving savePath unset makes
+    // Electron raise the OS save dialog; this listener exists to document that
+    // and to log the routing.
+    sess.on("will-download", (_event, item) => {
+      log.info("proxy guest download routed to OS save dialog", {
+        partition,
+        url: item.getURL(),
+        filename: item.getFilename(),
+      });
+    });
+  }
+
+  for (const contents of webContents.getAllWebContents()) {
+    if (contents.getType() !== "webview") continue;
+    if (contents.session !== session.fromPartition(partition)) continue;
+    attachProxyGuestNavGuards(contents);
+  }
 }
 
 // "Check for Updates…" used to live on a hidden Alt-revealed application
@@ -1538,6 +1783,60 @@ function registerIpcHandlers(): void {
     win.webContents.downloadURL(rawUrl);
   });
 
+  // Register a host-owned reverse-proxy <webview> guest. The renderer calls
+  // this as the guest attaches, handing us the partition it runs in plus the
+  // mount's origin and path prefix. We store it so the guest's navigation can
+  // be pinned to its mount and its permission requests gated. The payload is
+  // fully validated — never trust the renderer's shape — and the partition
+  // must be a `persist:proxy:` partition so this can't be used to harden (and
+  // thereby re-scope permissions on) the general browser partition.
+  handleIpc(IPC.PROXY_GUEST_REGISTER, (_event, raw: unknown) => {
+    if (!raw || typeof raw !== "object") {
+      throw ipcError(IPC.PROXY_GUEST_REGISTER, new Error("registration must be an object"));
+    }
+    const input = raw as Record<string, unknown>;
+    const partition = input.partition;
+    const mountOrigin = input.mountOrigin;
+    const mountPathPrefix = input.mountPathPrefix;
+    if (
+      typeof partition !== "string" ||
+      typeof mountOrigin !== "string" ||
+      typeof mountPathPrefix !== "string"
+    ) {
+      throw ipcError(
+        IPC.PROXY_GUEST_REGISTER,
+        new Error("partition, mountOrigin, mountPathPrefix must be strings"),
+      );
+    }
+    if (!partition.startsWith("persist:proxy:") || partition.length > 256) {
+      throw ipcError(IPC.PROXY_GUEST_REGISTER, new Error("invalid proxy partition"));
+    }
+    // mountOrigin must be a bare https origin (no path/query), and the prefix a
+    // mount path under /proxy/ with a trailing slash — the exact shape
+    // bootstrapProxyMount produces. Reject anything else outright.
+    let origin: URL;
+    try {
+      origin = new URL(mountOrigin);
+    } catch {
+      throw ipcError(IPC.PROXY_GUEST_REGISTER, new Error("mountOrigin is not a URL"));
+    }
+    if (
+      origin.protocol !== "https:" ||
+      origin.origin !== mountOrigin ||
+      !mountPathPrefix.startsWith("/proxy/") ||
+      !mountPathPrefix.endsWith("/") ||
+      mountPathPrefix.length > 1024
+    ) {
+      throw ipcError(IPC.PROXY_GUEST_REGISTER, new Error("invalid mount origin or path prefix"));
+    }
+    proxyGuestRegistry.set(proxyMountKey(partition, mountPathPrefix), {
+      partition,
+      mountOrigin,
+      mountPathPrefix,
+    });
+    hardenProxyPartition(partition);
+  });
+
   // Screen sharing — see installDisplayMediaHandler() above for the picker
   // delegation flow. The renderer-facing surface is window.electron.screenShare.
   handleIpc(IPC.SCREEN_SHARE_LIST_SOURCES, async (): Promise<ScreenShareSource[]> => {
@@ -1696,6 +1995,17 @@ if (!gotInstanceLock) {
         webPreferences.sandbox = true;
         delete webPreferences.preload;
       });
+
+      // Pin a reverse-proxy guest's navigation as soon as it appears. The
+      // renderer fires PROXY_GUEST_REGISTER synchronously while appending the
+      // <webview>, before Electron has created this guest webContents, so the
+      // register handler's own sweep usually can't see the guest yet — this
+      // hook closes that race by attaching the guards once the guest exists on
+      // an already-hardened proxy partition. Non-proxy guests (Browser Panel on
+      // `persist:browser`) never match, so their window.open stays untouched.
+      if (isProxyGuestContents(contents)) {
+        attachProxyGuestNavGuards(contents);
+      }
     });
 
     // Flush the session's HTTP cache + any stale Service Worker registered
