@@ -73,6 +73,9 @@ function createMockTunnelProvider(): TunnelProvider & { started: boolean; stoppe
     getUrl() {
       return "https://test.trycloudflare.com";
     },
+    getState() {
+      return "demo";
+    },
     async healthCheck() {
       return true;
     },
@@ -466,6 +469,7 @@ describe("boot — fatal errors", () => {
       },
       async stop() {},
       getUrl() { return ""; },
+      getState() { return undefined; },
       async healthCheck() { return false; },
     };
 
@@ -752,6 +756,9 @@ describe("boot — shutdown", () => {
       },
       getUrl() {
         return "https://test.trycloudflare.com";
+      },
+      getState() {
+        return "demo";
       },
       async healthCheck() {
         return true;

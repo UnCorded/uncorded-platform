@@ -129,6 +129,12 @@ export interface TunnelProvider {
   }): Promise<string>;
   stop(): Promise<void>;
   getUrl(): string;
+  /** Tunnel lifecycle for the heartbeat's tunnel_state field: "demo" |
+   *  "named" | "local", flipping to "expired" once a demo tunnel is killed at
+   *  its 24h TTL. undefined before start() resolves (early heartbeats then omit
+   *  the field). Central persists this to gate the directory and drive the
+   *  client temp-URL banner / expired-restart prompt. */
+  getState(): string | undefined;
   healthCheck(): Promise<boolean>;
 }
 
@@ -632,7 +638,6 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
 
   // Mutable state for lazy getters — populated as subsystems come online
   let pluginCount = 0;
-  let tunnelState: string | undefined;
   let routerRef: MessageRouter | null = null;
   const deltaHandlers: DeltaHandlers = {};
 
@@ -661,7 +666,7 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
     fetch: deps.fetch,
     cachedPublicKeys: config.central_public_keys,
     cachedSyncVersion: config.last_sync_version,
-    getTunnelState: () => tunnelState,
+    getTunnelState: () => deps.tunnelProvider.getState(),
     // Phase 01 §11.5 — fold the latest update-state into every heartbeat so
     // Central can distinguish "server down" from "server installing" and
     // correlate runtime versions to release channels.
@@ -1846,8 +1851,6 @@ export async function boot(deps: BootDependencies): Promise<BootResult> {
           throw new Error(result.error.message);
         }
       });
-
-      tunnelState = "shutdown";
 
       await boundedStep("stop tunnel", async () => {
         await deps.tunnelProvider.stop();

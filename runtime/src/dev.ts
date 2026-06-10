@@ -56,6 +56,9 @@ const tunnelProvider: TunnelProvider = {
   getUrl() {
     return `http://localhost:${String(DEV_PORT)}`;
   },
+  getState() {
+    return "local";
+  },
   async healthCheck() {
     return true;
   },

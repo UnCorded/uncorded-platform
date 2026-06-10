@@ -21,6 +21,7 @@ import type { PublicKeyEntry } from "./heartbeat/types";
 import { createTokenValidator } from "./auth/token-validator";
 import { verifyImageSignature, isCosignPubkeyEmbedded } from "./signing/verify";
 import { awaitAuthenticatedTunnelReady, runRuntimeTunnelSelfProbe } from "./tunnel/ready";
+import { createDemoExpiry, DEMO_TUNNEL_TTL_MS } from "./tunnel/demo-expiry";
 import { rootLogger } from "@uncorded/shared";
 
 const log = rootLogger.child({ component: "entrypoint" });
@@ -314,6 +315,28 @@ function logCloudflaredLine(line: string): void {
 
 let cloudflaredProc: ReturnType<typeof Bun.spawn> | null = null;
 let currentTunnelUrl = LOCAL_FALLBACK_URL;
+// Tunnel lifecycle reported on the heartbeat's tunnel_state field. undefined
+// until start() resolves, then "demo" | "named" | "local", flipping to
+// "expired" when a demo tunnel hits its 24h TTL (see demoExpiry below).
+let tunnelState: string | undefined;
+
+// Arms a 24h countdown when a demo tunnel comes up. On fire we kill cloudflared,
+// drop the advertised URL back to the local fallback (so Central stops pointing
+// users at the now-dead trycloudflare address), and flip tunnel_state to
+// "expired" — the runtime keeps heartbeating, so the next poll tells Central and
+// the client to prompt a desktop restart. See ./tunnel/demo-expiry.ts.
+const demoExpiry = createDemoExpiry({
+  ttlMs: DEMO_TUNNEL_TTL_MS,
+  onExpire: () => {
+    log.warn("demo tunnel reached its 24h TTL — expiring", { url: currentTunnelUrl });
+    if (cloudflaredProc) {
+      cloudflaredProc.kill();
+      cloudflaredProc = null;
+    }
+    currentTunnelUrl = LOCAL_FALLBACK_URL;
+    tunnelState = "expired";
+  },
+});
 
 // `--protocol http2` forces TCP+HTTP/2 instead of the default QUIC. QUIC needs
 // a ~7 MiB UDP receive buffer (quic-go's default ask); unprivileged containers
@@ -462,6 +485,9 @@ const tunnelProvider: TunnelProvider = {
       log.info("starting cloudflare quick tunnel (demo mode)");
       try {
         currentTunnelUrl = await spawnDemoTunnel();
+        tunnelState = "demo";
+        // Start the 24h clock now that the demo URL is live.
+        demoExpiry.arm();
         log.info("cloudflare quick tunnel ready", { url: currentTunnelUrl });
         return currentTunnelUrl;
       } catch (err) {
@@ -478,6 +504,7 @@ const tunnelProvider: TunnelProvider = {
             "falling back to local-only mode",
         );
         currentTunnelUrl = LOCAL_FALLBACK_URL;
+        tunnelState = "local";
         return currentTunnelUrl;
       }
 
@@ -509,6 +536,7 @@ const tunnelProvider: TunnelProvider = {
       log.info("starting cloudflare authenticated tunnel", { publicUrl });
       try {
         currentTunnelUrl = await spawnAuthenticatedTunnel(tunnelToken, publicUrl);
+        tunnelState = "named";
         log.info("cloudflare authenticated tunnel ready", { url: currentTunnelUrl });
         return currentTunnelUrl;
       } catch (err) {
@@ -524,10 +552,14 @@ const tunnelProvider: TunnelProvider = {
         "set tunnelMode to 'demo' or 'cloudflare' for public access",
     );
     currentTunnelUrl = LOCAL_FALLBACK_URL;
+    tunnelState = "local";
     return currentTunnelUrl;
   },
 
   async stop() {
+    // Cancel the demo TTL so a shutdown mid-life doesn't leave a dangling
+    // timer firing against a torn-down process.
+    demoExpiry.clear();
     if (cloudflaredProc) {
       cloudflaredProc.kill();
       cloudflaredProc = null;
@@ -536,6 +568,10 @@ const tunnelProvider: TunnelProvider = {
 
   getUrl() {
     return currentTunnelUrl;
+  },
+
+  getState() {
+    return tunnelState;
   },
 
   async healthCheck() {
