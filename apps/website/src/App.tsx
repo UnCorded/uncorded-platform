@@ -59,6 +59,7 @@ import { AudioBlockedBanner } from "@/components/audio-blocked-banner";
 import { PostUpdateOverlay } from "@/components/server/post-update-overlay";
 import { cinematicState } from "@/stores/cinematic";
 import { ScreenShareOverlay } from "@/components/screen-share-overlay";
+import { ProxyMountOverlay } from "@/components/proxy-mount-overlay";
 import { ScreenSharePicker } from "@/components/voice/screen-share-picker";
 import { UserCardSheet } from "@/components/user-card-sheet";
 import { FilePreviewOverlay } from "@/components/file-preview-overlay";
@@ -1384,6 +1385,12 @@ function App() {
                 PortalContainer (40); pointer-events: none lets clicks fall
                 through to the iframe underneath. */}
             <ScreenShareOverlay />
+            {/* Host-owned reverse-proxy surfaces. Paints a sandboxed <iframe>
+                (web) or hardened <webview> (desktop) over the viewport rect a
+                proxy plugin reserves via sdk.proxy.reserveMount(). The real
+                surface lives in PortalContainer (z-40); this layer only carries
+                the placeholders, so it's pointer-events:none. */}
+            <ProxyMountOverlay />
             {/* PR-6 — Electron-only screen-share picker. Inert in browser
                 builds (returns null). Subscribes to main-process picker
                 requests pushed when LiveKit calls getDisplayMedia, renders

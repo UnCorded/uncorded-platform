@@ -45,7 +45,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 
-interface WebviewElement extends HTMLElement {
+export interface WebviewElement extends HTMLElement {
   src: string;
   goBack(): void;
   goForward(): void;
@@ -772,7 +772,7 @@ function IframeViewport(props: {
   );
 }
 
-function IframeSurface(props: { mountKey: string; url: string; onBlocked: () => void }) {
+export function IframeSurface(props: { mountKey: string; url: string; onBlocked: () => void }) {
   let placeholder!: HTMLDivElement;
   let iframe: HTMLIFrameElement | null = null;
   let lastMountKey: string | null = null;
@@ -947,9 +947,17 @@ function WebviewViewport(props: {
   );
 }
 
-function WebviewSurface(props: {
+export function WebviewSurface(props: {
   mountKey: string;
   url: string;
+  /**
+   * Electron session partition for the guest. Defaults to the shared browser
+   * partition; reverse-proxy mounts pass a per-server `persist:proxy:<serverId>`
+   * so a proxied app's cookies/storage are isolated from the general Browser
+   * Panel and from other servers. Applied only when the element is created —
+   * an adopted webview keeps its original partition (it's immutable post-attach).
+   */
+  partition?: string;
   onElementReady: (element: WebviewElement) => void;
   onElementReleased: (element: WebviewElement) => void;
 }) {
@@ -973,10 +981,11 @@ function WebviewSurface(props: {
     const next: WebviewElement = adopted ?? (() => {
       const element = document.createElement("webview") as WebviewElement;
       element.setAttribute("nodeintegration", "false");
-      // Bind every browser-panel webview to a persistent session partition.
-      // A webview without `partition` runs in an ephemeral in-memory session,
-      // so sign-in cookies wouldn't survive a tab close.
-      element.setAttribute("partition", "persist:browser");
+      // Bind every webview to a persistent session partition. A webview without
+      // `partition` runs in an ephemeral in-memory session, so sign-in cookies
+      // wouldn't survive a tab close. Browser panels share `persist:browser`;
+      // proxy mounts pass a per-server `persist:proxy:<serverId>` for isolation.
+      element.setAttribute("partition", props.partition ?? "persist:browser");
       return element;
     })();
 
