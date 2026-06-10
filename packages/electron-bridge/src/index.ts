@@ -57,6 +57,10 @@ export interface Server {
   visibility: "public" | "private";
   owner_id: string;
   tunnel_url: string | null;
+  /** Tunnel lifecycle reported by the runtime heartbeat: "demo" | "named" |
+   *  "local" | "expired", or null until the first heartbeat carries it.
+   *  Mirrors the website `Server` type so the bridge array stays assignable. */
+  tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;

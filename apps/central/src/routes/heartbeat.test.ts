@@ -78,6 +78,7 @@ describe("POST /v1/servers/:id/heartbeat", () => {
         server_secret: serverSecret,
         last_sync_version: 0,
         tunnel_url: "https://updated.trycloudflare.com",
+        tunnel_state: "demo",
         runtime_version: "1.1.0",
         connected_users: 12,
         plugin_count: 7,
@@ -85,13 +86,80 @@ describe("POST /v1/servers/:id/heartbeat", () => {
     });
 
     const rows =
-      await ts.sql`SELECT tunnel_url, runtime_version, connected_users, plugin_count, is_online FROM servers WHERE id = ${serverId}`;
+      await ts.sql`SELECT tunnel_url, tunnel_state, runtime_version, connected_users, plugin_count, is_online FROM servers WHERE id = ${serverId}`;
     const server = rows[0]!;
     expect(server.tunnel_url).toBe("https://updated.trycloudflare.com");
+    expect(server.tunnel_state).toBe("demo");
     expect(server.runtime_version).toBe("1.1.0");
     expect(server.connected_users).toBe(12);
     expect(server.plugin_count).toBe(7);
     expect(server.is_online).toBe(true);
+  });
+
+  test("persists a changed tunnel_state and bumps updated_at; an unchanged one does not", async () => {
+    // Land a known baseline state.
+    await fetch(`${ts.url}/v1/servers/${serverId}/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        server_secret: serverSecret,
+        last_sync_version: 0,
+        tunnel_url: "https://state-test.trycloudflare.com",
+        tunnel_state: "demo",
+        runtime_version: "1.1.0",
+        connected_users: 0,
+        plugin_count: 0,
+      }),
+    });
+    const before =
+      await ts.sql`SELECT tunnel_state, updated_at FROM servers WHERE id = ${serverId}`;
+    expect(before[0]!.tunnel_state).toBe("demo");
+    const baselineUpdatedAt = before[0]!.updated_at;
+
+    // A change to "expired" must persist and advance updated_at (it's the only
+    // changed column — every other field is identical to the baseline above).
+    await fetch(`${ts.url}/v1/servers/${serverId}/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        server_secret: serverSecret,
+        last_sync_version: 0,
+        tunnel_url: "https://state-test.trycloudflare.com",
+        tunnel_state: "expired",
+        runtime_version: "1.1.0",
+        connected_users: 0,
+        plugin_count: 0,
+      }),
+    });
+    const afterChange =
+      await ts.sql`SELECT tunnel_state, updated_at FROM servers WHERE id = ${serverId}`;
+    expect(afterChange[0]!.tunnel_state).toBe("expired");
+    expect(new Date(afterChange[0]!.updated_at as string).getTime()).toBeGreaterThan(
+      new Date(baselineUpdatedAt as string).getTime(),
+    );
+    const changedUpdatedAt = afterChange[0]!.updated_at;
+
+    // Re-sending the identical state must NOT advance updated_at — the state
+    // UPDATE is gated by the IS DISTINCT FROM chain, so a no-op heartbeat is a
+    // no-op write.
+    await fetch(`${ts.url}/v1/servers/${serverId}/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        server_secret: serverSecret,
+        last_sync_version: 0,
+        tunnel_url: "https://state-test.trycloudflare.com",
+        tunnel_state: "expired",
+        runtime_version: "1.1.0",
+        connected_users: 0,
+        plugin_count: 0,
+      }),
+    });
+    const afterNoop =
+      await ts.sql`SELECT updated_at FROM servers WHERE id = ${serverId}`;
+    expect(new Date(afterNoop[0]!.updated_at as string).getTime()).toBe(
+      new Date(changedUpdatedAt as string).getTime(),
+    );
   });
 
   test("returns 401 for invalid secret", async () => {

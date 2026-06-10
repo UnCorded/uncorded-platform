@@ -17,6 +17,7 @@ function makeServer(id: string, name: string): Server {
     visibility: "public",
     owner_id: "owner",
     tunnel_url: "https://tunnel.example/s",
+    tunnel_state: null,
     runtime_version: "1.0.0",
     connected_users: 0,
     plugin_count: 0,

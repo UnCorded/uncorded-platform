@@ -113,6 +113,7 @@ function makeServer(id = "srv-err") {
     visibility: "public" as const,
     owner_id: "owner",
     tunnel_url: "https://tunnel.example",
+    tunnel_state: null,
     runtime_version: "1.0.0",
     connected_users: 0,
     plugin_count: 0,
