@@ -29,3 +29,18 @@ export function surfaceKeyOf(content: PanelContent): string {
   const _exhaustive: never = content;
   throw new Error(`Unknown PanelContent type: ${JSON.stringify(_exhaustive)}`);
 }
+
+// Identity key for a host-owned reverse-proxy mount surface (the dedicated
+// webview on desktop, sandboxed iframe on web). A proxy mount is not a
+// PanelContent variant — the panel stays type:"plugin" and the host promotes
+// the approved mount into its own surface — so this key lives alongside
+// surfaceKeyOf rather than inside it.
+//
+// Same contract as surfaceKeyOf: the key is pure panel-mount identity
+// (server + plugin slug + mount name) and MUST NOT encode the render platform
+// (webview vs iframe) — that's fixed per session by isElectron(), exactly like
+// the browser key — nor any ephemeral content (the session url/openUrl, which
+// are re-bootstrapped on each mount and never persisted).
+export function proxyMountSurfaceKey(serverId: string, slug: string, mountName: string): string {
+  return `proxy-mount:${serverId}:${slug}:${mountName}`;
+}

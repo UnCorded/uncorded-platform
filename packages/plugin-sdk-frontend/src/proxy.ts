@@ -23,6 +23,8 @@
 // the iframe. `credentials: "include"` is required for the response
 // `Set-Cookie` to be stored.
 
+import { observeProxyViewport, type ProxyViewportHandle } from "./proxy-viewport";
+
 /** Resolved proxy mount session returned by `sdk.proxy.openMount()`. */
 export interface ProxyMountSession {
   /** Proxied URL to set as the panel iframe `src`. Cookie already minted. */
@@ -66,9 +68,23 @@ export interface ProxyPluginApi {
    * and wire `openUrl` to an "Open in browser" affordance (required for Safari,
    * harmless elsewhere).
    *
+   * Use this for the self-embedding model — the plugin owns a nested iframe.
    * Throws `ProxyError` on any failure — see the `ProxyError` doc-comment.
    */
   openMount(mount: string): Promise<ProxyMountSession>;
+
+  /**
+   * Reserve a viewport for one of this plugin's declared `proxy_mounts` and let
+   * the HOST render the proxied app over it — a dedicated, hardened Electron
+   * `<webview>` on desktop (escaping `X-Frame-Options`/`frame-ancestors`), or a
+   * sandboxed `<iframe>` on web. The plugin only supplies the placeholder
+   * element to reserve; the SDK reports its layout rect to the shell (rAF-
+   * coalesced) and the host bootstraps the session and positions the surface.
+   *
+   * Returns a dispose function that releases the viewport; calling it more than
+   * once is a no-op.
+   */
+  reserveMount(mount: string, el: HTMLElement): ProxyViewportHandle;
 }
 
 interface ProxyClientDeps {
@@ -76,6 +92,8 @@ interface ProxyClientDeps {
   slug: string;
   /** Bearer token to authenticate the bootstrap. */
   token: string;
+  /** Posts a message to the shell (already origin-targeted). */
+  send: (msg: unknown) => void;
   /** fetch implementation. Injected so unit tests can stub it. */
   fetchImpl?: typeof fetch;
 }
@@ -88,6 +106,12 @@ export function createProxyClient(deps: ProxyClientDeps): ProxyPluginApi {
   return {
     openMount(mount) {
       return openMount(mount, deps);
+    },
+    reserveMount(mount, el) {
+      if (typeof mount !== "string" || mount.length === 0) {
+        throw new ProxyError("INVALID_ARGUMENT", "reserveMount() requires a non-empty mount name.");
+      }
+      return observeProxyViewport({ send: deps.send }, el, deps.slug, mount);
     },
   };
 }

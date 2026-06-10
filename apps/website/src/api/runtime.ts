@@ -79,6 +79,49 @@ export async function errorFromResponse(res: Response, defaultMsg: string): Prom
   }
 }
 
+// Host-owned reverse-proxy mount bootstrap.
+//
+// Mints a proxy session for an approved mount and returns the two URLs the host
+// needs to render the surface:
+//   url     — the in-place mount URL (/proxy/<slug>/<mount>/) for the web
+//             sandboxed-iframe surface; the proxy-session cookie this POST sets
+//             (credentials below) authorizes it.
+//   openUrl — the single-use first-party open ticket (/proxy-open/...) for the
+//             desktop <webview>: navigating top-level mints the session cookie
+//             inside the webview's partition jar, which a cross-site in-frame
+//             Set-Cookie can't reach (Safari/WebKit, and partitioned jars).
+//
+// The runtime returns both as runtime-RELATIVE paths — it assumes it's called
+// from inside the tunnel-origin iframe. The host runs at the shell origin, so we
+// absolutize both against tunnelUrl before handing them to a surface element.
+// `credentials: "include"` lets the browser store the proxy-session cookie this
+// POST sets for the tunnel origin, exactly as the in-iframe SDK openMount does.
+export async function bootstrapProxyMount(
+  tunnelUrl: string,
+  serverId: string,
+  slug: string,
+  mount: string,
+): Promise<{ url: string; openUrl: string }> {
+  const res = await runtimeFetch(
+    tunnelUrl,
+    serverId,
+    `/proxy-sessions/${encodeURIComponent(slug)}/${encodeURIComponent(mount)}`,
+    { method: "POST", credentials: "include" },
+  );
+  if (!res.ok) throw await errorFromResponse(res, "Failed to open proxy mount");
+  const body = (await res.json()) as { url?: unknown; openUrl?: unknown };
+  if (typeof body.url !== "string" || body.url.length === 0) {
+    throw new Error("MALFORMED_RESPONSE: proxy bootstrap response is missing `url`");
+  }
+  if (typeof body.openUrl !== "string" || body.openUrl.length === 0) {
+    throw new Error("MALFORMED_RESPONSE: proxy bootstrap response is missing `openUrl`");
+  }
+  return {
+    url: new URL(body.url, tunnelUrl).toString(),
+    openUrl: new URL(body.openUrl, tunnelUrl).toString(),
+  };
+}
+
 export async function listWorkspaceLayouts(
   tunnelUrl: string,
   serverId: string,

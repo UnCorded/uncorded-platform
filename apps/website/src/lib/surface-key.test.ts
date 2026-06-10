@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import type { PanelContent } from "@uncorded/protocol";
-import { surfaceKeyOf } from "./surface-key";
+import { surfaceKeyOf, proxyMountSurfaceKey } from "./surface-key";
 
 // surfaceKeyOf reads isElectron() at call time, which checks window.electron.
 // Stub window for each test so we exercise both the web and Electron branches
@@ -109,6 +109,47 @@ describe("surfaceKeyOf (browser)", () => {
     setElectron(true);
     const electron = surfaceKeyOf(browser());
     expect(web).not.toBe(electron);
+  });
+});
+
+describe("proxyMountSurfaceKey", () => {
+  test("encodes server + slug + mount name", () => {
+    expect(proxyMountSurfaceKey("srv-1", "foundry", "vtt")).toBe("proxy-mount:srv-1:foundry:vtt");
+  });
+
+  test("different serverId ⇒ different key (separate mount)", () => {
+    expect(proxyMountSurfaceKey("srv-1", "foundry", "vtt")).not.toBe(
+      proxyMountSurfaceKey("srv-2", "foundry", "vtt"),
+    );
+  });
+
+  test("different slug ⇒ different key", () => {
+    expect(proxyMountSurfaceKey("srv-1", "foundry", "vtt")).not.toBe(
+      proxyMountSurfaceKey("srv-1", "grafana", "vtt"),
+    );
+  });
+
+  test("different mount name ⇒ different key", () => {
+    expect(proxyMountSurfaceKey("srv-1", "foundry", "vtt")).not.toBe(
+      proxyMountSurfaceKey("srv-1", "foundry", "admin"),
+    );
+  });
+
+  test("stable across calls and independent of platform (isElectron flip)", () => {
+    setElectron(false);
+    const web = proxyMountSurfaceKey("srv-1", "foundry", "vtt");
+    setElectron(true);
+    const electron = proxyMountSurfaceKey("srv-1", "foundry", "vtt");
+    expect(web).toBe(electron);
+    expect(web).toBe("proxy-mount:srv-1:foundry:vtt");
+  });
+
+  test("distinct from the plugin panel surface key for the same server/slug", () => {
+    // The plugin iframe and the promoted proxy surface coexist — they must
+    // never collide on one portal mount.
+    expect(proxyMountSurfaceKey("srv-1", "foundry", "vtt")).not.toBe(
+      surfaceKeyOf(plugin({ serverId: "srv-1", slug: "foundry" })),
+    );
   });
 });
 

@@ -42,6 +42,7 @@ import { openUserCard } from "@/stores/user-card";
 import { openFilePreview } from "@/stores/file-preview";
 import { startFileDownload } from "@/stores/file-download";
 import * as voiceManager from "@/lib/voice-manager";
+import * as proxyMountManager from "@/lib/proxy-mount-manager";
 import * as portalHost from "@/lib/portal-host";
 import { emitPluginPanelFocus, emitPluginPanelOpen } from "@/lib/plugin-panel-events";
 import { surfaceKeyOf } from "@/lib/surface-key";
@@ -405,6 +406,30 @@ function createPluginHandle(
       return;
     }
 
+    // `platform.proxy.*-viewport` envelopes reserve a host-owned proxy mount
+    // surface over a rect the plugin reports (sdk.proxy.reserveMount). Same
+    // trust model as voice screen-slots: the identity that drives the
+    // bootstrap and surface key — serverId/slug/tunnelUrl/frameKey/iframe —
+    // comes from this closure, never the payload; only `mountName` and `rect`
+    // are read from the (validated) message.
+    if (typeof msg.type === "string" && msg.type.startsWith("platform.proxy.")) {
+      const raw = ev.data as Record<string, unknown>;
+      const mountName = proxyMountManager.parseMountName(raw["mountName"]);
+      if (mountName === null) return;
+      if (msg.type === "platform.proxy.register-viewport") {
+        const rect = proxyMountManager.parseViewportRect(raw["rect"]);
+        if (rect === null) return;
+        proxyMountManager.register({ frameKey: key, iframe, serverId, slug, tunnelUrl, mountName, rect });
+      } else if (msg.type === "platform.proxy.update-viewport") {
+        const rect = proxyMountManager.parseViewportRect(raw["rect"]);
+        if (rect === null) return;
+        proxyMountManager.update({ frameKey: key, mountName, rect });
+      } else if (msg.type === "platform.proxy.unregister-viewport") {
+        proxyMountManager.unregister({ frameKey: key, mountName });
+      }
+      return;
+    }
+
     if (msg.type === "request") {
       ws.send(serverId, ev.data as ClientMessage, handlerKey);
     }
@@ -457,6 +482,10 @@ function createPluginHandle(
       // mount key and stay there even if portal-host rekeys the entry for
       // cross-workspace drag.
       voiceManager.unregisterScreenSlotsForFrame(key);
+      // Likewise sweep any host-owned proxy-mount surfaces this iframe
+      // reserved — same closure-captured `key`, real teardown of the surface
+      // happens in the overlay when the manager entry disappears.
+      proxyMountManager.unregisterForFrame(key);
       // WeakMap entry clears via GC after this returns; explicit delete is
       // unnecessary but cheap.
       handlesByIframe.delete(iframe);
