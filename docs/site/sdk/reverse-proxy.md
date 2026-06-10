@@ -88,7 +88,7 @@ logic of its own).
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `name` | string | Slug-safe (`[a-z0-9-]`), unique within the plugin. Appears in the URL: `/proxy/<slug>/<name>/*`. |
+| `name` | string | Slug-safe and unique within the plugin: lowercase, **starts with a letter**, hyphen-separated segments (`[a-z][a-z0-9]*(-[a-z0-9]+)*` — no leading/trailing or doubled hyphens). Appears in the URL: `/proxy/<slug>/<name>/*`. |
 | `upstream_setting` | string | **Key of a setting in this same manifest** (type `string` or `secret`) whose value is the upstream URL. The manifest never carries the URL directly. |
 | `access` | `"members"` \| `"owner"` | Optional, defaults to `"members"`. `owner` restricts the mount to the server owner/admins. |
 
