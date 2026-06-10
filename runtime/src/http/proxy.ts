@@ -807,6 +807,17 @@ async function forwardToUpstream(args: ForwardArgs): Promise<Response> {
     }
   }
 
+  // Bun's fetch transparently decodes gzip/deflate/br/zstd bodies but leaves
+  // content-encoding/-length describing the *compressed* bytes. We ask upstream
+  // for identity (sanitizeRequestHeaders), so a compliant upstream sends neither;
+  // but a non-compliant one may compress anyway. Drop the now-false framing so the
+  // client doesn't try to re-decode already-plain bytes (the rewrite branch above
+  // does the same after .text()).
+  if (outHeaders.has("content-encoding")) {
+    outHeaders.delete("content-encoding");
+    outHeaders.delete("content-length");
+  }
+
   // Stream the body with an idle deadline; the connection slot is held until the
   // stream settles (close, error, or client cancel).
   const guarded = withIdleTimeout(upstreamRes.body, limits.idleStreamTimeoutMs, {

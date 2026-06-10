@@ -580,15 +580,17 @@ interface EchoBody {
 }
 
 describe("Phase 2: request header policy", () => {
-  test("strips authorization, proxy-session cookie, and client-spoofed forwarded headers; sets runtime identity", async () => {
+  test("forwards the app's Authorization, strips the proxy-session cookie and spoofed forwarded headers; sets runtime identity", async () => {
     h = setup({ upstreamFetch: echoUpstream() });
     const cookie = await bootstrapCookie();
 
     const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/`, {
       headers: {
         Cookie: `${cookie}; app_session=keepme`,
-        Authorization: "Bearer member-token",
+        // A token-auth app's own JS sets this; it must reach the app's backend.
+        Authorization: "Bearer app-jwt",
         Referer: `${h.baseUrl}/proxy-open/${SLUG}/app?ticket=leaky-ticket`,
+        "Accept-Encoding": "gzip, br",
         "x-forwarded-for": "1.2.3.4",
         "x-forwarded-proto": "https",
         "x-uncorded-user-id": "attacker",
@@ -599,10 +601,12 @@ describe("Phase 2: request header policy", () => {
     expect(res.status).toBe(200);
     const echo = (await res.json()) as EchoBody;
 
-    // Runtime credentials never reach the upstream.
-    expect(echo.headers["authorization"]).toBeUndefined();
+    // The proxied app's own Authorization is forwarded so token-auth apps work.
+    expect(echo.headers["authorization"]).toBe("Bearer app-jwt");
     // Referer is stripped so a /proxy-open handoff ticket can't leak upstream.
     expect(echo.headers["referer"]).toBeUndefined();
+    // Accept-Encoding is normalized to identity (the runtime decodes bodies itself).
+    expect(echo.headers["accept-encoding"]).toBe("identity");
     // Connection-listed token is dropped as dynamic hop-by-hop. (The transport's
     // own `connection` header is re-added by the fetch client on the upstream
     // hop and is not one of ours.)
@@ -614,6 +618,34 @@ describe("Phase 2: request header policy", () => {
 
     // The proxy-session cookie is stripped; the app cookie survives.
     expect(echo.headers["cookie"]).toBe("app_session=keepme");
+  });
+
+  test("strips false content-encoding/-length when a non-compliant upstream gzips the stream", async () => {
+    const payload = "globalThis.__APP_BOOT__ = " + JSON.stringify("x".repeat(500)) + ";";
+    h = setup({
+      // An upstream that ignores Accept-Encoding: identity and gzips anyway. Bun's
+      // fetch decodes the body but keeps the (now-false) gzip framing — the proxy
+      // must drop it so the browser doesn't try to re-decode plain bytes.
+      upstreamFetch: () => {
+        const gz = Bun.gzipSync(Buffer.from(payload));
+        return new Response(gz, {
+          headers: {
+            "content-type": "application/javascript",
+            "content-encoding": "gzip",
+            "content-length": String(gz.length),
+          },
+        });
+      },
+    });
+    const cookie = await bootstrapCookie();
+
+    const res = await fetch(`${h.baseUrl}/proxy/${SLUG}/app/boot.js`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    // The lie is gone, so the client treats the bytes as identity...
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    // ...and the body decodes to the original source.
+    expect(await res.text()).toBe(payload);
   });
 
   test("rejects an oversized inbound header set with 431", async () => {
