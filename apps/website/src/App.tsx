@@ -1,6 +1,7 @@
 import { createSignal, createEffect, createMemo, on, onMount, onCleanup, Show } from "solid-js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Titlebar } from "@/components/titlebar";
+import { TunnelStateBanner, TunnelExpiredGate } from "@/components/tunnel-state-notice";
 import { PanelLayout } from "@/components/panel";
 import { NEW_WORKSPACE_TAB_ID, type Workspace, WorkspaceTabs } from "@/components/workspace-tabs";
 import { PortalContainer } from "@/components/portal-container";
@@ -1587,27 +1588,42 @@ function AppShell(props: AppShellProps) {
           </Show>
         </header>
 
+        {/* Temp-URL warning strip (WS4) — shown while the active server is on a
+            demo tunnel. Reads activeServer().tunnel_state internally; renders
+            nothing when there's no server or the tunnel isn't a demo one. */}
+        <TunnelStateBanner />
+
         {/* Panel workspace or welcome state */}
         <Show
           when={hasServer()}
           fallback={<NoServerWelcome />}
         >
-          <div class="flex flex-1 min-h-0 overflow-hidden">
-            <PanelLayout
-              node={props.activeLayout}
-              focusedLeafId={props.focusedLeafId}
-              canClose={props.canClose}
-              onSplit={props.onSplit}
-              onToggleFocus={props.onTogglePanelFocus}
-              onClose={props.onPanelClose}
-              onUpdateRatio={props.onUpdateRatio}
-              getContent={props.getContent}
-              onDrop={props.onDrop}
-              onUpdateContent={props.onUpdateContent}
-              onDropSplit={props.onDropSplit}
-              onMovePanel={props.onMovePanel}
-            />
-          </div>
+          {/* Expired-tunnel gate (WS4). When the demo tunnel hit its 24h TTL
+              the public URL is dead, so block the workspace entirely and tell
+              the user to restart the desktop app. Detect via tunnel_state only,
+              never by hostname. Composes with WS1: with the workspace
+              unmounted, no plugin iframe loads a dead src. */}
+          <Show
+            when={activeServer()?.tunnel_state !== "expired"}
+            fallback={<TunnelExpiredGate />}
+          >
+            <div class="flex flex-1 min-h-0 overflow-hidden">
+              <PanelLayout
+                node={props.activeLayout}
+                focusedLeafId={props.focusedLeafId}
+                canClose={props.canClose}
+                onSplit={props.onSplit}
+                onToggleFocus={props.onTogglePanelFocus}
+                onClose={props.onPanelClose}
+                onUpdateRatio={props.onUpdateRatio}
+                getContent={props.getContent}
+                onDrop={props.onDrop}
+                onUpdateContent={props.onUpdateContent}
+                onDropSplit={props.onDropSplit}
+                onMovePanel={props.onMovePanel}
+              />
+            </div>
+          </Show>
         </Show>
       </SidebarInset>
     </SidebarProvider>

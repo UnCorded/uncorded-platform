@@ -186,6 +186,41 @@ describe("openConnection error branches", () => {
   });
 });
 
+describe("expired-tunnel gate (WS4)", () => {
+  test("connect() refuses to dial or mint a token when tunnel_state is expired", async () => {
+    // No getServerToken mock is programmed; if the gate failed to short-circuit,
+    // the beforeEach default rejection would route through the catch and we'd
+    // see a reconnect scheduled. The gate must return before the token fetch.
+    const server = { ...makeServer("srv-expired"), tunnel_state: "expired" };
+    await wsModule.connect(server);
+    expect(FakeWebSocket.instances.length).toBe(0);
+    expect(getServerToken).not.toHaveBeenCalled();
+    // Defensive: nothing should have been scheduled, but clear just in case so
+    // a regression doesn't leak a timer into a sibling test.
+    wsModule.abortReconnect("srv-expired");
+  });
+
+  test("forceReconnect() refuses to dial when tunnel_state is expired", async () => {
+    const server = { ...makeServer("srv-expired-force"), tunnel_state: "expired" };
+    await wsModule.forceReconnect(server);
+    expect(FakeWebSocket.instances.length).toBe(0);
+    expect(getServerToken).not.toHaveBeenCalled();
+    wsModule.abortReconnect("srv-expired-force");
+  });
+
+  test("connect() still dials when tunnel_state is demo (not expired)", async () => {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    });
+    FakeWebSocket.autoOpen = true;
+    const server = { ...makeServer("srv-demo"), tunnel_state: "demo" };
+    await wsModule.connect(server);
+    expect(FakeWebSocket.instances.length).toBe(1);
+    wsModule.disconnect("srv-demo");
+  });
+});
+
 describe("forceReconnect (PR-TR5)", () => {
   test("no-op when the server has no tunnel_url", async () => {
     const server = { ...makeServer("srv-no-tunnel"), tunnel_url: null };
