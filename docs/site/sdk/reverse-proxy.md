@@ -288,10 +288,11 @@ Most "the panel is blank" problems are an app that assumes it lives at `/`.
 ### The mount is a subpath — give your app its base path
 
 The runtime rewrites **root-absolute URLs in HTML and CSS** (`/styles/app.css` →
-`/proxy/<slug>/<mount>/styles/app.css`) so a static page loads. It does **not**
-rewrite URLs your app builds in **JavaScript** — `fetch("/api/…")`, dynamic
-`import()`, a WebSocket/`socket.io` connection URL. Those still point at the
-runtime root and miss the mount.
+`/proxy/<slug>/<mount>/styles/app.css`) — including those in inline
+`style="…url()…"` and `<base href>` — so a static page loads. It does **not**
+rewrite URLs your app builds in **JavaScript** (`fetch("/api/…")`, dynamic
+`import()`, a WebSocket/`socket.io` connection URL), nor absolute URLs that
+hard-code the upstream's own host. Those still miss the mount.
 
 So your app needs to know its public base path. The runtime tells it on every
 upstream request (HTTP and WebSocket) via:
@@ -300,28 +301,69 @@ upstream request (HTTP and WebSocket) via:
 X-Forwarded-Prefix: /proxy/<slug>/<mount>
 ```
 
-- **App honors `X-Forwarded-Prefix`** (many reverse-proxy-aware frameworks do) →
-  it emits URLs under the mount automatically. Nothing else to do.
-- **App doesn't** → set the app's own route prefix to that exact path:
-  - Foundry VTT: `routePrefix` (Configuration → or `options.json`)
-  - Vite dev server: `--base /proxy/<slug>/<mount>/`
-  - Most servers: a "base path" / "base href" / "script name" setting
+If your framework is reverse-proxy-aware it reads that header and emits URLs under
+the mount automatically — nothing to do. Otherwise set the app's own base-path
+option to that exact path:
+
+| App / framework | Base-path setting |
+| --- | --- |
+| Foundry VTT | `routePrefix` (Configuration → or `options.json`) |
+| Vite (dev) | `--base /proxy/<slug>/<mount>/` (plus `--host`, see below) |
+| Vite / Rollup (build) | `base` in `vite.config` |
+| Next.js | `basePath` in `next.config.js` |
+| Create React App | `"homepage"` in `package.json` (or `PUBLIC_URL`) |
+| Express / Node | mount the router under the prefix, or read `X-Forwarded-Prefix` |
+| Generic | a "base path" / "base href" / "script name" / "context path" setting |
 
 > **Caveat — the prefix has three path segments** (`proxy`, `<slug>`, `<mount>`).
 > A few apps only accept a single-segment route prefix; those can't be mounted at
 > a subpath and need to be run at a dedicated origin instead.
 
+### Authentication — cookies *or* tokens both work
+
+The proxy is auth-agnostic. Whatever your app uses to authenticate its own users
+flows through untouched:
+
+- **Session cookies** — your app's `Set-Cookie` is rewritten to the mount path and
+  replayed by the browser on every request, including the WebSocket handshake.
+- **Bearer / token-in-`localStorage`** — your app's own `Authorization: Bearer …`
+  header is forwarded to its backend.
+
+UnCorded's *own* session never reaches your app: the proxy-session cookie and the
+bootstrap Bearer are stripped, and the authenticated user is passed separately as
+`X-Uncorded-User-Id`.
+
+### What your app receives
+
+Every forwarded request (HTTP and WS) carries:
+
+| Header | Value |
+| --- | --- |
+| `Host` | the upstream's own host — generate absolute URLs from `X-Forwarded-Host` instead if your app emits any |
+| `X-Forwarded-Host` | the public UnCorded host the user addressed |
+| `X-Forwarded-Proto` | `https` / `http` |
+| `X-Forwarded-For` | client IP |
+| `X-Forwarded-Prefix` | `/proxy/<slug>/<mount>` — your public base path |
+| `X-Uncorded-User-Id` | the authenticated UnCorded user |
+
+Responses stream through as-is. The runtime requests **uncompressed** bodies from
+your app (`Accept-Encoding: identity`) so it can rewrite HTML/CSS reliably — you
+configure nothing, and the public edge still compresses to the end user.
+
 ### Real-time apps (WebSockets)
 
 Declare `proxy.websocket:self` in `permissions`. The proxy then bridges
 `wss://…/proxy/<slug>/<mount>/*` to the upstream and — **on the handshake** —
-forwards the same context it sends on HTTP requests: your app's cookies (so a
-socket authenticated by session cookie, like Foundry's, sees its session), the
-`x-forwarded-*` identity headers, and `X-Forwarded-Prefix`. You don't configure
-any of this; it mirrors the HTTP path automatically.
+forwards the same context it sends on HTTP: your app's cookies (so a socket
+authenticated by session cookie, like Foundry's, sees its session), any
+`Authorization` header, the `x-forwarded-*` identity headers, and
+`X-Forwarded-Prefix`. You don't configure any of this; it mirrors the HTTP path
+automatically.
 
-(The runtime's own proxy-session cookies are stripped and never reach the
-upstream — only your app's cookies are forwarded.)
+> **Origin checks:** the runtime composes the upstream socket itself, so a WS
+> server that enforces a strict `Origin` allowlist (some `socket.io` configs,
+> Jupyter) may need the upstream's own origin allowed. Most apps authenticate the
+> socket by cookie/token and don't require this.
 
 ### Changing the upstream or port
 
