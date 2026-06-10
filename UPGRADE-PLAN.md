@@ -1,7 +1,7 @@
 # Electron 33 → 42 Upgrade Plan
 
 **Branch:** `upgrade/electron-42` · **Worktree:** `working/worktrees/electron-42-upgrade`
-**Scoped:** 2026-06-10 · **Target:** Electron 42 (latest stable, Chromium 148 / Node 24.16, supported to ~Nov 2026)
+**Scoped:** 2026-06-10 · **Target:** Electron 42.4.0 (latest stable, Chromium 148.0.7778.254 / Node 24.16.0, supported to 20 Oct 2026)
 **Current:** Electron 33.4.11 (8 majors behind; v33 is EOL)
 
 ---
@@ -42,7 +42,7 @@ stays a **must-test** item precisely because it fails quietly.
 | 36 | 136 | 22.14 | Linux GTK4 default on GNOME; commandLine lowercases switches |
 | 38 | 140 | 22.18 | Linux Wayland default |
 | 40 | 144 | 24.x | **Node 22→24 jump** |
-| **42 (target)** | 148 | 24.16 | latest stable, supported ~Nov 2026 |
+| **42 (target)** | 148.0.7778.254 | 24.16.0 | latest stable (09 Jun 2026), supported to 20 Oct 2026 |
 
 ---
 

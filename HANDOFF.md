@@ -5,7 +5,7 @@ Copy the block below into a fresh Claude Code session started **in the
 
 ---
 
-```
+```text
 We're upgrading the UnCorded desktop app (apps/desktop) from Electron 33.4.11 to
 Electron 42. The upgrade has already been scoped — read UPGRADE-PLAN.md in this
 worktree root first; it has the full risk analysis, the exact dep set, the
