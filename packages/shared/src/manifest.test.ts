@@ -1360,6 +1360,74 @@ describe("validateManifest", () => {
       );
     });
 
+    test("accepts an in-range max_frame_bytes", () => {
+      const m = expectOk(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 1_048_576 }],
+          }),
+        ),
+      );
+      expect(m.proxy_mounts?.[0]?.max_frame_bytes).toBe(1_048_576);
+    });
+
+    test("accepts the min and max boundary values for max_frame_bytes", () => {
+      expectOk(
+        validateManifest(
+          proxyManifest({ proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 1024 }] }),
+        ),
+      );
+      expectOk(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 16 * 1024 * 1024 }],
+          }),
+        ),
+      );
+    });
+
+    test("rejects max_frame_bytes below the floor", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({ proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 1023 }] }),
+        ),
+        "INVALID_PROXY_MOUNT_MAX_FRAME_BYTES",
+      );
+    });
+
+    test("rejects max_frame_bytes above the ceiling", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 16 * 1024 * 1024 + 1 }],
+          }),
+        ),
+        "INVALID_PROXY_MOUNT_MAX_FRAME_BYTES",
+      );
+    });
+
+    test("rejects a non-integer max_frame_bytes", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: 65_536.5 }],
+          }),
+        ),
+        "INVALID_PROXY_MOUNT_MAX_FRAME_BYTES",
+      );
+    });
+
+    test("rejects a non-numeric max_frame_bytes", () => {
+      expectErrorCode(
+        validateManifest(
+          proxyManifest({
+            proxy_mounts: [{ name: "app", upstream_setting: "upstream_url", max_frame_bytes: "1mb" }],
+          }),
+        ),
+        "INVALID_PROXY_MOUNT_MAX_FRAME_BYTES",
+      );
+    });
+
     test("requires a proxy.* capability when proxy_mounts present", () => {
       expectErrorCode(
         validateManifest(proxyManifest({ permissions: ["data.sql:self"] })),

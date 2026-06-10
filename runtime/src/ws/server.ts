@@ -9,7 +9,7 @@
 //   computation. 30s aligns with the spec's sdk.handle callback limit (§04).
 
 import type { Server } from "bun";
-import { rootLogger } from "@uncorded/shared";
+import { rootLogger, MAX_PROXY_WS_FRAME_BYTES } from "@uncorded/shared";
 import type { SubprocessManager } from "../subprocess";
 import type {
   TokenValidator,
@@ -334,6 +334,12 @@ export function createWsServer(options: WsServerOptions): WsServerHandle {
       // only when the tunnel severed it.
       idleTimeout: 60,
       sendPings: true,
+      // Transport-level frame ceiling. Pinned to the proxy hard ceiling so a
+      // mount that raises its `max_frame_bytes` is never silently undercut by
+      // Bun's default. Platform (/ws) frames stay capped at MAX_WS_FRAME_BYTES
+      // by the explicit application-level check in `message()` below; this only
+      // raises the floor for the bridge's own per-mount enforcement.
+      maxPayloadLength: MAX_PROXY_WS_FRAME_BYTES,
 
       open(ws) {
         // Proxy sockets have no auth handshake — hand straight to the bridge.

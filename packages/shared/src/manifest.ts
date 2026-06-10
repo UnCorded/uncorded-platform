@@ -92,6 +92,24 @@ export interface PluginSettingStop {
 export type ProxyMountAccess = "members" | "owner";
 
 /**
+ * Default cap on a proxied WebSocket frame (message), in bytes, when a mount
+ * does not declare `max_frame_bytes`. Frames larger than the active cap close
+ * the socket with 1009. 64 KiB is safe for chat-style sockets but too small for
+ * apps that bulk-sync (e.g. Foundry VTT world state).
+ */
+export const DEFAULT_PROXY_WS_FRAME_BYTES = 64 * 1024;
+
+/**
+ * Hard ceiling on a mount's `max_frame_bytes`. Also bounds the runtime's
+ * WebSocket transport payload limit, so a mount can never request a frame the
+ * transport would silently drop. 16 MiB matches Bun's default `maxPayloadLength`.
+ */
+export const MAX_PROXY_WS_FRAME_BYTES = 16 * 1024 * 1024;
+
+/** Floor on a mount's `max_frame_bytes` — below this the override is pointless. */
+export const MIN_PROXY_WS_FRAME_BYTES = 1024;
+
+/**
  * A reverse-proxy mount declared in the manifest. After an owner approves it,
  * the runtime serves the configured upstream under `/proxy/<slug>/<name>/*`.
  * See docs/reverse-proxy/plugin-reverse-proxy-plan.md §Manifest Contract.
@@ -107,6 +125,15 @@ export interface ProxyMount {
   upstream_setting: string;
   /** Access policy. Optional; defaults to "members". */
   access?: ProxyMountAccess;
+  /**
+   * Optional override for the maximum WebSocket frame (message) size the proxy
+   * relays in either direction for this mount, in bytes. A frame larger than
+   * this closes the socket with 1009. Defaults to {@link DEFAULT_PROXY_WS_FRAME_BYTES}
+   * (64 KiB) when unset; raise it for real-time apps that bulk-sync (Foundry VTT
+   * world state, dashboards). Must be an integer between
+   * {@link MIN_PROXY_WS_FRAME_BYTES} (1 KiB) and {@link MAX_PROXY_WS_FRAME_BYTES} (16 MiB).
+   */
+  max_frame_bytes?: number;
 }
 
 export interface PluginManifest {
@@ -818,7 +845,7 @@ export function validateManifest(input: unknown): ManifestResult {
         }
       }
       const ALLOWED_MOUNT_ACCESS = new Set(["members", "owner"]);
-      const KNOWN_MOUNT_FIELDS = new Set(["name", "upstream_setting", "access"]);
+      const KNOWN_MOUNT_FIELDS = new Set(["name", "upstream_setting", "access", "max_frame_bytes"]);
       const seenMountNames = new Set<string>();
       for (let i = 0; i < input["proxy_mounts"].length; i++) {
         const m = input["proxy_mounts"][i];
@@ -857,6 +884,22 @@ export function validateManifest(input: unknown): ManifestResult {
         // access: optional; one of members|owner.
         if (m["access"] !== undefined && (typeof m["access"] !== "string" || !ALLOWED_MOUNT_ACCESS.has(m["access"]))) {
           errors.push({ code: "INVALID_PROXY_MOUNT_ACCESS", field: `${prefix}.access`, message: `${prefix}.access must be one of: members, owner.` });
+        }
+        // max_frame_bytes: optional WebSocket frame cap; integer within bounds.
+        if (m["max_frame_bytes"] !== undefined) {
+          const v = m["max_frame_bytes"];
+          if (
+            typeof v !== "number" ||
+            !Number.isInteger(v) ||
+            v < MIN_PROXY_WS_FRAME_BYTES ||
+            v > MAX_PROXY_WS_FRAME_BYTES
+          ) {
+            errors.push({
+              code: "INVALID_PROXY_MOUNT_MAX_FRAME_BYTES",
+              field: `${prefix}.max_frame_bytes`,
+              message: `${prefix}.max_frame_bytes must be an integer between ${String(MIN_PROXY_WS_FRAME_BYTES)} and ${String(MAX_PROXY_WS_FRAME_BYTES)} (bytes).`,
+            });
+          }
         }
       }
       // A plugin declaring proxy mounts must request a proxy transport

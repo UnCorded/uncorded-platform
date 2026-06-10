@@ -70,6 +70,14 @@ export interface ProxyWsRuntimeState {
   readonly slug: string;
   readonly mount: string;
   readonly userId: string;
+  /** Max frame (message) size relayed in either direction; a larger frame
+   *  closes the bridge with 1009. Resolved per mount from its manifest
+   *  `max_frame_bytes`, else the bridge default. */
+  readonly maxFrameBytes: number;
+  /** Per-direction bounded-buffer byte cap. Scaled to hold at least one
+   *  `maxFrameBytes` frame so a single large message can absorb backpressure
+   *  without overflowing to a 1011 close. */
+  readonly maxBufferBytes: number;
   /** The accepted Bun client socket — set in `open()`, cleared on `close()`. */
   client: ServerWebSocket<WsConnectionData> | undefined;
   /** Upstream client socket; undefined once it has been torn down. */

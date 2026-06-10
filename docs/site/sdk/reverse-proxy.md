@@ -94,6 +94,7 @@ logic of its own).
 | `name` | string | Slug-safe and unique within the plugin: lowercase, **starts with a letter**, hyphen-separated segments (`[a-z][a-z0-9]*(-[a-z0-9]+)*` — no leading/trailing or doubled hyphens). Appears in the URL: `/proxy/<slug>/<name>/*`. |
 | `upstream_setting` | string | **Key of a setting in this same manifest** (type `string` or `secret`) whose value is the upstream URL. The manifest never carries the URL directly. |
 | `access` | `"members"` \| `"owner"` | Optional, defaults to `"members"`. `owner` restricts the mount to the server owner/admins. |
+| `max_frame_bytes` | integer | Optional. Caps the size of a single **WebSocket** frame relayed in either direction (bytes). Defaults to **65536** (64 KiB); raise it for sockets that bulk-sync. Range **1024**–**16777216** (1 KiB–16 MiB). See [WebSockets](#websockets). |
 
 ### Permissions
 
@@ -460,6 +461,30 @@ automatically.
 > server that enforces a strict `Origin` allowlist (some `socket.io` configs,
 > Jupyter) may need the upstream's own origin allowed. Most apps authenticate the
 > socket by cookie/token and don't require this.
+
+**Frame size — fixing `1009` closes.** Each WebSocket frame is relayed whole (a
+frame can't be streamed), and the proxy caps it at **64 KiB** by default. A frame
+larger than the cap is dropped and the socket closes with code **`1009`** ("message
+too big"). Apps that bulk-sync over a socket — Foundry VTT's world/scene sync, live
+collaborative editors, anything pushing a large JSON snapshot in one message — hit
+this. Raise the cap with `max_frame_bytes` on the mount:
+
+```json
+{
+  "proxy_mounts": [
+    { "name": "foundry", "upstream_setting": "foundry_upstream_url", "max_frame_bytes": 1048576 }
+  ]
+}
+```
+
+It applies in **both directions** and accepts an integer in **`[1024, 16777216]`**
+(1 KiB–16 MiB). Set only what you need — the cap also bounds the in-flight buffer,
+so an unnecessarily large value raises memory headroom per connection. Changing it
+does **not** invalidate the mount approval (it's an operational tuning knob, not an
+upstream-identity change). Note this governs socket *frames* only: bulk asset bytes
+(map images, scene files, uploads) travel over the **HTTP** path, which streams
+without a frame cap — so a huge map doesn't need a huge `max_frame_bytes`, only the
+sync *metadata* frame does.
 
 ### Changing the upstream or port
 

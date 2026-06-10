@@ -142,6 +142,7 @@ Only listed columns are readable; everything else stays private.
 | `name` | string | Slug-safe, unique within the plugin. Appears in the URL `/proxy/<slug>/<name>/*`. |
 | `upstream_setting` | string | Key of a `string`/`secret` setting **in this same manifest** holding the upstream URL. The manifest never carries the URL directly. |
 | `access` | `"members"` \| `"owner"` | Optional, default `"members"`. |
+| `max_frame_bytes` | integer | Optional. Max **WebSocket** frame (message) size relayed in either direction, in bytes. A larger frame closes the socket with `1009`. Default **65536** (64 KiB); raise it for apps that bulk-sync over a socket (e.g. game state). Must be between **1024** (1 KiB) and **16777216** (16 MiB). |
 
 Declaring `proxy_mounts` requires at least one of `proxy.http:self` /
 `proxy.websocket:self` in `permissions`. Mounts are disabled until an owner
@@ -155,6 +156,8 @@ approves them. Full guide: [Reverse-proxy plugins](/sdk/reverse-proxy).
 - Every `permissions` entry matches the [capability grammar](/reference/permissions#grammar).
 - `proxy_mounts[].upstream_setting` references a declared `string`/`secret`
   setting; mount names unique; proxy permission present.
+- `proxy_mounts[].max_frame_bytes`, when present, is an integer in
+  `[1024, 16777216]`.
 - Settings `default` consistent with `type`/`min`/`max`/`max_length`/`enum`/`stops`.
 - `resources.*` positive integers; `icon` ≤ 64 chars; unknown top-level or
   per-setting fields rejected.

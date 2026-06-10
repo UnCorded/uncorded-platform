@@ -19,12 +19,13 @@
 //   - client→upstream watches the upstream `bufferedAmount` and buffers into a
 //     bounded queue, flushed opportunistically;
 //   - either buffer overflowing the byte cap closes the bridge (1011).
-// A frame larger than the shared frame cap closes with 1009. Idle sockets are
+// A frame larger than the mount's frame cap (manifest `max_frame_bytes`, else
+// the bridge default) closes with 1009. Idle sockets are
 // reaped by Bun's server-level `idleTimeout`, which fires our `close()` and
 // propagates the close to the upstream.
 
 import type { Server, ServerWebSocket } from "bun";
-import { rootLogger } from "@uncorded/shared";
+import { rootLogger, MAX_PROXY_WS_FRAME_BYTES } from "@uncorded/shared";
 import { RateLimiter, RATE_PROXY_WS_CONNECT } from "./rate-limiter";
 import { resolveMount, isSecureRequest, safeHost, type ProxyMountDeps } from "./proxy";
 import { readProxyCookie, verifyProxySession } from "../proxy/session";
@@ -79,9 +80,10 @@ export interface ProxyWebSocketOptions {
   rateLimiter: RateLimiter;
   /** DNS classifier override (tests inject a deterministic resolver). */
   resolveHostClasses?: ((hostname: string) => Promise<HostClassification>) | undefined;
-  /** Frame-size cap; defaults to the shared {@link MAX_WS_FRAME_BYTES}. */
+  /** Bridge-default frame-size cap when a mount declares no `max_frame_bytes`;
+   *  defaults to the shared {@link MAX_WS_FRAME_BYTES}. */
   maxFrameBytes?: number | undefined;
-  /** Per-direction bounded-buffer byte cap. */
+  /** Bridge-default per-direction bounded-buffer byte cap. */
   maxBufferBytes?: number | undefined;
   /** Upstream connector override (tests inject a fake socket). */
   connectUpstream?:
@@ -125,8 +127,11 @@ export function isProxyWebSocketUpgrade(req: Request, pathname: string): boolean
 export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSocketHandler {
   const { deps, rateLimiter } = options;
   const resolveClasses = options.resolveHostClasses ?? resolveHostClasses;
-  const maxFrameBytes = options.maxFrameBytes ?? MAX_WS_FRAME_BYTES;
-  const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
+  // Bridge-wide defaults. A mount may raise its own frame cap (manifest
+  // `max_frame_bytes`); per-connection caps are resolved at upgrade and stored
+  // on `state` (the helpers below read `state.maxFrameBytes`/`state.maxBufferBytes`).
+  const defaultMaxFrameBytes = options.maxFrameBytes ?? MAX_WS_FRAME_BYTES;
+  const defaultMaxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
   const connect =
     options.connectUpstream ??
     ((url, protocols, headers) =>
@@ -172,7 +177,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
 
   function enqueueToClient(state: ProxyWsRuntimeState, frame: ProxyWsFrame): boolean {
     const bytes = frameBytes(frame);
-    if (state.toClientBytes + bytes > maxBufferBytes) {
+    if (state.toClientBytes + bytes > state.maxBufferBytes) {
       log.warn("proxy ws client buffer overflow", {
         slug: state.slug,
         mount: state.mount,
@@ -188,7 +193,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
 
   function sendToClient(state: ProxyWsRuntimeState, frame: ProxyWsFrame): void {
     if (state.closing) return;
-    if (frameBytes(frame) > maxFrameBytes) {
+    if (frameBytes(frame) > state.maxFrameBytes) {
       closeBridge(state, 1009, "Message too large");
       return;
     }
@@ -237,7 +242,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
     // returns, so a retained reference could be corrupted before it's sent.
     const stored = copyFrame(frame);
     const bytes = frameBytes(stored);
-    if (state.toUpstreamBytes + bytes > maxBufferBytes) {
+    if (state.toUpstreamBytes + bytes > state.maxBufferBytes) {
       log.warn("proxy ws upstream buffer overflow", {
         slug: state.slug,
         mount: state.mount,
@@ -254,7 +259,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
     const up = state.upstream;
     if (!up || !state.upstreamOpen || state.closing) return;
     while (state.toUpstream.length > 0) {
-      if (up.bufferedAmount > maxBufferBytes) return; // still congested
+      if (up.bufferedAmount > state.maxBufferBytes) return; // still congested
       const frame = state.toUpstream.shift();
       if (frame === undefined) break;
       state.toUpstreamBytes -= frameBytes(frame);
@@ -264,7 +269,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
 
   function sendToUpstream(state: ProxyWsRuntimeState, frame: ProxyWsFrame): void {
     if (state.closing) return;
-    if (frameBytes(frame) > maxFrameBytes) {
+    if (frameBytes(frame) > state.maxFrameBytes) {
       closeBridge(state, 1009, "Message too large");
       return;
     }
@@ -275,7 +280,7 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
     }
     // Drain any backlog first so ordering holds.
     flushToUpstream(state);
-    if (state.toUpstream.length > 0 || up.bufferedAmount > maxBufferBytes) {
+    if (state.toUpstream.length > 0 || up.bufferedAmount > state.maxBufferBytes) {
       enqueueToUpstream(state, frame);
       return;
     }
@@ -312,6 +317,21 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
     const resolved = resolveMount(deps, slug, mount, "proxy.websocket:self");
     if (!resolved.ok) return resolved.response;
     const { upstream, approval } = resolved.value;
+
+    // Per-mount frame cap (manifest `max_frame_bytes`), clamped to the hard
+    // ceiling, else the bridge default. The per-direction buffer is sized to
+    // hold at least one full frame plus the default headroom, so a single large
+    // message (e.g. a bulk world-sync frame) can absorb momentary backpressure
+    // instead of overflowing to a 1011 close.
+    const mountFrameCap = resolved.value.mount.max_frame_bytes;
+    const maxFrameBytes =
+      mountFrameCap !== undefined
+        ? Math.min(mountFrameCap, MAX_PROXY_WS_FRAME_BYTES)
+        : defaultMaxFrameBytes;
+    const maxBufferBytes =
+      mountFrameCap !== undefined
+        ? Math.max(defaultMaxBufferBytes, maxFrameBytes + defaultMaxBufferBytes)
+        : defaultMaxBufferBytes;
 
     const serverId = deps.getServerId?.() ?? "";
     const verified = verifyProxySession(token, { slug, mount, serverId });
@@ -405,6 +425,8 @@ export function createProxyWebSocket(options: ProxyWebSocketOptions): ProxyWebSo
       slug,
       mount,
       userId,
+      maxFrameBytes,
+      maxBufferBytes,
       client: undefined,
       upstream: upstreamSocket,
       upstreamOpen: false,

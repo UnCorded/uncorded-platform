@@ -1,4 +1,9 @@
-export { validateManifest } from "./manifest";
+export {
+  validateManifest,
+  DEFAULT_PROXY_WS_FRAME_BYTES,
+  MIN_PROXY_WS_FRAME_BYTES,
+  MAX_PROXY_WS_FRAME_BYTES,
+} from "./manifest";
 export type { PluginManifest, ManifestError, ManifestResult, PluginSetting, PluginSettingType, ProxyMount, ProxyMountAccess } from "./manifest";
 export { parseSemver, satisfiesRange } from "./semver";
 export { createLogger, rootLogger, getLogLevel, setLogLevel, parseLogLevel } from "./logger";
