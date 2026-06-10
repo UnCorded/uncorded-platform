@@ -280,7 +280,62 @@ http://host.docker.internal:<port>
 
 ---
 
-## 5. Approval — mounts fail closed
+## 5. Making the proxied app load correctly
+
+A mount is served at the **subpath** `/proxy/<slug>/<mount>/`, not at the root.
+Most "the panel is blank" problems are an app that assumes it lives at `/`.
+
+### The mount is a subpath — give your app its base path
+
+The runtime rewrites **root-absolute URLs in HTML and CSS** (`/styles/app.css` →
+`/proxy/<slug>/<mount>/styles/app.css`) so a static page loads. It does **not**
+rewrite URLs your app builds in **JavaScript** — `fetch("/api/…")`, dynamic
+`import()`, a WebSocket/`socket.io` connection URL. Those still point at the
+runtime root and miss the mount.
+
+So your app needs to know its public base path. The runtime tells it on every
+upstream request (HTTP and WebSocket) via:
+
+```
+X-Forwarded-Prefix: /proxy/<slug>/<mount>
+```
+
+- **App honors `X-Forwarded-Prefix`** (many reverse-proxy-aware frameworks do) →
+  it emits URLs under the mount automatically. Nothing else to do.
+- **App doesn't** → set the app's own route prefix to that exact path:
+  - Foundry VTT: `routePrefix` (Configuration → or `options.json`)
+  - Vite dev server: `--base /proxy/<slug>/<mount>/`
+  - Most servers: a "base path" / "base href" / "script name" setting
+
+> **Caveat — the prefix has three path segments** (`proxy`, `<slug>`, `<mount>`).
+> A few apps only accept a single-segment route prefix; those can't be mounted at
+> a subpath and need to be run at a dedicated origin instead.
+
+### Real-time apps (WebSockets)
+
+Declare `proxy.websocket:self` in `permissions`. The proxy then bridges
+`wss://…/proxy/<slug>/<mount>/*` to the upstream and — **on the handshake** —
+forwards the same context it sends on HTTP requests: your app's cookies (so a
+socket authenticated by session cookie, like Foundry's, sees its session), the
+`x-forwarded-*` identity headers, and `X-Forwarded-Prefix`. You don't configure
+any of this; it mirrors the HTTP path automatically.
+
+(The runtime's own proxy-session cookies are stripped and never reach the
+upstream — only your app's cookies are forwarded.)
+
+### Changing the upstream or port
+
+- **Editing the upstream setting invalidates the approval** — re-approve after
+  changing the URL (see [Approval](#approval-mounts-fail-closed)).
+- **Local host apps must bind all interfaces, not loopback.** The runtime runs in
+  a container and reaches your machine via `host.docker.internal`. An app bound to
+  `127.0.0.1`/`[::1]` refuses that connection (you'll see `PROXY_UPSTREAM_ERROR` /
+  502). Bind `0.0.0.0` (e.g. Vite `--host`) and point the upstream setting at
+  `http://host.docker.internal:<port>`.
+
+---
+
+## 6. Approval — mounts fail closed
 
 Proxy mounts are **denied until an owner approves them**. There is no implicit
 trust: with no approval row, every request to the mount returns
@@ -297,7 +352,7 @@ approval is keyed and version-bumped so old proxy-session cookies stop working.)
 
 ---
 
-## 6. Reference — runtime routes
+## 7. Reference — runtime routes
 
 You won't call these directly (the SDK does), but they're useful when debugging:
 
