@@ -174,6 +174,7 @@ upstream loads into. Use one per panel.
 | Desktop (Electron) | a nested `<iframe>` | a dedicated **hardened `<webview>`** — escapes `X-Frame-Options`/`frame-ancestors`, isolated per-server session, native permission prompts, navigation pinned to the mount |
 | Web (browser) | a nested `<iframe>` | a host-owned **sandboxed `<iframe>`** + "Open in browser" fallback |
 | Framing-hostile upstream (`X-Frame-Options: DENY`, strict `frame-ancestors`) | ❌ won't load (especially on desktop) | ✅ loads on desktop; web shows the open-in-browser prompt |
+| `fetch()`-driven **WebGL/canvas** app (Foundry VTT, maps) | ❌ canvas stays blank — null-origin texture CORS (see below) | ✅ real-origin surface, textures load same-origin |
 | You get back | `{ iframeUrl, openUrl }` (async) | an idempotent dispose function (sync) |
 | Failures | throws `ProxyError` you handle | surfaced in the shell-owned UI |
 
@@ -187,6 +188,20 @@ upstream loads into. Use one per panel.
   to overlay your own chrome, read load events, or embed a cooperative app that
   frames fine. Simpler, but desktop gets a plain iframe and a framing-hostile
   upstream won't load.
+
+> ⚠️ **`reserveMount` is REQUIRED for `fetch()`-driven WebGL/canvas apps**
+> (Foundry VTT, map/whiteboard/streaming-tile tools). These apps load their
+> textures with credentialed `fetch()`. `openMount` self-embeds them in your
+> panel's **sandboxed `null`-origin iframe**, and a credentialed fetch from a
+> `null` origin needs `Access-Control-Allow-Origin: null` — which Chromium
+> **hard-blocks**. The result: the frame loads, the page renders its chrome, but
+> the canvas stays **blank**, with no error the shell can detect. There is no
+> upstream header or CORS config that fixes this for `openMount`; the only fix is
+> a real-origin surface, which is exactly what `reserveMount` provides (an
+> Electron `<webview>` on desktop, a host-managed `<iframe>` on web). On web,
+> `reserveMount` also keeps a persistent **"Open in browser"** affordance on the
+> surface, because a browser tab is a real top-level origin and is the most
+> reliable way for web users to view a heavy canvas app.
 
 Both honor the same manifest, permissions, and [approval](#approval-mounts-fail-closed);
 only the render surface differs. The runtime routes and headers in sections 5–7

@@ -7,6 +7,7 @@ import {
   Menu,
   type MenuItemConstructorOptions,
   nativeImage,
+  screen,
   session,
   shell,
   systemPreferences,
@@ -93,6 +94,10 @@ const hardenedProxyPartitions = new Set<string>();
 // Guest webContents whose navigation guards are already attached, so we never
 // double-bind will-navigate / setWindowOpenHandler on the same guest.
 const guardedProxyContents = new WeakSet<WebContents>();
+
+// Guest webContents whose host↔guest zoom reconcile is already wired, so we
+// bind the did-finish-load pin exactly once per guest.
+const zoomPinnedProxyContents = new WeakSet<WebContents>();
 
 // Human-readable labels for the permissions a proxy guest may prompt for, used
 // in the native allow/deny dialog. Anything not promptable is denied without a
@@ -553,6 +558,72 @@ function attachProxyGuestNavGuards(contents: WebContents): void {
   });
 }
 
+// Reconcile a proxy guest's effective scale to the host window's display so the
+// guest lays out to the same CSS viewport it is painted into.
+//
+// The bug this fixes: a host-owned <webview> runs on its own webContents, which
+// does NOT inherit the shell's devicePixelRatio. On a fractional Windows display
+// scale (125% / 150%) the guest's `window.devicePixelRatio` can differ from the
+// host's, so the guest interprets its painted device-pixel box as a *wider* CSS
+// viewport than the box actually occupies — a WebGL/canvas app (Foundry VTT)
+// then lays out its sidebar/tokens to that phantom width and they fall off the
+// painted edge, with hit-testing offset to match. The same-renderer openMount
+// iframe never shows this because it shares the host DPR.
+//
+// Fix: a <webview>'s effective scale is `devicePixelRatio × zoomFactor`. We want
+// guest CSS width == host CSS box width, i.e. zoomFactor = hostScale / guestDPR.
+// When the guest already follows the same display (guestDPR == hostScale) this
+// is 1 — a deliberate no-op, so a correctly-sized 100%-scale guest is never
+// perturbed and this can't regress the common case. Pinned visual-zoom limits
+// keep a stray trackpad pinch from reintroducing a mismatch. Reapplied on every
+// did-finish-load because a navigation can reset the zoom factor.
+function reconcileProxyGuestZoom(contents: WebContents): void {
+  if (contents.isDestroyed()) return;
+  let hostScale: number;
+  try {
+    const bounds = win && !win.isDestroyed() ? win.getBounds() : null;
+    hostScale = bounds
+      ? screen.getDisplayMatching(bounds).scaleFactor
+      : screen.getPrimaryDisplay().scaleFactor;
+  } catch (err) {
+    log.warn("proxy guest zoom reconcile: could not read host display scale", {
+      err: errorMessage(err),
+    });
+    return;
+  }
+  contents
+    .executeJavaScript("window.devicePixelRatio", true)
+    .then((raw: unknown) => {
+      if (contents.isDestroyed()) return;
+      const guestDpr = typeof raw === "number" ? raw : Number.NaN;
+      if (!Number.isFinite(guestDpr) || guestDpr <= 0) return;
+      // Our zoomFactor is the only scale that should be in play; stop a stray
+      // pinch from compounding on top of it.
+      contents.setVisualZoomLevelLimits(1, 1).catch(() => {});
+      const target = hostScale / guestDpr;
+      // Host and guest already agree — leave the guest at 1× rather than nudging
+      // it by a sub-percent rounding wobble.
+      if (Math.abs(target - 1) < 0.01) {
+        if (Math.abs(contents.getZoomFactor() - 1) >= 0.01) contents.setZoomFactor(1);
+        return;
+      }
+      contents.setZoomFactor(target);
+    })
+    .catch((err) => {
+      log.warn("proxy guest zoom reconcile failed", { err: errorMessage(err) });
+    });
+}
+
+// Wire the host↔guest zoom reconcile onto a proxy guest. Idempotent per guest.
+// Bound on did-finish-load so it runs after the initial mount load and again
+// after the openUrl→mount redirect and any in-mount navigation (each of which
+// can reset the guest's zoom factor).
+function attachProxyGuestZoomPin(contents: WebContents): void {
+  if (zoomPinnedProxyContents.has(contents)) return;
+  zoomPinnedProxyContents.add(contents);
+  contents.on("did-finish-load", () => reconcileProxyGuestZoom(contents));
+}
+
 // Native allow/deny dialog for a proxy guest permission request. The proxied
 // app is third-party, so we never silently grant camera/mic/location — the host
 // asks the user, naming the app's host, and the answer is remembered per
@@ -653,6 +724,10 @@ function hardenProxyPartition(partition: string): void {
     if (contents.getType() !== "webview") continue;
     if (contents.session !== session.fromPartition(partition)) continue;
     attachProxyGuestNavGuards(contents);
+    // Mirror the web-contents-created branch: a guest that already exists when
+    // its partition is hardened still needs its effective scale pinned to the
+    // host display, or DPR reconciliation is skipped for pre-registered guests.
+    attachProxyGuestZoomPin(contents);
   }
 }
 
@@ -2005,6 +2080,9 @@ if (!gotInstanceLock) {
       // `persist:browser`) never match, so their window.open stays untouched.
       if (isProxyGuestContents(contents)) {
         attachProxyGuestNavGuards(contents);
+        // Pin the guest's effective scale to the host display so a fractional
+        // Windows scale can't make it lay out to a wider viewport than painted.
+        attachProxyGuestZoomPin(contents);
       }
     });
 
