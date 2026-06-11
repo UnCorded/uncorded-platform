@@ -22,6 +22,23 @@
 // an opaque-origin CORS request even when it targets the runtime URL that served
 // the iframe. `credentials: "include"` is required for the response
 // `Set-Cookie` to be stored.
+//
+// CHOOSING A MOUNT MODE — `openMount` vs `reserveMount`:
+//   * `openMount` self-embeds the proxied app in an iframe inside the plugin's
+//     OWN sandboxed (allow-same-origin-less, `null`-origin) document. Fine for
+//     ordinary DOM/HTML apps.
+//   * `reserveMount` hands the app to the HOST, which renders it in a real-origin
+//     surface (an Electron `<webview>` on desktop; a host-managed `<iframe>` on
+//     web).
+//
+// `reserveMount` is REQUIRED for `fetch()`-driven WebGL/canvas apps (Foundry
+// VTT, map/whiteboard tools, anything that streams textures/tiles). Such apps
+// load their assets with credentialed `fetch()`; from a `null`-origin sandboxed
+// iframe that response needs `Access-Control-Allow-Origin: null` with
+// credentials, which Chromium hard-blocks. The frame loads but the canvas stays
+// blank — there is no header or upstream change that fixes this for `openMount`.
+// A real-origin surface fetches those same assets same-origin, with no CORS wall,
+// so `reserveMount` is the only mount mode that can render them.
 
 import { observeProxyViewport, type ProxyViewportHandle } from "./proxy-viewport";
 
@@ -70,6 +87,12 @@ export interface ProxyPluginApi {
    *
    * Use this for the self-embedding model — the plugin owns a nested iframe.
    * Throws `ProxyError` on any failure — see the `ProxyError` doc-comment.
+   *
+   * NOT for `fetch()`-driven WebGL/canvas apps (Foundry VTT, map tools): the
+   * plugin's iframe is a sandboxed `null` origin, and credentialed texture
+   * `fetch()`es from there are blocked by the `Access-Control-Allow-Origin: null`
+   * rule — the frame loads but the canvas stays blank. Use `reserveMount` for
+   * those; see the module header for the full rationale.
    */
   openMount(mount: string): Promise<ProxyMountSession>;
 
@@ -83,6 +106,11 @@ export interface ProxyPluginApi {
    *
    * Returns a dispose function that releases the viewport; calling it more than
    * once is a no-op.
+   *
+   * REQUIRED for `fetch()`-driven WebGL/canvas apps (Foundry VTT, map/whiteboard
+   * tools): the host surface has a real origin, so the app's credentialed
+   * texture/tile `fetch()`es load same-origin with no CORS wall — the case that
+   * `openMount` cannot render. See the module header.
    */
   reserveMount(mount: string, el: HTMLElement): ProxyViewportHandle;
 }
