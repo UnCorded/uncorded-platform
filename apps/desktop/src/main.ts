@@ -724,6 +724,10 @@ function hardenProxyPartition(partition: string): void {
     if (contents.getType() !== "webview") continue;
     if (contents.session !== session.fromPartition(partition)) continue;
     attachProxyGuestNavGuards(contents);
+    // Mirror the web-contents-created branch: a guest that already exists when
+    // its partition is hardened still needs its effective scale pinned to the
+    // host display, or DPR reconciliation is skipped for pre-registered guests.
+    attachProxyGuestZoomPin(contents);
   }
 }
 
