@@ -5,7 +5,8 @@ import { createRouter } from "./routes";
 import { createEmailClient } from "./email";
 import { createR2Client } from "./r2";
 import { sweepExpiredTransfers } from "./routes/server-transfer";
-import { sweepStaleServers } from "./routes/servers";
+import { sweepStaleServers, sweepAbandonedDeletes } from "./routes/servers";
+import { sweepExpiredInvites } from "./routes/members";
 import { getPostLoginRedirect, isAllowedPostLoginRedirect } from "./post-login";
 import { wrapWithAccessLog } from "./access-log";
 import { runShutdown } from "./shutdown";
@@ -146,6 +147,29 @@ transferSweepInterval = setInterval(() => {
     })
     .catch((err: unknown) =>
       log.error("transfer sweep failed", {
+        err: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  // Same hourly cadence for invitations: reads already filter on expires_at,
+  // this just keeps stored status from lagging (and the invite-create path
+  // inline-sweeps its own pair so re-invites never wait on this).
+  sweepExpiredInvites(sql)
+    .then((count) => {
+      if (count > 0) log.info("expired invites swept", { count });
+    })
+    .catch((err: unknown) =>
+      log.error("invite sweep failed", {
+        err: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  // Abandoned-delete reaper: hard-delete servers whose purge-confirm
+  // handshake never arrived, freeing the owner's held quota slot.
+  sweepAbandonedDeletes(sql)
+    .then((count) => {
+      if (count > 0) log.info("abandoned deletes reaped", { count });
+    })
+    .catch((err: unknown) =>
+      log.error("abandoned-delete reap failed", {
         err: err instanceof Error ? err.message : String(err),
       }),
     );

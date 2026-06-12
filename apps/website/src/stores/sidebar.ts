@@ -15,6 +15,7 @@ import {
 } from "../lib/ws";
 import { retry } from "../lib/retry";
 import { bootTrace } from "../lib/boot-trace";
+import { activeServerKey, splitActiveServerKey } from "./active-server-key";
 import type { CoreCategory, SidebarItem, SidebarAction } from "@uncorded/protocol";
 
 // Soft-retry delays when /plugins returns 200 with an empty plugin list.
@@ -329,12 +330,11 @@ export function mountSidebarStore(): void {
   // is_online flips from onConnect), which spawns a connect() loop: each WS
   // open fires onConnect → patchServer → effect re-runs → new openConnection.
   // Memoize on the join string so unrelated field changes don't reach this effect.
-  const activeKey = createMemo(() => {
-    const id = activeServerId();
-    const server = activeServer();
-    if (!id || !server?.tunnel_url) return null;
-    return `${id}|${server.tunnel_url}`;
-  });
+  // tunnel_url may be null when the server is selected — see activeServerKey's
+  // doc comment for why the key must NOT require it (connect deadlock).
+  const activeKey = createMemo(() =>
+    activeServerKey(activeServerId(), activeServer()),
+  );
 
   createEffect(() => {
     const key = activeKey();
@@ -345,12 +345,11 @@ export function mountSidebarStore(): void {
       pluginCapabilities.clear();
       pluginReadyState.clear();
       setReadyTick((n) => n + 1);
+      setSidebarLoading(false);
       return;
     }
 
-    const sep = key.indexOf("|");
-    const id = key.slice(0, sep);
-    const tunnelUrl = key.slice(sep + 1);
+    const { id, tunnelUrl } = splitActiveServerKey(key);
     bootTrace("sidebar.effect.fire", { serverId: id, tunnelUrl });
     // Read the server object outside Solid's tracking scope so unrelated field
     // changes (is_online, connected_users) don't re-fire this effect — the
@@ -358,6 +357,21 @@ export function mountSidebarStore(): void {
     const server = untrack(activeServer);
     if (!server) {
       bootTrace("sidebar.effect.noServer", { serverId: id });
+      return;
+    }
+    if (!tunnelUrl) {
+      // No URL yet — kick the WS layer, whose token mint hydrates tunnel_url
+      // into the store (patchServer). That changes activeKey, re-running this
+      // effect with the URL to do the full load below. Clear stale state from
+      // a previously-active server and show the loading state meanwhile.
+      bootTrace("sidebar.effect.connectOnly", { serverId: id });
+      setSections([]);
+      pluginCapabilities.clear();
+      pluginReadyState.clear();
+      setReadyTick((n) => n + 1);
+      setSidebarError(false);
+      setSidebarLoading(true);
+      void connect(server);
       return;
     }
     // Open the capability gate synchronously so any plugin handshake that

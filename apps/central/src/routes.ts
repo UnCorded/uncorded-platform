@@ -14,6 +14,7 @@ import {
   handleGetServer,
   handleUpdateServer,
   handleDeleteServer,
+  handlePurgeConfirm,
 } from "./routes/servers";
 import { handleHeartbeat } from "./routes/heartbeat";
 import { handleVoiceProbe } from "./routes/voice-probe";
@@ -24,6 +25,24 @@ import {
   handleConfirmServerTransfer,
   handleDeclineServerTransfer,
 } from "./routes/server-transfer";
+import {
+  handleListMyServers,
+  handleLeaveServer,
+  handleListMyInvites,
+  handleAcceptInvite,
+  handleDeclineInvite,
+  handleCreateInvite,
+  handleListServerInvites,
+  handleRevokeInvite,
+  handleCreateJoinRequest,
+  handleListJoinRequests,
+  handleAcceptJoinRequest,
+  handleDeclineJoinRequest,
+  handleListMembers,
+  handleKickMember,
+  handleBanMember,
+  handleUnbanMember,
+} from "./routes/members";
 import {
   handleOAuthRedirect,
   handleOAuthCallback,
@@ -156,6 +175,82 @@ export function createRouter(ctx: RouteContext) {
         return await handleOAuthUnlink(unlinkMatch[1]!, request, ctx);
       }
 
+      // Membership — me-scoped
+      if (pathname === "/v1/me/servers" && method === "GET") {
+        return await handleListMyServers(request, ctx);
+      }
+      const myServerMatch = pathname.match(/^\/v1\/me\/servers\/([0-9a-f-]{36})$/);
+      if (myServerMatch && method === "DELETE") {
+        return await handleLeaveServer(request, ctx, myServerMatch[1]!);
+      }
+      if (pathname === "/v1/me/invites" && method === "GET") {
+        return await handleListMyInvites(request, ctx);
+      }
+      const myInviteActionMatch = pathname.match(
+        /^\/v1\/me\/invites\/([0-9a-f-]{36})\/(accept|decline)$/,
+      );
+      if (myInviteActionMatch && method === "POST") {
+        const inviteId = myInviteActionMatch[1]!;
+        return myInviteActionMatch[2] === "accept"
+          ? await handleAcceptInvite(request, ctx, inviteId)
+          : await handleDeclineInvite(request, ctx, inviteId);
+      }
+
+      // Membership — server-scoped (owner surfaces)
+      const serverInvitesMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/invites$/,
+      );
+      if (serverInvitesMatch) {
+        const serverId = serverInvitesMatch[1]!;
+        if (method === "POST") return await handleCreateInvite(request, ctx, serverId);
+        if (method === "GET") return await handleListServerInvites(request, ctx, serverId);
+      }
+      const serverInviteIdMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/invites\/([0-9a-f-]{36})$/,
+      );
+      if (serverInviteIdMatch && method === "DELETE") {
+        return await handleRevokeInvite(request, ctx, serverInviteIdMatch[1]!, serverInviteIdMatch[2]!);
+      }
+      const joinRequestsMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/join-requests$/,
+      );
+      if (joinRequestsMatch) {
+        const serverId = joinRequestsMatch[1]!;
+        if (method === "POST") return await handleCreateJoinRequest(request, ctx, serverId);
+        if (method === "GET") return await handleListJoinRequests(request, ctx, serverId);
+      }
+      const joinRequestActionMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/join-requests\/([0-9a-f-]{36})\/(accept|decline)$/,
+      );
+      if (joinRequestActionMatch && method === "POST") {
+        const serverId = joinRequestActionMatch[1]!;
+        const requestId = joinRequestActionMatch[2]!;
+        return joinRequestActionMatch[3] === "accept"
+          ? await handleAcceptJoinRequest(request, ctx, serverId, requestId)
+          : await handleDeclineJoinRequest(request, ctx, serverId, requestId);
+      }
+      const membersMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/members$/,
+      );
+      if (membersMatch && method === "GET") {
+        return await handleListMembers(request, ctx, membersMatch[1]!);
+      }
+      const memberIdMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/members\/([0-9a-f-]{36})$/,
+      );
+      if (memberIdMatch && method === "DELETE") {
+        return await handleKickMember(request, ctx, memberIdMatch[1]!, memberIdMatch[2]!);
+      }
+      const memberBanMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/members\/([0-9a-f-]{36})\/ban$/,
+      );
+      if (memberBanMatch) {
+        const serverId = memberBanMatch[1]!;
+        const accountId = memberBanMatch[2]!;
+        if (method === "POST") return await handleBanMember(request, ctx, serverId, accountId);
+        if (method === "DELETE") return await handleUnbanMember(request, ctx, serverId, accountId);
+      }
+
       // Server directory (exact path)
       if (pathname === "/v1/servers" && method === "POST") {
         return await handleCreateServer(request, ctx);
@@ -176,6 +271,14 @@ export function createRouter(ctx: RouteContext) {
           return await handleUpdateServer(request, ctx, serverId);
         if (method === "DELETE")
           return await handleDeleteServer(request, ctx, serverId);
+      }
+
+      // Two-phase delete: desktop confirms the local data purge
+      const purgeConfirmMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/purge-confirm$/,
+      );
+      if (purgeConfirmMatch && method === "POST") {
+        return await handlePurgeConfirm(request, ctx, purgeConfirmMatch[1]!);
       }
 
       // Heartbeat

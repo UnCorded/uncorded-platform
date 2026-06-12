@@ -13,7 +13,7 @@ interface ApiErrorBody {
 }
 
 type JsonBody = Record<string, unknown> | undefined;
-type ServerTokenResponse = { token: string; expires_at: number };
+type ServerTokenResponse = { token: string; expires_at: number; tunnel_url: string | null };
 type CreatedServerResponse = { server_id: string; server_secret: string };
 type ServerRecord = {
   id: string;
@@ -21,7 +21,10 @@ type ServerRecord = {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
-  tunnel_url: string | null;
+  // tunnel_url is deliberately absent — Central returns it only from the
+  // token endpoint (capability, not metadata). tunnel_state still rides on
+  // reads so callers can tell when a public tunnel is up.
+  tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;
@@ -136,15 +139,34 @@ function extractSessionToken(res: Response): string | null {
   return null;
 }
 
+// Typed HTTP error so callers can branch on status/code instead of regexing
+// message text (e.g. the delete handler's idempotent-404 path).
+export class CentralHttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = "CentralHttpError";
+  }
+}
+
+export function isCentralNotFound(err: unknown): boolean {
+  return err instanceof CentralHttpError && err.status === 404;
+}
+
 async function parseError(res: Response): Promise<Error> {
   let message = `Request failed with status ${res.status}`;
+  let code = "UNKNOWN";
   try {
     const body = (await res.json()) as ApiErrorBody;
     if (body.error?.message) message = body.error.message;
+    if (body.error?.code) code = body.error.code;
   } catch {
     // ignore parse failures
   }
-  return new Error(message);
+  return new CentralHttpError(message, res.status, code);
 }
 
 async function request<T>(
@@ -297,14 +319,28 @@ export async function getAvatarUploadUrl(
   );
 }
 
+// Sidebar source: every server the user owns or belongs to, regardless of
+// liveness — an inactive server stays listed and startable. The public
+// directory (listPublicServers) is a separate, online-only surface.
 export async function listServers(): Promise<unknown> {
+  const res = await request<{ servers: Record<string, unknown>[] }>("/v1/me/servers");
+  // Central omits tunnel_url (it travels only with the join token); the
+  // bridge contract says string | null, so pin it before crossing the
+  // preload boundary instead of leaking undefined.
+  return res.servers.map((s) => ({ ...s, tunnel_url: s["tunnel_url"] ?? null }));
+}
+
+export async function listPublicServers(): Promise<unknown> {
   const res = await request<{
     servers: unknown[];
     total: number;
     page: number;
     per_page: number;
   }>("/v1/servers");
-  return res.servers;
+  return res.servers.map((s) => ({
+    ...(s as Record<string, unknown>),
+    tunnel_url: (s as Record<string, unknown>)["tunnel_url"] ?? null,
+  }));
 }
 
 export async function createServer(
@@ -329,7 +365,15 @@ export async function getServer(serverId: string): Promise<ServerRecord> {
 }
 
 export async function deleteServer(serverId: string): Promise<void> {
-  return request<void>(`/v1/servers/${serverId}`, { method: "DELETE" });
+  await request<unknown>(`/v1/servers/${serverId}`, { method: "DELETE" });
+}
+
+// Phase 2 of the two-phase delete: tell Central the local container/volume
+// teardown finished so it can hard-delete the row and free the owned-quota
+// slot. 404 = already purged (success); anything else is the caller's to log
+// — the abandoned-delete reaper backstops a lost confirm.
+export async function confirmServerPurge(serverId: string): Promise<void> {
+  return request<void>(`/v1/servers/${serverId}/purge-confirm`, { method: "POST" });
 }
 
 function decodeJwtExpiration(token: string): number {
@@ -350,8 +394,51 @@ function decodeJwtExpiration(token: string): number {
   }
 }
 
+// Generic authed passthrough for the renderer. The renderer's own fetch()
+// carries no session inside Electron (the session token lives in the OS
+// keychain, not a cookie jar), so every plain /v1 call the web code makes is
+// proxied through here with the Cookie header attached. Returns raw
+// status+body without throwing so the renderer can rebuild its typed
+// ApiError (withAuthGate and the join surfaces branch on err.status).
+export async function rendererRequest(
+  method: string,
+  path: string,
+  bodyJson?: string,
+): Promise<{ status: number; body: unknown }> {
+  const headers = new Headers();
+  if (bodyJson !== undefined) headers.set("Content-Type", "application/json");
+  const sessionToken = getSessionToken();
+  if (sessionToken) headers.set("Cookie", `__Host-session=${sessionToken}`);
+
+  const init: RequestInit = { method, headers };
+  if (bodyJson !== undefined) init.body = bodyJson;
+
+  let res: Response;
+  try {
+    res = await fetch(`${getBaseUrl()}${path}`, init);
+  } catch (err) {
+    throw new Error(`Central request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Same semantic as request(): a 401 with a token present means the session
+  // is dead — drop it so the renderer lands on AuthPage instead of looping.
+  if (res.status === 401 && sessionToken) {
+    clearSessionToken();
+  }
+
+  let parsed: unknown = null;
+  if (res.status !== 204) {
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = null;
+    }
+  }
+  return { status: res.status, body: parsed };
+}
+
 export async function getServerToken(server_id: string): Promise<ServerTokenResponse> {
-  const res = await request<{ token: string }>(
+  const res = await request<{ token: string; tunnel_url?: string | null }>(
     "/v1/auth/token/server",
     { method: "POST" },
     { server_id },
@@ -360,5 +447,14 @@ export async function getServerToken(server_id: string): Promise<ServerTokenResp
   return {
     token: res.token,
     expires_at: decodeJwtExpiration(res.token),
+    tunnel_url: res.tunnel_url ?? null,
   };
+}
+
+// The only place Central reveals where a server lives. Owners use this during
+// provisioning to learn the cloudflared URL the runtime reported via
+// heartbeat (the desktop can't know a quick-tunnel URL any other way).
+export async function fetchTunnelUrl(serverId: string): Promise<string | null> {
+  const res = await getServerToken(serverId);
+  return res.tunnel_url;
 }

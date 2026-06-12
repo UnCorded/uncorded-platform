@@ -403,19 +403,28 @@ interface WaitForFirstHeartbeatOptions {
   readonly onPublicUrlPending?: (elapsedMs: number) => void;
 }
 
+// Central no longer carries tunnel_url on reads (it travels only with the
+// join token), so the poll watches tunnel_state — which the heartbeat updates
+// in the same statement as the URL — and mints one owner token to learn the
+// URL once the state goes public. 'demo'/'named' = cloudflared resolved;
+// 'local'/NULL = still loopback.
+function tunnelStateIsPublic(state: string | null): boolean {
+  return state === "demo" || state === "named";
+}
+
 async function waitForFirstHeartbeat(
   serverId: string,
   opts: WaitForFirstHeartbeatOptions = {},
 ): Promise<string | null> {
   // Phase 1: wait for *any* heartbeat (proves the runtime came up at all).
   const heartbeatDeadline = Date.now() + HEARTBEAT_TIMEOUT_MS;
-  let firstHeartbeatTunnelUrl: string | null = null;
+  let sawPublicState = false;
   let sawHeartbeat = false;
 
   while (Date.now() < heartbeatDeadline) {
     const server = await central.getServer(serverId);
-    if (server.tunnel_url || server.last_heartbeat_at) {
-      firstHeartbeatTunnelUrl = server.tunnel_url;
+    if (server.last_heartbeat_at || server.tunnel_state) {
+      sawPublicState = tunnelStateIsPublic(server.tunnel_state);
       sawHeartbeat = true;
       break;
     }
@@ -426,25 +435,35 @@ async function waitForFirstHeartbeat(
     throw new Error("Timed out waiting for the first Central heartbeat");
   }
 
-  // Fast path: heartbeat arrived already carrying a public URL (cloudflared
-  // resolved before the first heartbeat tick). Common when the tunnel token
-  // was previously used and DNS is hot.
-  if (isPublicTunnelUrl(firstHeartbeatTunnelUrl)) {
-    return firstHeartbeatTunnelUrl;
+  // Fast path: heartbeat arrived already reporting a public tunnel
+  // (cloudflared resolved before the first heartbeat tick). Common when the
+  // tunnel token was previously used and DNS is hot.
+  if (sawPublicState) {
+    const url = await central.fetchTunnelUrl(serverId);
+    if (isPublicTunnelUrl(url)) return url;
   }
 
-  // Phase 2: heartbeat is in but the URL is still loopback (or null). Keep
-  // polling until cloudflared resolves so the wizard hands off with the
-  // final URL — no mid-session tunnel_url flip that would tear down WS,
-  // sidebar, and icon caches.
+  // Phase 2: heartbeat is in but the tunnel is still loopback (or unset).
+  // Keep polling tunnel_state until cloudflared resolves so the wizard hands
+  // off with the final URL — no mid-session tunnel_url flip that would tear
+  // down WS, sidebar, and icon caches. Token mints are gated on the state
+  // flip (plus a re-mint floor) so the poll stays inside the cheap
+  // server-read rate limit rather than draining the token bucket.
   const publicUrlStart = Date.now();
   const publicUrlDeadline = publicUrlStart + PUBLIC_URL_TIMEOUT_MS;
+  const MINT_FLOOR_MS = 10_000;
+  let lastMintAt = 0;
 
   while (Date.now() < publicUrlDeadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     const server = await central.getServer(serverId);
-    if (isPublicTunnelUrl(server.tunnel_url)) {
-      return server.tunnel_url;
+    if (
+      tunnelStateIsPublic(server.tunnel_state) &&
+      Date.now() - lastMintAt >= MINT_FLOOR_MS
+    ) {
+      lastMintAt = Date.now();
+      const url = await central.fetchTunnelUrl(serverId);
+      if (isPublicTunnelUrl(url)) return url;
     }
     opts.onPublicUrlPending?.(Date.now() - publicUrlStart);
   }
@@ -452,7 +471,7 @@ async function waitForFirstHeartbeat(
   // Budget exhausted with only a loopback URL. Treat as a soft warn — the
   // server is preserved; the wizard's stalled-state UI tells the operator
   // we'll switch them in once the tunnel propagates.
-  return firstHeartbeatTunnelUrl;
+  return null;
 }
 
 /**

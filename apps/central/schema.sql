@@ -83,11 +83,19 @@ CREATE TABLE servers (
   last_heartbeat_ip TEXT,
   voice_reachability JSONB,
   voice_reachability_checked_at TIMESTAMPTZ,
+  -- Two-phase delete. NULL = live. Set when the owner deletes; every read
+  -- path treats the server as gone, but the row (and the owner's quota slot)
+  -- survives until the desktop confirms it purged local data
+  -- (POST /:id/purge-confirm) or the abandoned-delete reaper gives up
+  -- waiting. Prevents a delete-recreate loop from minting unlimited servers
+  -- while local volumes still hold the old data.
+  deleted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_servers_owner_id ON servers(owner_id);
+CREATE INDEX idx_servers_deleting ON servers(deleted_at) WHERE deleted_at IS NOT NULL;
 CREATE INDEX idx_servers_visibility_online ON servers(visibility, is_online);
 
 -- Heartbeat sync tracking
@@ -157,6 +165,66 @@ CREATE INDEX idx_server_transfers_from_token ON server_transfers(from_token_hash
 CREATE INDEX idx_server_transfers_to_token ON server_transfers(to_token_hash);
 CREATE INDEX idx_server_transfers_pending_expires
   ON server_transfers(expires_at) WHERE is_pending = true;
+
+-- Server membership (spec: membership & invites)
+--
+-- servers.owner_id remains the single source of owner truth. server_members
+-- mirrors it with a role='owner' row so "all servers I belong to" is one
+-- indexed query; every owner_id change (create, transfer) maintains the
+-- mirror in the same transaction. status='banned' rows are kept (not
+-- deleted) so a ban survives the member leaving and re-requesting.
+
+CREATE TABLE server_members (
+  server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'member')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'banned')),
+  joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (server_id, account_id)
+);
+
+CREATE INDEX idx_server_members_account_id ON server_members(account_id);
+
+-- Account-bound invitations: the owner invites an exact account, the invitee
+-- accepts or declines. No open invite links in Phase 1. Settled rows are kept
+-- as an audit trail; the partial unique index only blocks a second *pending*
+-- invite for the same (server, account).
+
+CREATE TABLE server_invitations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  invited_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  invited_by UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'declined', 'revoked', 'expired')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_server_invitations_one_pending
+  ON server_invitations(server_id, invited_account_id) WHERE status = 'pending';
+CREATE INDEX idx_server_invitations_invitee_pending
+  ON server_invitations(invited_account_id) WHERE status = 'pending';
+CREATE INDEX idx_server_invitations_server_pending
+  ON server_invitations(server_id) WHERE status = 'pending';
+
+-- User-initiated join requests for public servers. One pending request per
+-- (server, account); settled rows kept for audit.
+
+CREATE TABLE server_join_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'declined')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX idx_server_join_requests_one_pending
+  ON server_join_requests(server_id, account_id) WHERE status = 'pending';
+CREATE INDEX idx_server_join_requests_server_pending
+  ON server_join_requests(server_id) WHERE status = 'pending';
 
 -- Plugin marketplace
 

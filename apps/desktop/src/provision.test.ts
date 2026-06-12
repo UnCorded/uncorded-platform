@@ -35,9 +35,14 @@ const mockCentralCreateServer = mock(async () => ({
 }));
 const mockCentralDeleteServer = mock(async () => undefined as void);
 const mockCentralGetServer = mock(async () => ({
-  tunnel_url: "https://demo-server.trycloudflare.com" as string | null,
+  tunnel_state: "demo" as string | null,
   last_heartbeat_at: "2026-01-01T00:00:00Z" as string | null,
 }));
+// Central reveals tunnel_url only via the token mint now; provisioning calls
+// fetchTunnelUrl once tunnel_state goes public.
+const mockCentralFetchTunnelUrl = mock(
+  async () => "https://demo-server.trycloudflare.com" as string | null,
+);
 
 const mockDockerImageExists = mock(async () => true);
 const mockDockerRunContainer = mock(async () => "container_abc");
@@ -121,6 +126,7 @@ beforeAll(async () => {
     createServer: mockCentralCreateServer,
     deleteServer: mockCentralDeleteServer,
     getServer: mockCentralGetServer,
+    fetchTunnelUrl: mockCentralFetchTunnelUrl,
     getContainerCentralUrl: () => "https://central.uncorded.app",
   }));
   await mock.module("./docker", () => ({
@@ -186,9 +192,11 @@ beforeEach(() => {
   mockCentralCreateServer.mockResolvedValue({ id: "srv_abc123", server_secret: "secret_xyz" });
   mockCentralDeleteServer.mockResolvedValue(undefined);
   mockCentralGetServer.mockResolvedValue({
-    tunnel_url: "https://demo-server.trycloudflare.com",
+    tunnel_state: "demo",
     last_heartbeat_at: "2026-01-01T00:00:00Z",
   });
+  mockCentralFetchTunnelUrl.mockReset();
+  mockCentralFetchTunnelUrl.mockResolvedValue("https://demo-server.trycloudflare.com");
   mockDockerImageExists.mockResolvedValue(true);
   mockDockerRunContainer.mockResolvedValue("container_abc");
   mockDockerRemoveContainer.mockResolvedValue(undefined);
@@ -533,7 +541,7 @@ describe("provisionServer — PreserveServerError: heartbeat timeout", () => {
     Date.now = () => seq[idx++] ?? base + 80_000;
 
     // Central never reports a tunnel URL or heartbeat.
-    mockCentralGetServer.mockResolvedValue({ tunnel_url: null, last_heartbeat_at: null });
+    mockCentralGetServer.mockResolvedValue({ tunnel_state: null, last_heartbeat_at: null });
 
     await expect(provisionModule.provisionServer(makeInput(), () => {})).rejects.toThrow();
 
@@ -593,7 +601,7 @@ describe("provisionServer — local registry persistence", () => {
     const seq = [base, base, base + 1, base + 80_000];
     let idx = 0;
     Date.now = () => seq[idx++] ?? base + 80_000;
-    mockCentralGetServer.mockResolvedValue({ tunnel_url: null, last_heartbeat_at: null });
+    mockCentralGetServer.mockResolvedValue({ tunnel_state: null, last_heartbeat_at: null });
 
     const persistServerRecord = mock((_serverId: string, _record: ProvisionPersistRecord) => {});
 
@@ -954,7 +962,7 @@ describe("provisionServer — public tunnel probe integration", () => {
     Date.now = () => seq[idx++] ?? base + 200_000;
 
     mockCentralGetServer.mockResolvedValue({
-      tunnel_url: null,
+      tunnel_state: null,
       last_heartbeat_at: "2026-01-01T00:00:00Z",
     });
 
@@ -978,15 +986,16 @@ describe("provisionServer — public tunnel probe integration", () => {
     mockCentralGetServer.mockImplementation(async () => {
       pollCount += 1;
       if (pollCount === 1) {
-        // Phase 1 sees the heartbeat with the loopback URL → enters Phase 2.
+        // Phase 1 sees the heartbeat still in tunnel_state=local → Phase 2.
         return {
-          tunnel_url: "http://localhost:3000",
+          tunnel_state: "local",
           last_heartbeat_at: "2026-01-01T00:00:00Z",
         };
       }
-      // Phase 2 polls until cloudflared resolves.
+      // Phase 2 polls until cloudflared resolves (state flips to demo, at
+      // which point the token mint returns the public URL).
       return {
-        tunnel_url: "https://demo-server.trycloudflare.com",
+        tunnel_state: "demo",
         last_heartbeat_at: "2026-01-01T00:00:00Z",
       };
     });
@@ -1022,10 +1031,14 @@ describe("isPublicTunnelUrl (via provisionServer URL gating)", () => {
   // wait-heartbeat step status. Public URL → completed; loopback / null →
   // warning (Phase 2 budget exhaustion or null URL).
   async function runWithHeartbeatUrl(url: string | null): Promise<string | undefined> {
+    // The runtime reports a public tunnel_state; the URL itself comes back
+    // from the token mint. Feeding loopback URLs through the mint exercises
+    // the defensive isPublicTunnelUrl gate on what Central hands back.
     mockCentralGetServer.mockResolvedValue({
-      tunnel_url: url,
+      tunnel_state: url ? "demo" : null,
       last_heartbeat_at: "2026-01-01T00:00:00Z",
     });
+    mockCentralFetchTunnelUrl.mockResolvedValue(url);
     // Drive Date.now past Phase 2 immediately so loopback URLs short-circuit
     // to soft-warn without real sleeps.
     const base = 1_000_000;

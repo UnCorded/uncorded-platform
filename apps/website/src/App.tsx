@@ -1,4 +1,4 @@
-import { createSignal, createEffect, createMemo, on, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, createEffect, createMemo, on, onMount, onCleanup, Show, untrack } from "solid-js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Titlebar } from "@/components/titlebar";
 import { TunnelStateBanner, TunnelExpiredGate } from "@/components/tunnel-state-notice";
@@ -59,8 +59,15 @@ import {
   peekLiveSurface,
 } from "@/lib/live-surfaces";
 import { AuthPage } from "@/components/auth/auth-page";
+import {
+  consumePendingIntent,
+  parseJoinParam,
+  setPendingIntent,
+  setJoinTarget,
+} from "@/stores/auth-intent";
 import type { SidebarItem } from "@/stores/sidebar";
 import { mountSidebarStore, sections } from "@/stores/sidebar";
+import { mountServerRoute } from "@/lib/server-route";
 import { mountMembershipStore } from "@/stores/membership";
 import { mountPermissionsStores } from "@/stores/permissions";
 import { mountBrowserRecentStore } from "@/stores/browser-recent";
@@ -195,6 +202,17 @@ function consumeAuthRedirectParams(href: string): string | null {
   const params = url.searchParams;
   let consumed = false;
 
+  // ?join=<serverId> deep link (invite links, Explore shares). Stash as a
+  // pending auth intent regardless of session state — the replay effect
+  // below fires it once the account resolves, so the same URL works logged
+  // in (immediate) and logged out (after AuthPage).
+  const joinId = parseJoinParam(params.get("join"));
+  if (joinId) {
+    setPendingIntent({ action: "join", serverId: joinId });
+    params.delete("join");
+    consumed = true;
+  }
+
   if (params.get("verified") === "1") {
     showInlineStatus("Email verified — welcome!", "info");
     params.delete("verified");
@@ -258,6 +276,9 @@ function App() {
     });
   });
   bootTrace("app.mountStores");
+  // Route ↔ selection sync (/s/<server-slug>): mounted FIRST so the pending
+  // segment is captured from the URL before any store effect can write to it.
+  mountServerRoute();
   mountSidebarStore();
   mountMembershipStore();
   mountPermissionsStores();
@@ -320,6 +341,21 @@ function App() {
     const wid = activeId();
     const path = sid ? `/server/${sid}/workspace/${wid}` : `/workspace/${wid}`;
     ctrl.setRoute({ pathname: path });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Auth-gate return-to: once the account resolves (cold bootstrap with a
+  // live session, or a fresh login after the gate), replay the stashed
+  // intent. consumePendingIntent clears as it reads, so an intent fires at
+  // most once; the join surface watches joinTarget and opens the
+  // request-to-join flow for that server.
+  // ---------------------------------------------------------------------------
+  createEffect(() => {
+    if (account() === null) return;
+    const intent = consumePendingIntent();
+    if (intent?.action === "join") {
+      setJoinTarget(intent.serverId);
+    }
   });
 
   createEffect(() => {
@@ -671,7 +707,21 @@ function App() {
     setActiveId(id);
   };
 
-  createEffect(on(activeServerId, (serverId) => {
+  // Re-fire on server switch AND on tunnel_url hydration. The URL is no longer
+  // list metadata — it hydrates via ws.connect()'s token mint (patchServer), so
+  // a server selected before its first mint has tunnel_url=null here. Keying on
+  // the hydration *transition* (pending→ready) rather than the URL value means
+  // a mid-session tunnel rotation doesn't blow away the open workspace, but the
+  // saved-layout load still runs once the URL exists instead of one-shot
+  // resetting to a blank local workspace and never retrying.
+  const workspaceLoadKey = createMemo(() => {
+    const id = activeServerId();
+    if (!id) return null;
+    return activeServer()?.tunnel_url ? `${id}|ready` : `${id}|pending`;
+  });
+
+  createEffect(on(workspaceLoadKey, (key) => {
+    const serverId = key ? key.slice(0, key.indexOf("|")) : null;
     autoSaveTimers.forEach(clearTimeout);
     autoSaveTimers.clear();
     autoSaveAborters.forEach((c) => c.abort());
@@ -679,7 +729,7 @@ function App() {
 
     setWorkspaceError(false);
     if (!serverId) { resetWorkspaces(); return; }
-    const server = activeServer();
+    const server = untrack(activeServer);
     if (!server?.tunnel_url) { resetWorkspaces(); return; }
 
     // Destroy all mounts from the prior server BEFORE issuing the load.

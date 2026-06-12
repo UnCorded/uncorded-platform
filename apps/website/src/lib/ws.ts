@@ -24,7 +24,7 @@ import { storeToken, clearToken, getCachedToken } from "./tokens";
 import { bootTrace } from "./boot-trace";
 import { ApiError } from "../api/types";
 import type { Server } from "../api/types";
-import { serverById } from "../stores/servers";
+import { serverById, patchServer as patchServerStore } from "../stores/servers";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_PENDING_REQUESTS = 100;
@@ -502,7 +502,8 @@ export function send(serverId: string, msg: ClientMessage, handlerKey?: string):
 // firing onclose cleanly, or while a reconnect is in-flight) would otherwise cause
 // this to short-circuit forever and every subsequent request to silently queue+timeout.
 export async function connect(server: Server): Promise<void> {
-  if (!server.tunnel_url) return;
+  // No tunnel_url guard here: the URL is a capability resolved (and hydrated
+  // into the store) by openConnection's token mint, not list metadata.
   const existing = connections.get(server.id);
   if (existing) {
     const state = existing.ws.readyState;
@@ -550,10 +551,6 @@ export function disconnect(serverId: string): void {
  * CLOSED/CLOSING stale entry exists, it is torn down before reopen.
  */
 export async function forceReconnect(server: Server): Promise<void> {
-  if (!server.tunnel_url) {
-    bootTrace("ws.forceReconnect.noTunnel", { serverId: server.id });
-    return;
-  }
   abortReconnect(server.id);
   const existing = connections.get(server.id);
   if (existing) {
@@ -598,8 +595,6 @@ async function openConnectionInner(
   server: Server,
   backoff: number,
 ): Promise<void> {
-  if (!server.tunnel_url) return;
-
   // Expired-tunnel gate. A demo tunnel that hit its 24h TTL (WS3) reports
   // tunnel_state="expired" and the runtime falls its public URL back to a
   // local one that no remote client can reach. Refuse to dial — and don't
@@ -616,6 +611,11 @@ async function openConnectionInner(
   }
 
   let tokenData: { token: string; expires_at: number };
+  // The token mint is also the only place Central reveals tunnel_url (a
+  // membership capability — list responses don't carry it). A fresh mint
+  // hydrates the store via patchServer so panels resolving through
+  // serverById() see the URL; the cached-token path reuses the stored value.
+  let mintedUrl: string | null = null;
   // Reuse the cached token across transient reconnects. The cache survives
   // ws.onclose now (it's only cleared by intentional teardown via disconnect),
   // so a network blip → reconnect cycle no longer hits Central. tokens.ts
@@ -628,7 +628,12 @@ async function openConnectionInner(
   } else {
     bootTrace("ws.token.fetch.start", { serverId: server.id });
     try {
-      tokenData = await central.getServerToken(server.id);
+      const minted = await central.getServerToken(server.id);
+      tokenData = minted;
+      mintedUrl = minted.tunnel_url;
+      if (mintedUrl && serverById(server.id)?.tunnel_url !== mintedUrl) {
+        patchServerStore(server.id, { tunnel_url: mintedUrl });
+      }
       bootTrace("ws.token.fetch.done", { serverId: server.id });
     } catch (err) {
       bootTrace("ws.token.fetch.error", { serverId: server.id, error: String(err) });
@@ -657,10 +662,24 @@ async function openConnectionInner(
     }
   }
 
+  // Dial-URL resolution order: this mint's URL → live store value (hydrated
+  // by an earlier mint) → the caller's snapshot. A server that has never
+  // tunneled has none — bail without scheduling, and drop any cached token
+  // so the next connect attempt (fired by the 60s membership poll flipping
+  // is_online) re-mints and re-resolves the URL instead of being stuck
+  // URL-less until token expiry.
+  const dialUrlString =
+    mintedUrl ?? (serverById(server.id) ?? server).tunnel_url;
+  if (!dialUrlString) {
+    bootTrace("ws.open.noTunnelUrl", { serverId: server.id });
+    clearToken(server.id);
+    return;
+  }
+
   // Server-controlled tunnel_url; still, string replace on "http" matches the
   // scheme *and* any later occurrence, so use the URL API to swap only the
   // scheme cleanly (https → wss, http → ws) and append the path.
-  const tunnelUrl = new URL(server.tunnel_url);
+  const tunnelUrl = new URL(dialUrlString);
   tunnelUrl.protocol = tunnelUrl.protocol === "https:" ? "wss:" : "ws:";
   tunnelUrl.pathname = "/ws";
   bootTrace("ws.socket.new", { serverId: server.id, url: tunnelUrl.toString() });
@@ -719,6 +738,13 @@ async function openConnectionInner(
     void refreshToken(id, server);
   });
 
+  // Tracks whether the socket ever reached `open`. A close without open is a
+  // connection-level failure — the likeliest cause after a runtime restart is
+  // a rotated tunnel URL, so onclose uses this to drop the cached token and
+  // force the next attempt to re-mint (which re-resolves the URL from
+  // Central). Auth-level failures keep their existing cache semantics.
+  let sawOpen = false;
+
   // Resolve once the socket is actually open so callers of connect() can
   // safely call send() / request() immediately after awaiting connect().
   const openPromise = new Promise<void>((resolve) => {
@@ -728,6 +754,7 @@ async function openConnectionInner(
   });
 
   ws.onopen = () => {
+    sawOpen = true;
     bootTrace("ws.onopen.authSend", { serverId: server.id });
     // Send ONLY the auth frame here. Bun.serve's `async message` handler runs
     // handlers concurrently for frames on the same socket — there is no
@@ -1031,6 +1058,16 @@ async function openConnectionInner(
       clearToken(server.id);
     }
 
+    // Never-opened close: the dial itself failed. Drop the cached token so
+    // the reconnect re-mints — the mint carries the current tunnel_url, so a
+    // runtime that came back on a NEW quick-tunnel URL heals within one
+    // backoff cycle instead of redialing the dead address until token
+    // expiry. Cost: one extra mint per failed attempt for a genuinely
+    // offline server, bounded by the 30s backoff cap (~2/min).
+    if (!sawOpen) {
+      clearToken(server.id);
+    }
+
     // 4001 = auth timeout / token already used / server-issued re-sync. All
     //        three want a fresh-token reconnect; the clearToken above (when
     //        applicable) makes that safe.
@@ -1074,6 +1111,11 @@ async function refreshToken(
 
   try {
     const tokenData = await central.getServerToken(serverId);
+    // Same hydration as the connect path — refresh mints are the URL's
+    // steady-state update channel now that list responses don't carry it.
+    if (tokenData.tunnel_url && serverById(serverId)?.tunnel_url !== tokenData.tunnel_url) {
+      patchServerStore(serverId, { tunnel_url: tokenData.tunnel_url });
+    }
     storeToken(serverId, tokenData.token, tokenData.expires_at, (id) => {
       void refreshToken(id, server);
     });

@@ -8,6 +8,17 @@ import { NavSecondary } from "@/components/nav-secondary";
 import { NavUser } from "@/components/nav-user";
 import { VoiceIndicator } from "@/components/voice-indicator";
 import { ServerSwitcher } from "@/components/server-switcher";
+import { openExploreServers, ExploreServersHost } from "@/components/server/explore-servers-dialog";
+import {
+  myInvites,
+  inviteBusyId,
+  inviteError,
+  refreshInvites,
+  ensureInvitePolling,
+  acceptInviteAction,
+  declineInviteAction,
+} from "@/stores/invites";
+import { account } from "@/stores/auth";
 import {
   Sidebar,
   SidebarContent,
@@ -85,6 +96,53 @@ function SidebarSkeleton(): JSX.Element {
 function NoServerState() {
   return (
     <div class="flex flex-col flex-1 overflow-y-auto">
+      {/* Pending invitations — rendered HERE as well as in the switcher
+          dropdown because a brand-new invitee has no servers, so the
+          switcher (active-server chrome) doesn't exist for them. Accepting
+          their first invite is this list's whole job. */}
+      <Show when={myInvites().length > 0}>
+        <div class="px-2 pt-2 pb-1">
+          <p class="px-2 py-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+            Invitations
+          </p>
+          <For each={myInvites()}>
+            {(inv) => (
+              <div class="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-sm text-muted-foreground">
+                <div class="flex size-6 shrink-0 items-center justify-center rounded-sm bg-muted text-xs font-bold">
+                  {inv.server_name.charAt(0).toUpperCase()}
+                </div>
+                <div class="flex min-w-0 flex-1 flex-col">
+                  <span class="truncate text-left">{inv.server_name}</span>
+                  <span class="truncate text-left text-[10px] text-muted-foreground/60">
+                    invited by @{inv.invited_by_username}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  class="rounded-md border border-emerald-600/40 px-1.5 py-0.5 text-[11px] text-emerald-500 hover:bg-emerald-500/10 disabled:opacity-50"
+                  disabled={inviteBusyId() !== null}
+                  onClick={() => void acceptInviteAction(inv)}
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground/70 hover:bg-sidebar-accent disabled:opacity-50"
+                  disabled={inviteBusyId() !== null}
+                  onClick={() => void declineInviteAction(inv)}
+                >
+                  Decline
+                </button>
+              </div>
+            )}
+          </For>
+          <Show when={inviteError()}>
+            <p class="px-2 py-1 text-[11px] text-destructive">{inviteError()}</p>
+          </Show>
+        </div>
+        <div class="mx-4 my-2 h-px bg-border" />
+      </Show>
+
       <Show when={!serversLoading() && servers().length > 0}>
         <div class="px-2 pt-2 pb-1">
           <p class="px-2 py-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
@@ -176,6 +234,15 @@ export function AppSidebar(props: {
   const [supportOpen, setSupportOpen] = createSignal(false);
   const [pendingSettingsTab, setPendingSettingsTab] = createSignal<ServerSettingsTab | null>(null);
   const sidebarCtx = useSidebar();
+
+  // Invitations liveness. AppSidebar is the always-mounted owner (the
+  // switcher is not — it only renders with an active server), so the
+  // login-reactive initial load and the 60s poll + focus refresh are
+  // anchored here.
+  createEffect(() => {
+    if (account() !== null) void refreshInvites();
+  });
+  ensureInvitePolling();
 
   // Cross-component requests to jump into Server Settings on a specific tab
   // (e.g. the sidebar runtime update pill clicking through to Danger Zone).
@@ -293,22 +360,15 @@ export function AppSidebar(props: {
                   <span>Create a server</span>
                   <span class="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/40">Advanced</span>
                 </button>
-                {/* TODO: wire to server directory once Central exposes it.
-                    Using aria-disabled (not the HTML disabled attribute) so
-                    hover styling still fires and the user gets feedback that
-                    the row is interactive-but-not-yet. */}
                 <button
                   type="button"
-                  aria-disabled="true"
-                  data-tooltip="Coming soon"
-                  data-tooltip-side="right"
-                  class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground/50 cursor-not-allowed transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  onClick={() => openExploreServers()}
                 >
                   <div class="flex size-5 items-center justify-center shrink-0">
                     <Compass class="size-4" />
                   </div>
                   <span>Explore servers</span>
-                  <span class="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/40">Soon</span>
                 </button>
               </>
             }
@@ -339,6 +399,7 @@ export function AppSidebar(props: {
       </SidebarFooter>
 
       <CreateServerWizard open={wizardOpen()} onOpenChange={setWizardOpen} />
+      <ExploreServersHost />
       <ServerSettingsSheet
         open={settingsOpen()}
         onOpenChange={setSettingsOpen}

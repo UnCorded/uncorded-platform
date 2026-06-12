@@ -19,7 +19,15 @@ export interface Server {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
+  /** Membership capability: carried by /v1/me/servers (every row there is a
+   *  server you belong to) and by the token mint, but stripped from the
+   *  public directory and GET /:id. null until the first tunneled
+   *  heartbeat. */
   tunnel_url: string | null;
+  /** Membership role from /v1/me/servers — absent on directory rows. */
+  role?: "owner" | "member";
+  /** Membership joined_at from /v1/me/servers — absent on directory rows. */
+  joined_at?: string;
   /**
    * Tunnel lifecycle reported by the runtime heartbeat: "demo" (ephemeral quick
    * tunnel), "named" (stable authenticated tunnel), "local" (no public tunnel),
@@ -34,6 +42,47 @@ export interface Server {
   last_heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// --- Central membership surfaces (invites, join requests, access list) ---
+
+export interface MyInvite {
+  id: string;
+  server_id: string;
+  server_name: string;
+  invited_by_username: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface ServerInvite {
+  id: string;
+  invited_account_id: string;
+  username: string;
+  display_name: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface JoinRequest {
+  id: string;
+  account_id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string | null;
+  created_at: string;
+}
+
+/** A Central access-membership row — who may mint tokens for the server.
+ *  Distinct from the runtime core module's presence members. */
+export interface ServerMember {
+  account_id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string | null;
+  role: "owner" | "member";
+  status: "active" | "banned";
+  joined_at: string;
 }
 
 export interface Plugin {
