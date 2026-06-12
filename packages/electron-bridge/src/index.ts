@@ -572,11 +572,20 @@ export interface ElectronBridge {
     /**
      * Open the native view in its own free, frameless OS window that owns the
      * view directly (header + content glued, movable anywhere off-app). The live
-     * session is preserved (no reload). `serverId` is the server to dock the view
-     * into if the user later clicks the window's "Dock as panel" header button
-     * (empty string = no active server → the window omits that button).
+     * session is preserved (no reload). Where it docks is resolved at dock time
+     * (the renderer's then-active server) — no target is remembered here.
      */
-    openWindow(surfaceId: number, serverId: string): Promise<void>;
+    openWindow(surfaceId: number): Promise<void>;
+    /**
+     * Step 2 of the dock handshake: claim the view for docking. Main re-parents
+     * it into the main window (parked hidden), then closes its popout window if
+     * it had one. Returns whether the view is parked and ready to be tracked —
+     * on `false` (view destroyed, no main window) the caller must NOT open a
+     * panel; the popout, if any, stays open and the user loses nothing.
+     * Idempotent for a view already parked in the main window (the popup-pref
+     * auto-dock path).
+     */
+    claimDock(surfaceId: number): Promise<boolean>;
     /**
      * Fires when a Browser Panel guest opens a new window. Main has already
      * created the native view (parked hidden) and loaded the URL into it;
@@ -588,14 +597,15 @@ export interface ElectronBridge {
       handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
     ): CleanupFn;
     /**
-     * Fires when the user clicks "Dock as panel" in a popout window. Main has
-     * already re-parented the live view into the main window (parked hidden) and
-     * closed the popout; the renderer opens a workspace panel for `surfaceId`,
-     * anchored to `serverId`, at the live `url`, and registers the live surface so
-     * `setBounds` takes over positioning. Survives the originating panel closing.
+     * Step 1 of the dock handshake: fires when the user clicks "Dock" in a
+     * popout window. The popout is still open and still owns the view — the
+     * renderer verifies it can host a panel (an active server; toast + stop if
+     * not), then commits via `claimDock(surfaceId)` and only on `true` opens a
+     * workspace panel at the live `url`. Claim-before-panel means no stale
+     * setBounds can race the move.
      */
     onDockRequested(
-      handler: (payload: { surfaceId: number; serverId: string; url: string }) => void,
+      handler: (payload: { surfaceId: number; url: string; title: string }) => void,
     ): CleanupFn;
   };
 }
@@ -714,6 +724,7 @@ export interface IpcChannelMap {
   readonly NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds";
   readonly NATIVE_SURFACE_RELEASE: "desktop:native-surface:release";
   readonly NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window";
+  readonly NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock";
   readonly NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested";
   // Sent by the popout window's own chrome (popout-preload) to main.
   readonly NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock";

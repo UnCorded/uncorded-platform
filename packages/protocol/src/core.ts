@@ -116,6 +116,9 @@ export type BrowserPanelContent = LegacyBrowserPanelContent | TabbedBrowserPanel
 //   - `webAppId` — the per-URL *bookmark* identity (the desktop-local Web App
 //     entry). Idempotent by URL: the same saved page always has the same
 //     webAppId. Used for the sidebar linkage and "is this URL saved".
+//     OPTIONAL: docking is a pure layout act and does NOT bookmark — a panel
+//     created by docking a live popup carries no webAppId; only panels opened
+//     from a saved sidebar Web App do ("Save as Web App" stays explicit).
 //   - `instanceId` — the per-*panel* identity. Each open panel gets its own,
 //     so the same URL can be open in two panels at once without colliding. It
 //     keys the surface (surfaceKeyOf) and the renderer's live-surface binding,
@@ -124,7 +127,7 @@ export type BrowserPanelContent = LegacyBrowserPanelContent | TabbedBrowserPanel
 //     legacy layouts without one are backfilled on load.
 export interface WebAppPanelContent {
   type: "webapp";
-  webAppId: string;
+  webAppId?: string;
   instanceId: string;
   url: string;
   title: string;

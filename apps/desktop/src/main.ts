@@ -121,11 +121,11 @@ const visibleNativeSurfaces = new Set<number>();
 
 // Free, frameless OS windows that host a popped-out native view directly (the
 // view is a child of the popout's own contentView, so it moves with the window
-// and isn't clipped to the main app). Keyed by the same surfaceId. `serverId` is
-// the server the view docks into if the user clicks the popout's "Dock as panel"
-// (empty = no active server → that button is omitted). Membership in this map is
-// also the trust boundary for the popout chrome's ipcMain.on messages.
-const surfacePopouts = new Map<number, { window: BrowserWindow; serverId: string }>();
+// and isn't clipped to the main app). Keyed by the same surfaceId. Dock target
+// is resolved at dock time by the renderer (whatever server/workspace is active
+// then), so no association is remembered here. Membership in this map is also
+// the trust boundary for the popout chrome's ipcMain.on messages.
+const surfacePopouts = new Map<number, BrowserWindow>();
 // Height (DIP) of the popout window's draggable chrome strip; the live view is
 // parked below it. Must match the .bar height in buildPopoutChromeHtml.
 const POPOUT_HEADER_H = 40;
@@ -1579,15 +1579,16 @@ function closeScreenSharePopout(trackSid: string): void {
 // are never under the native view (which always paints above DOM) — fixing the
 // "header buttons don't work / content drifts" failure of the old in-app frame.
 // Buttons talk to main via the popoutChrome bridge (popout-preload.ts).
-function buildPopoutChromeHtml(opts: { host: string; canDock: boolean }): string {
+function buildPopoutChromeHtml(opts: { host: string }): string {
   const esc = (s: string): string =>
     s.replace(/[&<>"']/g, (c) =>
       c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;",
     );
   const host = esc(opts.host);
-  const dockBtn = opts.canDock
-    ? `<button class="btn" onclick="window.popoutChrome.dock()">Dock as panel</button>`
-    : "";
+  // Dock resolves its target at dock time (the renderer's active server), so the
+  // button is always offered; with no active server the renderer toasts and the
+  // window stays open (fail closed).
+  const dockBtn = `<button class="btn" onclick="window.popoutChrome.dock()">Dock</button>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1635,10 +1636,10 @@ function layoutSurfacePopout(popout: BrowserWindow, view: WebContentsView): void
 // our own popout windows are in surfacePopouts, so a match IS the authorization.
 function popoutFromSender(
   sender: WebContents,
-): { surfaceId: number; window: BrowserWindow; serverId: string } | null {
-  for (const [surfaceId, entry] of surfacePopouts) {
-    if (entry.window.webContents.id === sender.id) {
-      return { surfaceId, window: entry.window, serverId: entry.serverId };
+): { surfaceId: number; window: BrowserWindow } | null {
+  for (const [surfaceId, window] of surfacePopouts) {
+    if (window.webContents.id === sender.id) {
+      return { surfaceId, window };
     }
   }
   return null;
@@ -1698,7 +1699,7 @@ function createNativeSurface(url: string): number {
 // Move a captured native view OUT of the main window and into its own free,
 // frameless OS window that owns it directly. The live session is preserved (no
 // reload) and the window can move anywhere, off-app / onto another monitor.
-function createNativeSurfacePopout(surfaceId: number, serverId: string): void {
+function createNativeSurfacePopout(surfaceId: number): void {
   const view = nativeSurfaces.get(surfaceId);
   if (!view || view.webContents.isDestroyed()) return;
   // Detach from the main window if it's currently parented there (docked/parked).
@@ -1741,18 +1742,17 @@ function createNativeSurfacePopout(surfaceId: number, serverId: string): void {
   popout.webContents.once("did-finish-load", relayout);
 
   const dataUrl =
-    "data:text/html;charset=utf-8," +
-    encodeURIComponent(buildPopoutChromeHtml({ host, canDock: serverId.length > 0 }));
+    "data:text/html;charset=utf-8," + encodeURIComponent(buildPopoutChromeHtml({ host }));
   void popout.loadURL(dataUrl).catch((err) => {
     log.error("native-surface popout loadURL failed", { err: errorMessage(err) });
   });
 
-  surfacePopouts.set(surfaceId, { window: popout, serverId });
+  surfacePopouts.set(surfaceId, popout);
   popout.on("closed", () => {
     const entry = surfacePopouts.get(surfaceId);
-    // Still mapped → closed without docking: destroy the live view. (Dock
+    // Still mapped → closed without docking: destroy the live view. (Dock claim
     // deletes the entry first, so this won't fire for a docked view.)
-    if (entry && entry.window === popout) {
+    if (entry === popout) {
       surfacePopouts.delete(surfaceId);
       nativeSurfaces.delete(surfaceId);
       if (!view.webContents.isDestroyed()) view.webContents.close();
@@ -1760,43 +1760,54 @@ function createNativeSurfacePopout(surfaceId: number, serverId: string): void {
   });
 }
 
-// Re-parent a popped-out view back into the main window (parked hidden) and ask
-// the renderer to open a workspace panel for it. The webContents persists across
-// the move, so the live session is kept.
-function dockNativeSurfaceFromPopout(found: {
-  surfaceId: number;
-  window: BrowserWindow;
-  serverId: string;
-}): void {
-  const { surfaceId, window: popout, serverId } = found;
+// Step 1 of the dock handshake: the popout chrome's Dock button asks the
+// renderer to dock this view. The popout is NOT touched — the renderer first
+// verifies it can host a panel (an active server) and then claims the view via
+// NATIVE_SURFACE_CLAIM_DOCK. If anything renderer-side fails (no server, claim
+// races a teardown), the popout simply stays open and the user loses nothing.
+function requestDockFromPopout(found: { surfaceId: number; window: BrowserWindow }): void {
+  const { surfaceId, window: popout } = found;
   const view = nativeSurfaces.get(surfaceId);
   if (!view || view.webContents.isDestroyed()) {
-    surfacePopouts.delete(surfaceId);
+    // Nothing left to dock — the popout is hosting a dead view; let its
+    // 'closed' handler clean up the map entry.
     if (!popout.isDestroyed()) popout.close();
     return;
   }
-  // No main window to dock into (hidden-to-tray windows still exist; this is
-  // the truly-destroyed case). Proceeding would strip the view out of the
-  // popout and then drop it — keep the popout alive instead; the user loses
-  // nothing.
-  if (!win || win.isDestroyed()) return;
-  const url = view.webContents.getURL();
-  if (!popout.isDestroyed()) popout.contentView.removeChildView(view);
-  if (win && !win.isDestroyed()) {
-    win.contentView.addChildView(view);
-    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-    view.setVisible(false);
-    // Parked hidden in main: the next renderer-driven setBounds is a genuine
-    // hidden→visible transition, so the repaint kick there fires for the dock.
-    visibleNativeSurfaces.delete(surfaceId);
-    // Docking re-adds the view on TOP regardless of its surfaceId — the one path
-    // that breaks the ascending-id stack. Re-normalize so z-order stays stable.
-    restackNativeSurfaces();
+  sendToWindow(IPC.NATIVE_SURFACE_DOCK_REQUESTED, {
+    surfaceId,
+    url: view.webContents.getURL(),
+    title: view.webContents.getTitle(),
+  });
+}
+
+// Step 2 of the dock handshake: the renderer commits. Re-parent the popped-out
+// view back into the main window (parked hidden) and close the popout. The
+// webContents persists across the move, so the live session is kept. Returns
+// whether the view is now parked in the main window — the renderer only opens
+// a panel on true. Idempotent for a view that's already in the main window
+// (the popup-pref auto-dock path claims a view that never popped out).
+function claimDockNativeSurface(surfaceId: number): boolean {
+  const view = nativeSurfaces.get(surfaceId);
+  if (!view || view.webContents.isDestroyed()) return false;
+  if (!win || win.isDestroyed()) return false;
+  const popout = surfacePopouts.get(surfaceId);
+  if (popout && !popout.isDestroyed()) popout.contentView.removeChildView(view);
+  win.contentView.addChildView(view);
+  view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  view.setVisible(false);
+  // Parked hidden in main: the next renderer-driven setBounds is a genuine
+  // hidden→visible transition, so the repaint kick there fires for the dock.
+  visibleNativeSurfaces.delete(surfaceId);
+  // Docking re-adds the view on TOP regardless of its surfaceId — the one path
+  // that breaks the ascending-id stack. Re-normalize so z-order stays stable.
+  restackNativeSurfaces();
+  if (popout) {
+    // Drop the entry BEFORE closing so the 'closed' handler won't destroy the view.
+    surfacePopouts.delete(surfaceId);
+    if (!popout.isDestroyed()) popout.close();
   }
-  // Drop the entry BEFORE closing so the 'closed' handler won't destroy the view.
-  surfacePopouts.delete(surfaceId);
-  sendToWindow(IPC.NATIVE_SURFACE_DOCK_REQUESTED, { surfaceId, serverId, url });
-  if (!popout.isDestroyed()) popout.close();
+  return true;
 }
 
 function registerIpcHandlers(): void {
@@ -2412,16 +2423,23 @@ function registerIpcHandlers(): void {
   });
   // Open the native view in its own free, frameless OS window that owns it
   // directly (header + content glued, movable anywhere off-app). Live session
-  // preserved — no reload. serverId is where it docks if the user later clicks
-  // the window's "Dock as panel" (empty = no active server → button omitted).
-  handleIpc(IPC.NATIVE_SURFACE_OPEN_WINDOW, (_event, surfaceId: unknown, serverId: unknown) => {
+  // preserved — no reload. Where it docks is resolved at dock time (the
+  // renderer's then-active server), so no target is passed here.
+  handleIpc(IPC.NATIVE_SURFACE_OPEN_WINDOW, (_event, surfaceId: unknown) => {
     if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
       throw ipcError(IPC.NATIVE_SURFACE_OPEN_WINDOW, new Error("surfaceId must be an integer"));
     }
-    if (typeof serverId !== "string") {
-      throw ipcError(IPC.NATIVE_SURFACE_OPEN_WINDOW, new Error("serverId must be a string"));
+    createNativeSurfacePopout(surfaceId);
+  });
+  // Step 2 of the dock handshake (see claimDockNativeSurface): the renderer has
+  // verified it can host a panel and now claims the view. Returns whether the
+  // view is parked in the main window ready to be tracked — on false the
+  // renderer must NOT open a panel (the popout, if any, stays open).
+  handleIpc(IPC.NATIVE_SURFACE_CLAIM_DOCK, (_event, surfaceId: unknown) => {
+    if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
+      throw ipcError(IPC.NATIVE_SURFACE_CLAIM_DOCK, new Error("surfaceId must be an integer"));
     }
-    createNativeSurfacePopout(surfaceId, serverId);
+    return claimDockNativeSurface(surfaceId);
   });
   // Popout-window chrome buttons (popout-preload.ts → ipcRenderer.send). These
   // come from a data: URL page that can't pass the shell-origin guard, so they
@@ -2429,7 +2447,7 @@ function registerIpcHandlers(): void {
   // (popoutFromSender returns null for any sender that isn't one of our popouts).
   ipcMain.on(IPC.NATIVE_SURFACE_WINDOW_DOCK, (event) => {
     const found = popoutFromSender(event.sender);
-    if (found) dockNativeSurfaceFromPopout(found);
+    if (found) requestDockFromPopout(found);
   });
   ipcMain.on(IPC.NATIVE_SURFACE_WINDOW_CLOSE, (event) => {
     const found = popoutFromSender(event.sender);

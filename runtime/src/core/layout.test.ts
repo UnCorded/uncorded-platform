@@ -130,12 +130,28 @@ describe("validateLayout", () => {
     expect(r).toEqual({ ok: true });
   });
 
-  it("rejects a webapp panel missing webAppId", () => {
+  it("accepts a webapp panel without webAppId (dock ≠ save: docked panels aren't bookmarks)", () => {
     const r = validateLayout({
       version: 1,
       root: { type: "leaf", id: "wa-1" },
       panels: {
         "wa-1": { type: "webapp", url: "https://example.com", title: "X" },
+      },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("rejects a webapp panel with a present-but-empty webAppId", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "",
+          url: "https://example.com",
+          title: "X",
+        },
       },
     });
     expect(r.ok).toBe(false);

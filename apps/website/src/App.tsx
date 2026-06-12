@@ -1068,41 +1068,47 @@ function App() {
     dropToPanel(activeFocusedLeafId() ?? firstLeafId(activeLayout()), content);
   };
 
-  // Dock a web app as a NEW workspace panel (split), not by replacing the focused
-  // leaf — this is the path the popout window's "Dock as panel" button drives, and
-  // the user wants docking to ADD a panel. Mirrors the sidebar-edge drop. Falls
-  // back to filling the leaf when the focused leaf is empty (don't split next to a
-  // blank panel). Distinct from handleOpenWebApp (sidebar click → replace), which
-  // stays as-is.
-  const dockWebAppAsNewPanel = (app: WebApp, instanceId: string) => {
+  // Dock a page as a NEW workspace panel (split), not by replacing the focused
+  // leaf — this is the path the popout window's "Dock" button drives, and the
+  // user wants docking to ADD a panel. Mirrors the sidebar-edge drop. Falls
+  // back to filling the leaf when the focused leaf is empty (don't split next to
+  // a blank panel). Distinct from handleOpenWebApp (sidebar click → replace),
+  // which stays as-is. No webAppId on the content: dock ≠ save — a docked panel
+  // is pure layout, not a bookmark ("Save as Web App" stays explicit).
+  const dockWebAppAsNewPanel = (app: { url: string; title: string }, instanceId: string) => {
+    let titleFallback = app.url;
+    try {
+      titleFallback = new URL(app.url).host;
+    } catch {
+      /* keep raw url */
+    }
     const content: PanelContent = {
       type: "webapp",
-      webAppId: app.id,
       instanceId,
       url: app.url,
-      title: app.title,
+      title: app.title || titleFallback,
     };
     const targetLeafId = activeFocusedLeafId() ?? firstLeafId(activeLayout());
     if (getContent(targetLeafId) === undefined) dropToPanel(targetLeafId, content);
     else dropChannelToEdge(targetLeafId, content, "horizontal", "after");
   };
 
-  // The dock flow (a "panel"-pref interception, or the popout window's "Dock as
-  // panel" button) docks a live web app by emitting here, so we don't drill a
-  // callback through the panel tree. Opens as a NEW panel (split).
+  // The dock flow (a "panel"-pref interception, or the popout window's "Dock"
+  // button) docks a live page by emitting here, so we don't drill a callback
+  // through the panel tree. Opens as a NEW panel (split).
   createEffect(() => {
     const unsubscribe = onOpenWebAppAsPanel((app, instanceId) => dockWebAppAsNewPanel(app, instanceId));
     onCleanup(unsubscribe);
   });
 
-  // The popout window's "Dock as panel" button: main has re-parented the live view
-  // into the main window (parked hidden) and closed the popout, then pushes here.
+  // Step 1 of the dock handshake: the popout window's "Dock" button. The popout
+  // is still open and still owns the view — dockLiveSurface verifies an active
+  // server (toast + stop if none; the popout survives), claims the view from
+  // main, and only then flows through the subscription above to open a panel.
   // Top-level (not per-panel) so it survives the originating browser panel closing.
-  // dockLiveSurface → emitOpenWebAppAsPanel flows through the subscription above,
-  // so the live view opens as a new panel with no reload.
   createEffect(() => {
-    const unsubscribe = onNativeSurfaceDockRequested(({ surfaceId, serverId, url }) => {
-      void dockLiveSurface(surfaceId, serverId, url);
+    const unsubscribe = onNativeSurfaceDockRequested(({ surfaceId, url, title }) => {
+      void dockLiveSurface(surfaceId, url, title);
     });
     onCleanup(unsubscribe);
   });

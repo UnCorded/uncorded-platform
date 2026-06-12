@@ -117,6 +117,7 @@ const IPC = {
   NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds",
   NATIVE_SURFACE_RELEASE: "desktop:native-surface:release",
   NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window",
+  NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock",
   NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested",
   NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock",
   NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close",
@@ -457,8 +458,11 @@ contextBridge.exposeInMainWorld("electron", {
     release(surfaceId: number): Promise<void> {
       return ipcInvoke<void>(IPC.NATIVE_SURFACE_RELEASE, surfaceId);
     },
-    openWindow(surfaceId: number, serverId: string): Promise<void> {
-      return ipcInvoke<void>(IPC.NATIVE_SURFACE_OPEN_WINDOW, surfaceId, serverId);
+    openWindow(surfaceId: number): Promise<void> {
+      return ipcInvoke<void>(IPC.NATIVE_SURFACE_OPEN_WINDOW, surfaceId);
+    },
+    claimDock(surfaceId: number): Promise<boolean> {
+      return ipcInvoke<boolean>(IPC.NATIVE_SURFACE_CLAIM_DOCK, surfaceId);
     },
     onIntercepted(
       handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
@@ -471,11 +475,11 @@ contextBridge.exposeInMainWorld("electron", {
       return () => ipcRenderer.removeListener(IPC.NATIVE_SURFACE_INTERCEPTED, listener);
     },
     onDockRequested(
-      handler: (payload: { surfaceId: number; serverId: string; url: string }) => void,
+      handler: (payload: { surfaceId: number; url: string; title: string }) => void,
     ): CleanupFn {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        payload: { surfaceId: number; serverId: string; url: string },
+        payload: { surfaceId: number; url: string; title: string },
       ): void => handler(payload);
       ipcRenderer.on(IPC.NATIVE_SURFACE_DOCK_REQUESTED, listener);
       return () => ipcRenderer.removeListener(IPC.NATIVE_SURFACE_DOCK_REQUESTED, listener);

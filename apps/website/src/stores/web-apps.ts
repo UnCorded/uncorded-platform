@@ -2,6 +2,8 @@ import { batch, createSignal } from "solid-js";
 import type { WebApp, WebAppPref } from "@uncorded/electron-bridge";
 import { isElectron, getElectron } from "@/lib/electron";
 import { registerLiveSurface } from "@/lib/live-surfaces";
+import { showToast } from "@/lib/feedback";
+import { activeServerId } from "./servers";
 
 // Renderer-side cache + actions for desktop-owned, PER-SERVER Web Apps.
 // The desktop main process is the source of truth (~/.uncorded/web-apps.json);
@@ -155,56 +157,76 @@ export async function nativeSurfaceRelease(surfaceId: number): Promise<void> {
 /**
  * Open the native view in its own free, frameless OS window that owns the live
  * view directly (header + content glued, movable anywhere off-app). The live
- * session is preserved — no reload. `serverId` is where the view docks if the
- * user later clicks the window's "Dock as panel" ("" = no active server → that
- * button is omitted). No-op on web.
+ * session is preserved — no reload. Where it docks is resolved at dock time
+ * (whatever server is active then), so no target is passed. No-op on web.
  */
-export async function nativeSurfaceOpenWindow(
-  surfaceId: number,
-  serverId: string,
-): Promise<void> {
+export async function nativeSurfaceOpenWindow(surfaceId: number): Promise<void> {
   if (!isElectron()) return;
   try {
-    await getElectron().nativeSurface.openWindow(surfaceId, serverId);
+    await getElectron().nativeSurface.openWindow(surfaceId);
   } catch (err) {
     console.error("[web-apps] nativeSurface.openWindow failed", { surfaceId, err });
   }
 }
 
 /**
- * Subscribe to "user clicked Dock as panel in a popout window". Main has already
- * re-parented the live view into the main window (parked hidden) and closed the
- * popout; the renderer opens a workspace panel for it. Returns an unsubscribe fn;
- * a no-op on web. Survives the originating browser panel closing (App wires this
- * at the top level, not per-panel).
+ * Step 2 of the dock handshake: claim the view for docking. Main re-parents it
+ * into the main window (parked hidden) and closes its popout if it had one.
+ * Returns whether the view is parked and ready to be tracked — on false the
+ * caller must NOT open a panel (the popout stays open, the user loses nothing).
+ */
+async function nativeSurfaceClaimDock(surfaceId: number): Promise<boolean> {
+  if (!isElectron()) return false;
+  try {
+    return await getElectron().nativeSurface.claimDock(surfaceId);
+  } catch (err) {
+    console.error("[web-apps] nativeSurface.claimDock failed", { surfaceId, err });
+    return false;
+  }
+}
+
+/**
+ * Step 1 of the dock handshake: the user clicked "Dock" in a popout window. The
+ * popout is still open and still owns the view — the subscriber (App) verifies
+ * it can host a panel and commits via dockLiveSurface. Returns an unsubscribe
+ * fn; a no-op on web. Survives the originating browser panel closing (App wires
+ * this at the top level, not per-panel).
  */
 export function onNativeSurfaceDockRequested(
-  cb: (payload: { surfaceId: number; serverId: string; url: string }) => void,
+  cb: (payload: { surfaceId: number; url: string; title: string }) => void,
 ): () => void {
   if (!isElectron()) return () => {};
   return getElectron().nativeSurface.onDockRequested(cb);
 }
 
 /**
- * Dock a live native view into the workspace as a Web App panel: persist the URL
- * as a per-server Web App, bind the live `surfaceId` to that entry so the panel
- * hosts the live view (no reload), and request the panel be opened. Shared by the
- * "panel" pref auto-dock and the popout window's "Dock as panel" button. No-op on
- * web or when the add fails.
+ * Dock a live native view into the CURRENT workspace as a panel: claim the view
+ * from main (re-parent + close its popout), bind the live `surfaceId` to a fresh
+ * per-panel instanceId, and request the panel be opened. Pure layout act — no
+ * bookmark is created (dock ≠ save; "Save as Web App" stays explicit). Shared by
+ * the "panel" pref auto-dock and the popout window's "Dock" button. Fail-closed:
+ * with no active server (the workspace can't host panels) we toast and stop
+ * BEFORE claiming, so the popout stays open and the user loses nothing.
  */
 export async function dockLiveSurface(
   surfaceId: number,
-  serverId: string,
   url: string,
+  title = "",
 ): Promise<void> {
-  if (!serverId) return;
-  const entry = await addWebApp(serverId, { url, title: "" });
-  if (!entry) return;
-  // Mint a FRESH per-panel instanceId and bind the incoming live surface to it
-  // — never to the bookmark's webAppId (which is idempotent-by-URL, so two
-  // docks of one saved URL would clobber each other's binding; B1). The panel
-  // opened below carries this same instanceId, so its always-live path adopts
-  // THIS surface instead of creating a second one.
+  if (!isElectron()) return;
+  if (!activeServerId()) {
+    showToast("Open a server to dock this window", "info");
+    return;
+  }
+  // Claim BEFORE opening the panel: after a successful claim the view is parked
+  // hidden in the main window and nothing else owns it, so no stale popout-side
+  // geometry can race the panel's first setBounds. On false the view is gone or
+  // unclaimable — opening a panel would mount blank, so we stop (the popout, if
+  // any, is untouched).
+  if (!(await nativeSurfaceClaimDock(surfaceId))) return;
+  // Mint a FRESH per-panel instanceId and bind the incoming live surface to it.
+  // The panel opened below carries this same instanceId, so its always-live path
+  // adopts THIS surface instead of creating a second one.
   //
   // batch() is load-bearing: registering the live surface and opening the panel
   // MUST commit together. Without it, the registerLiveSurface write flushes the
@@ -216,19 +238,21 @@ export async function dockLiveSurface(
   const instanceId = crypto.randomUUID();
   batch(() => {
     registerLiveSurface(instanceId, surfaceId);
-    emitOpenWebAppAsPanel(entry, instanceId);
+    emitOpenWebAppAsPanel({ url, title }, instanceId);
   });
 }
 
 // Pub/sub so the post-hoc dock prompt (rendered deep inside the browser panel)
-// can ask App-level layout to open a saved web app as a docked panel, without
-// drilling a callback through the whole panel tree. Mirrors lib/plugin-panel-events.
-// The instanceId is minted by the caller (dockLiveSurface) so the live surface
-// binding and the opened panel's content agree on the same per-panel identity.
-type OpenAsPanelHandler = (app: WebApp, instanceId: string) => void;
+// can ask App-level layout to open a docked panel, without drilling a callback
+// through the whole panel tree. Mirrors lib/plugin-panel-events. The payload is
+// just {url, title} — NOT a WebApp — because docking doesn't bookmark; a saved
+// WebApp passes structurally when the sidebar opens one. The instanceId is
+// minted by the caller (dockLiveSurface) so the live surface binding and the
+// opened panel's content agree on the same per-panel identity.
+type OpenAsPanelHandler = (app: { url: string; title: string }, instanceId: string) => void;
 const openAsPanelHandlers = new Set<OpenAsPanelHandler>();
 
-/** Subscribe to "dock this web app as a panel" requests (App wires this to its layout). */
+/** Subscribe to "dock this page as a panel" requests (App wires this to its layout). */
 export function onOpenWebAppAsPanel(fn: OpenAsPanelHandler): () => void {
   openAsPanelHandlers.add(fn);
   return () => {
@@ -236,7 +260,10 @@ export function onOpenWebAppAsPanel(fn: OpenAsPanelHandler): () => void {
   };
 }
 
-/** Request that a saved web app be opened as a docked panel under a given instanceId. */
-export function emitOpenWebAppAsPanel(app: WebApp, instanceId: string): void {
+/** Request that a page be opened as a docked panel under a given instanceId. */
+export function emitOpenWebAppAsPanel(
+  app: { url: string; title: string },
+  instanceId: string,
+): void {
   for (const handler of [...openAsPanelHandlers]) handler(app, instanceId);
 }

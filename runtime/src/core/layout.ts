@@ -201,20 +201,25 @@ function validateBrowserTabbedPanel(
   return null;
 }
 
-// A desktop "Web App" panel: a single pinned page rendered as a bare webview.
-// The Web App definition is desktop-local, but the panel persists by value
-// (webAppId + url + title) in synced layouts so it survives restore — a
-// non-desktop client shows a placeholder instead of mounting a webview.
+// A desktop "Web App" panel: a single pinned page rendered as a live native
+// view. The Web App definition is desktop-local, but the panel persists by
+// value (url + title, plus webAppId only when it's a saved bookmark) in synced
+// layouts so it survives restore — a non-desktop client shows a placeholder
+// instead of mounting a live view.
 function validateWebAppPanel(
   leafId: string,
   content: Record<string, unknown>,
 ): LayoutValidationResult | null {
-  const webAppId = content["webAppId"];
-  if (typeof webAppId !== "string" || webAppId.length === 0) {
-    return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].webAppId must be a non-empty string.`);
-  }
-  if (webAppId.length > 128) {
-    return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].webAppId must not exceed 128 characters.`);
+  // Optional since dock ≠ save: a panel created by docking a live popup has no
+  // bookmark linkage, so it carries no webAppId. Validate only if present.
+  if ("webAppId" in content) {
+    const webAppId = content["webAppId"];
+    if (typeof webAppId !== "string" || webAppId.length === 0) {
+      return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].webAppId must be a non-empty string.`);
+    }
+    if (webAppId.length > 128) {
+      return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].webAppId must not exceed 128 characters.`);
+    }
   }
   // Optional (back-compat) — see WEBAPP_ALLOWED_KEYS note. Validate only if present.
   if ("instanceId" in content) {

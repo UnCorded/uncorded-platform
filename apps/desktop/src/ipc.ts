@@ -124,13 +124,16 @@ export const IPC = {
   // webContentsId. SET_BOUNDS positions/hides the view over a renderer-reported
   // rect while DOCKED; RELEASE destroys it. OPEN_WINDOW hosts the view in a free
   // frameless OS popout window; DOCK_REQUESTED is the main→renderer push when the
-  // user clicks the popout's "Dock as panel". WINDOW_DOCK/CLOSE/OPEN_EXTERNAL are
-  // sent by the popout window's own chrome (popout-preload) back to main.
+  // user clicks the popout's "Dock" (popout stays open) and CLAIM_DOCK is the
+  // renderer's commit (main re-parents the view, then closes the popout).
+  // WINDOW_DOCK/CLOSE/OPEN_EXTERNAL are sent by the popout window's own chrome
+  // (popout-preload) back to main.
   NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted",
   NATIVE_SURFACE_CREATE: "desktop:native-surface:create",
   NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds",
   NATIVE_SURFACE_RELEASE: "desktop:native-surface:release",
   NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window",
+  NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock",
   NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested",
   NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock",
   NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close",

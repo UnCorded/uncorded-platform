@@ -180,12 +180,15 @@ export function BrowserPanel(props: {
     url: string,
   ): Promise<void> => {
     const pref = await getWebAppPref(url);
-    const server = activeServer();
-    if (pref === "panel" && server) {
-      await dockLiveSurface(surfaceId, server.id, url);
+    // The activeServer() check is load-bearing: with no server the workspace
+    // can't host panels, so dockLiveSurface would toast-and-stop — leaving the
+    // freshly intercepted view parked hidden forever (leak). Fall through to
+    // the window path instead, which works serverless and still offers Dock.
+    if (pref === "panel" && activeServer()) {
+      await dockLiveSurface(surfaceId, url);
       return;
     }
-    await nativeSurfaceOpenWindow(surfaceId, server?.id ?? "");
+    await nativeSurfaceOpenWindow(surfaceId);
   };
 
   // Reset displayUrl only when the active tab's identity changes, not on every
