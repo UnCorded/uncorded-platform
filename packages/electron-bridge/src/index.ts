@@ -596,6 +596,33 @@ export interface ElectronBridge {
     getPref(url: string): Promise<WebAppPref | null>;
     setPref(url: string, action: WebAppPref): Promise<void>;
   };
+  // Plugin Development Workspace — desktop-owned, machine-GLOBAL (not
+  // per-server): persistent plugin dev folders under
+  // ~/.uncorded/plugin-dev/<slug>/ that survive server deletion. The renderer
+  // gates the whole surface on isElectron(). Creation always copies the
+  // generated agent prompt to the clipboard; launching an external agent
+  // terminal is best-effort on top of that.
+  pluginDev: {
+    list(): Promise<DevPlugin[]>;
+    /** Scaffolds the folder, writes PROMPT.md, and copies the full agent
+     *  prompt to the clipboard (promptCopied reports that side effect). */
+    create(input: CreateDevPluginInput): Promise<CreateDevPluginResult>;
+    /** Moves the plugin folder to the OS trash (recoverable). Resolves false
+     *  when the slug doesn't resolve to a workspace folder. */
+    remove(slug: string): Promise<boolean>;
+    /** Reveal the plugin folder in the OS file manager. */
+    openFolder(slug: string): Promise<void>;
+    /** Regenerate the agent prompt (PROMPT.md rewritten), copy it to the
+     *  clipboard, and return it. */
+    copyPrompt(slug: string): Promise<string>;
+    /** Is the `claude` CLI on PATH? Cached by the renderer per sheet-open. */
+    detectAgent(): Promise<AgentDetection>;
+    /** Copy the prompt, then open a terminal in the plugin folder running
+     *  the agent. Failure modes degrade to "prompt is on your clipboard". */
+    launchAgent(slug: string): Promise<LaunchAgentResult>;
+    /** Deploy seam — answers NOT_IMPLEMENTED until the deploy phase lands. */
+    installIntoServer(slug: string, serverId: string): Promise<InstallDevPluginResult>;
+  };
   // In-app native popup views. When a Browser Panel guest calls `window.open`,
   // main captures it (via `setWindowOpenHandler`'s `createWindow`) into a fresh
   // `WebContentsView` instead of an OS window — preserving the popup's live
@@ -789,6 +816,16 @@ export interface IpcChannelMap {
   readonly WEB_APPS_REMOVE: "desktop:web-apps:remove";
   readonly WEB_APPS_GET_PREF: "desktop:web-apps:get-pref";
   readonly WEB_APPS_SET_PREF: "desktop:web-apps:set-pref";
+
+  // Plugin Development Workspace (desktop-owned, global)
+  readonly PLUGIN_DEV_LIST: "desktop:plugin-dev:list";
+  readonly PLUGIN_DEV_CREATE: "desktop:plugin-dev:create";
+  readonly PLUGIN_DEV_DELETE: "desktop:plugin-dev:delete";
+  readonly PLUGIN_DEV_OPEN_FOLDER: "desktop:plugin-dev:open-folder";
+  readonly PLUGIN_DEV_COPY_PROMPT: "desktop:plugin-dev:copy-prompt";
+  readonly PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent";
+  readonly PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent";
+  readonly PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server";
 
   // In-app native popup views (WebContentsView). A Browser Panel guest's
   // window.open is captured into a native view hosted in a free OS popout window
