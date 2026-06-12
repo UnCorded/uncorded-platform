@@ -23,6 +23,7 @@ import { createSignal, createEffect, createMemo, untrack, onCleanup } from "soli
 import type { RuntimeUpdateState } from "@uncorded/protocol";
 import { CORE_TOPICS } from "@uncorded/protocol";
 import { activeServerId, activeServer } from "./servers";
+import { activeServerKey, splitActiveServerKey } from "./active-server-key";
 import { connect, onPluginMessage, onReconnect } from "../lib/ws";
 import { runtimeFetch, errorFromResponse } from "../api/runtime";
 
@@ -90,18 +91,18 @@ function asRuntimeUpdateState(payload: unknown): RuntimeUpdateState | null {
  *  active server. The slot for a server stays in the store after switching
  *  away so consumers can still read the last-known state during a transition. */
 export function mountRuntimeUpdateStore(): void {
-  const activeKey = createMemo(() => {
-    const id = activeServerId();
-    const server = activeServer();
-    if (!id || !server?.tunnel_url) return null;
-    return `${id}|${server.tunnel_url}`;
-  });
+  // tunnel_url may be null until ws.connect()'s token mint hydrates it — see
+  // activeServerKey's doc comment (this effect helps initiate connect). The
+  // URL stays in the key so hydration re-fires the effect and the HTTP
+  // fetchInitial below runs then.
+  const activeKey = createMemo(() =>
+    activeServerKey(activeServerId(), activeServer()),
+  );
 
   createEffect(() => {
     const key = activeKey();
     if (!key) return;
-    const id = key.slice(0, key.indexOf("|"));
-    const tunnelUrl = key.slice(key.indexOf("|") + 1);
+    const { id, tunnelUrl } = splitActiveServerKey(key);
     const server = untrack(activeServer);
     if (!server) return;
 
@@ -115,7 +116,9 @@ export function mountRuntimeUpdateStore(): void {
       if (cancelled) return;
     })();
 
-    if (!fetched.has(id)) {
+    // HTTP — needs the tunnel URL. Skip (without consuming the dedupe) when
+    // it hasn't hydrated yet; the post-hydration effect re-run fetches.
+    if (tunnelUrl !== "" && !fetched.has(id)) {
       fetched.add(id);
       void fetchInitial(id, tunnelUrl);
     }
@@ -142,7 +145,7 @@ export function mountRuntimeUpdateStore(): void {
     // Refetch on reconnect — events that landed while the WS was disconnected
     // are lost; the GET is the safe re-sync.
     const unsubReconnect = onReconnect((reconnectedId) => {
-      if (reconnectedId !== id) return;
+      if (reconnectedId !== id || tunnelUrl === "") return;
       void fetchInitial(id, tunnelUrl);
     });
 

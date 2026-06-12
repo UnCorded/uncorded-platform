@@ -7,6 +7,7 @@
 
 import { createSignal, createEffect, createMemo, untrack } from "solid-js";
 import { activeServerId, activeServer } from "./servers";
+import { activeServerKey, splitActiveServerKey } from "./active-server-key";
 import { account } from "./auth";
 import { connect, onPluginMessage, request } from "../lib/ws";
 import { createTrailingDebouncer } from "../lib/trailing-debounce";
@@ -62,12 +63,13 @@ export function mountMembershipStore(): void {
   // request and another connect() call each time. Memoize on a narrow key
   // so unrelated field changes don't reach this effect — same fix as
   // sidebar.ts, see feedback_solid_patcher_cascade.md.
-  const activeKey = createMemo(() => {
-    const id = activeServerId();
-    const server = activeServer();
-    if (!id || !server?.tunnel_url) return null;
-    return `${id}|${server.tunnel_url}`;
-  });
+  // tunnel_url may be null until ws.connect()'s token mint hydrates it — see
+  // activeServerKey's doc comment. Everything below runs over the WS (no
+  // HTTP), so the effect works URL-less; the post-hydration re-run just
+  // repeats an idempotent connect() + core.member.me.
+  const activeKey = createMemo(() =>
+    activeServerKey(activeServerId(), activeServer()),
+  );
 
   createEffect(() => {
     const key = activeKey();
@@ -75,7 +77,7 @@ export function mountMembershipStore(): void {
       setCurrentMember(null);
       return;
     }
-    const id = key.slice(0, key.indexOf("|"));
+    const { id } = splitActiveServerKey(key);
     const server = untrack(activeServer);
     if (!server) return;
     let cancelled = false;

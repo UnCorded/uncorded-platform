@@ -13,6 +13,7 @@
 
 import { createSignal, createEffect, createMemo, untrack, onCleanup } from "solid-js";
 import { activeServerId, activeServer } from "./servers";
+import { activeServerKey, splitActiveServerKey } from "./active-server-key";
 import { connect, onPluginMessage } from "../lib/ws";
 import { coreClient, CoreError } from "../lib/core-client";
 import { createTrailingDebouncer } from "../lib/trailing-debounce";
@@ -196,18 +197,18 @@ export async function ensureAuditLoaded(serverId: string): Promise<void> {
 
 export function mountPermissionsStores(): void {
   // Memoize on a narrow key (id|tunnel_url) so unrelated patchServer churn
-  // (presence flips, name edits) doesn't tear this effect down.
-  const activeKey = createMemo(() => {
-    const id = activeServerId();
-    const server = activeServer();
-    if (!id || !server?.tunnel_url) return null;
-    return `${id}|${server.tunnel_url}`;
-  });
+  // (presence flips, name edits) doesn't tear this effect down. tunnel_url
+  // may be null until ws.connect()'s token mint hydrates it — see
+  // activeServerKey's doc comment (this effect helps initiate connect, and
+  // the body is WS-only).
+  const activeKey = createMemo(() =>
+    activeServerKey(activeServerId(), activeServer()),
+  );
 
   createEffect(() => {
     const key = activeKey();
     if (!key) return;
-    const id = key.slice(0, key.indexOf("|"));
+    const { id } = splitActiveServerKey(key);
     const server = untrack(activeServer);
     if (!server) return;
 

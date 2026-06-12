@@ -1,4 +1,4 @@
-import { createSignal, createEffect, createMemo, on, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, createEffect, createMemo, on, onMount, onCleanup, Show, untrack } from "solid-js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Titlebar } from "@/components/titlebar";
 import { TunnelStateBanner, TunnelExpiredGate } from "@/components/tunnel-state-notice";
@@ -703,7 +703,21 @@ function App() {
     setActiveId(id);
   };
 
-  createEffect(on(activeServerId, (serverId) => {
+  // Re-fire on server switch AND on tunnel_url hydration. The URL is no longer
+  // list metadata — it hydrates via ws.connect()'s token mint (patchServer), so
+  // a server selected before its first mint has tunnel_url=null here. Keying on
+  // the hydration *transition* (pending→ready) rather than the URL value means
+  // a mid-session tunnel rotation doesn't blow away the open workspace, but the
+  // saved-layout load still runs once the URL exists instead of one-shot
+  // resetting to a blank local workspace and never retrying.
+  const workspaceLoadKey = createMemo(() => {
+    const id = activeServerId();
+    if (!id) return null;
+    return activeServer()?.tunnel_url ? `${id}|ready` : `${id}|pending`;
+  });
+
+  createEffect(on(workspaceLoadKey, (key) => {
+    const serverId = key ? key.slice(0, key.indexOf("|")) : null;
     autoSaveTimers.forEach(clearTimeout);
     autoSaveTimers.clear();
     autoSaveAborters.forEach((c) => c.abort());
@@ -711,7 +725,7 @@ function App() {
 
     setWorkspaceError(false);
     if (!serverId) { resetWorkspaces(); return; }
-    const server = activeServer();
+    const server = untrack(activeServer);
     if (!server?.tunnel_url) { resetWorkspaces(); return; }
 
     // Destroy all mounts from the prior server BEFORE issuing the load.
