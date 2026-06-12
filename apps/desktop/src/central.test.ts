@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { app } from "electron";
 
 const mockKeychainGet = mock<(key: string) => string | null>();
 const mockKeychainSet = mock<(key: string, value: string) => void>();
@@ -41,7 +42,18 @@ afterEach(() => {
 
 describe("getContainerCentralUrl", () => {
   const ORIGINAL_OVERRIDE = process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+  // getContainerCentralUrl reads app.isPackaged live. The electron stub is a
+  // process-global mock.module shared by every desktop test in the worker, so a
+  // sibling file can leave isPackaged flipped to true — which would send these
+  // dev-path cases down the packaged=prod branch. Pin it to dev here (and
+  // restore) so the suite is independent of file execution order.
+  const appRef = app as unknown as { isPackaged: boolean };
+  const ORIGINAL_IS_PACKAGED = appRef.isPackaged;
+  beforeEach(() => {
+    appRef.isPackaged = false;
+  });
   afterEach(() => {
+    appRef.isPackaged = ORIGINAL_IS_PACKAGED;
     if (ORIGINAL_OVERRIDE === undefined) delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
     else process.env["UNCORDED_CONTAINER_CENTRAL_URL"] = ORIGINAL_OVERRIDE;
   });
