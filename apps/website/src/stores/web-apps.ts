@@ -101,7 +101,7 @@ export async function setWebAppPref(url: string, action: WebAppPref): Promise<vo
  * already captured it into a native `WebContentsView` (preserving the popup's
  * live session — cookies + sessionStorage + opener) parked hidden, and pushes
  * this event. The payload carries the `surfaceId` (keys all later
- * setBounds/release/popOut), the `url`, and the `webContentsId` of the owning
+ * setBounds/release/openWindow), the `url`, and the `webContentsId` of the owning
  * <webview> guest (to route the floating frame onto the panel that triggered
  * it). Returns an unsubscribe fn; a no-op on web.
  */

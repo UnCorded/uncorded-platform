@@ -18,7 +18,7 @@
 // Rendered as an absolute inset overlay INSIDE the browser panel's own DOM
 // subtree (not a portal/Dialog) so it reliably paints above the <webview> tag.
 
-import { Show, createSignal } from "solid-js";
+import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Bookmark, ExternalLink, Globe, LayoutPanelLeft, X } from "lucide-solid";
 import type { WebAppPref } from "@uncorded/electron-bridge";
 import {
@@ -47,6 +47,19 @@ export function DockPrompt(props: {
   const [remember, setRemember] = createSignal(false);
   const [faviconFailed, setFaviconFailed] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+
+  // Escape cancels, matching the backdrop click. Window-level because the
+  // prompt never holds keyboard focus (it's a plain in-tree overlay, not a
+  // focus-trapping Dialog).
+  onMount(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape" || busy()) return;
+      e.preventDefault();
+      props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+  });
 
   const choose = async (action: WebAppPref): Promise<void> => {
     if (busy()) return;

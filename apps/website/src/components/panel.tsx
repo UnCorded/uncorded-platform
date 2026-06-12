@@ -180,23 +180,16 @@ function EmptyPanelZoneGuide(props: { leafId: string }) {
   );
 }
 
-// Placeholder shown when a panel body has nothing to render. Three modes:
+// Placeholder shown when a panel body has nothing to render. Two modes:
 //   - empty-workspace: the workspace has a single leaf and it's empty. Onboarding
 //     copy points the user at the sidebar.
 //   - empty-panel: this leaf is empty but lives alongside other panels. Copy
 //     points at in-panel actions (drop target, ⋯ menu) instead of the sidebar.
-//   - popout: the panel's content has been detached into its own window. Acts
-//     as a reattach affordance.
 //
-// `canClose` from PanelLeaf is the natural discriminator between the first two
-// (countLeaves > 1). Popout is wired through onReattach and will be triggered
-// by the future tear-off flow.
-type EmptyPanelMode = "empty-workspace" | "empty-panel" | "popout";
+// `canClose` from PanelLeaf is the natural discriminator (countLeaves > 1).
+type EmptyPanelMode = "empty-workspace" | "empty-panel";
 
-function EmptyPanelState(props: {
-  mode: EmptyPanelMode;
-  onReattach?: () => void;
-}) {
+function EmptyPanelState(props: { mode: EmptyPanelMode }) {
   return (
     <div class="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 text-center select-none">
       <Switch>
@@ -215,18 +208,6 @@ function EmptyPanelState(props: {
           <p class="text-xs text-muted-foreground/60 max-w-xs">
             Drop a sidebar item here, or use the ⋯ menu to open a browser
           </p>
-        </Match>
-        <Match when={props.mode === "popout"}>
-          <h3 class="text-sm font-medium text-muted-foreground">
-            Panel in popout mode
-          </h3>
-          <button
-            type="button"
-            class="text-xs text-muted-foreground/60 hover:text-foreground underline underline-offset-2 decoration-dotted transition-colors max-w-xs"
-            onClick={() => props.onReattach?.()}
-          >
-            Click to reattach to workspace
-          </button>
         </Match>
       </Switch>
     </div>

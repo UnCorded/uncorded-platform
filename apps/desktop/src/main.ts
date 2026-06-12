@@ -1797,8 +1797,10 @@ function buildPopoutChromeHtml(opts: { host: string }): string {
     white-space:nowrap;color:#b9b9c3;}
   .btn{-webkit-app-region:no-drag;appearance:none;border:1px solid #2e2e38;
     background:#1d1d24;color:#e7e7ea;height:26px;padding:0 10px;border-radius:6px;
-    font:inherit;cursor:pointer;}
+    font:inherit;cursor:pointer;outline:none;transition:background 150ms ease;}
   .btn:hover{background:#272730;}
+  .btn:active{background:#32323c;}
+  .btn:focus-visible{outline:2px solid #6e6ef0;outline-offset:1px;}
   .btn.close{padding:0 9px;font-size:12px;}
 </style>
 </head>
@@ -2911,6 +2913,12 @@ if (!gotInstanceLock) {
     // `state: "available"` instead of leaving runtimes stuck in
     // `awaiting-restart` across the next launch.
     runtimeOrchestrator.cancelPendingRestarts("Application is quitting");
+    // Close live-surface popouts now (quit is deferred below, so they'd
+    // otherwise linger until the re-emitted quit). Each window's 'closed'
+    // handler runs the opener-visible teardown (closeLiveViewContents).
+    for (const popout of surfacePopouts.values()) {
+      if (!popout.isDestroyed()) popout.close();
+    }
     void stopAllServerContainers()
       .catch((err) => {
         log.error("stopAllServerContainers crashed", { err: errorMessage(err) });
