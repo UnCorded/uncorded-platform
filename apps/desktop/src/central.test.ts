@@ -83,6 +83,14 @@ describe("resolveContainerCentralUrl", () => {
     })).toBe("http://host.docker.internal:4000");
   });
 
+  test("dev: rewrites the IPv6 loopback [::1] the same way", () => {
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: false,
+      baseUrl: "http://[::1]:4000",
+    })).toBe("http://host.docker.internal:4000");
+  });
+
   test("dev: passes a routable base through untouched (e.g. web pointed at prod)", () => {
     expect(centralModule.resolveContainerCentralUrl({
       override: undefined,
