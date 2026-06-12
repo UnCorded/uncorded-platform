@@ -1,6 +1,6 @@
 import { Match, Show, Switch, createSignal, onCleanup, type Component } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import { Check, Columns2, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Pencil, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
+import { Check, Columns2, ExternalLink, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Pencil, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { useCoarsePointer } from "@/lib/use-coarse-pointer";
 import {
@@ -26,6 +26,9 @@ import {
 } from "@/lib/drag-state";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { requestSync } from "@/lib/live-surface-host";
+import { clearLiveSurface, peekLiveSurface } from "@/lib/live-surfaces";
+import { liveSurfaceOpenWindow } from "@/stores/web-apps";
+import { isElectron } from "@/lib/electron";
 
 const ICON_MAP: Record<string, Component<LucideProps>> = {
   hash: Hash,
@@ -346,6 +349,26 @@ function PanelLeaf(props: {
     }
   };
 
+  // DOCKED → POPPED-OUT for a live Web App panel: move the EXISTING native
+  // view into a frameless popout window — the inverse of the popout's "Dock"
+  // button, with the live session preserved (no reload). Order matters:
+  // openWindow first, so main registers the surface in surfacePopouts and the
+  // ownership guards drop the closing panel's stale SET_BOUNDS/RELEASE; then
+  // clear the instance binding so App's reconciliation release never targets
+  // the moved view. Electron-only (native views don't exist on web), and a
+  // no-op while the surface is still being created (nothing live to move).
+  const popOutWebAppPanel = async (): Promise<void> => {
+    const c = props.content;
+    if (c === undefined || c.type !== "webapp") return;
+    const surfaceId = peekLiveSurface(c.instanceId);
+    if (surfaceId === null) return;
+    await liveSurfaceOpenWindow(surfaceId);
+    clearLiveSurface(c.instanceId);
+    props.onClose();
+  };
+  const canPopOut = () =>
+    isElectron() && props.content?.type === "webapp";
+
   // Empty-panel zone guide: during a sidebar-item drag, an empty leaf paints
   // a 5-box affordance (4 edges + center) so the user sees where they can aim.
   // Box geometry mirrors the EDGE_THRESHOLD hit-test in drag-state.
@@ -537,6 +560,12 @@ function PanelLeaf(props: {
                 <Globe class="size-4" />
                 <span>Open browser</span>
               </DropdownMenuItem>
+              <Show when={canPopOut()}>
+                <DropdownMenuItem onSelect={() => void popOutWebAppPanel()}>
+                  <ExternalLink class="size-4" />
+                  <span>Pop out</span>
+                </DropdownMenuItem>
+              </Show>
             </DropdownMenuContent>
           </DropdownMenu>
 

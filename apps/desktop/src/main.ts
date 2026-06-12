@@ -1869,6 +1869,10 @@ function createLiveSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
   if (!view || view.webContents.isDestroyed()) return;
   // Detach from the main window if it's currently parented there (docked/parked).
   if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
+  // A DOCKED view arriving here (panel-header "Pop out") is in the visible set;
+  // POPPED-OUT means "not visible in the main window", so keep the invariant.
+  // The next dock then correctly reads as hidden→visible for the repaint kick.
+  visibleLiveSurfaces.delete(surfaceId);
 
   // A view popped out the instant it was captured (live-view popup guard) hasn't
   // committed its navigation yet, so getURL() is still "" — fall back to the
