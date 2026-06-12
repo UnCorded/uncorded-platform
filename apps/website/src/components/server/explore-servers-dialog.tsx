@@ -10,7 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import * as central from "@/api/central";
 import { ApiError, type Server } from "@/api/types";
-import { servers } from "@/stores/servers";
+import { servers, fastPollServers } from "@/stores/servers";
 import { withAuthGate, joinTarget, clearJoinTarget } from "@/stores/auth-intent";
 import { ServerIcon } from "@/components/server-switcher";
 
@@ -118,6 +118,10 @@ export function ExploreServersDialog(props: ExploreServersDialogProps) {
         return;
       }
       patchRow(serverId, { phase: "requested", error: null });
+      // The accept lands on the OWNER's screen — poll fast for a few minutes
+      // so the server appears here within seconds of acceptance instead of
+      // waiting out the 60s cycle (or a page refresh).
+      fastPollServers();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // Already pending / already member / banned — Central's message says
