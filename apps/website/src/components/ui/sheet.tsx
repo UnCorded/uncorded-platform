@@ -1,8 +1,8 @@
 import { Dialog } from "@kobalte/core/dialog";
-import { type ComponentProps, type JSX, onCleanup, splitProps } from "solid-js";
+import { type ComponentProps, type JSX, splitProps } from "solid-js";
 import { cn } from "@/lib/utils";
 import { CoViewModalMount } from "@/co-view/primitives";
-import { pushSurfaceBlocker } from "@/lib/live-surface-host";
+import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 const Sheet = Dialog;
 const SheetTrigger = Dialog.Trigger;
@@ -27,10 +27,6 @@ function SheetContent(props: SheetContentProps) {
   const [local, others] = splitProps(props, ["class", "side", "children", "coViewTitle"]);
   const side = () => local.side ?? "right";
   let contentEl: HTMLElement | null = null;
-  // SheetContent mounts only while open (Kobalte portal), so this suspends native
-  // panel views for the sheet's lifetime — they paint above all DOM and would
-  // otherwise punch through the sheet's scrim.
-  onCleanup(pushSurfaceBlocker());
   return (
     <Dialog.Portal>
       <Dialog.Overlay class="fixed inset-0 z-50 bg-black/80 data-[expanded]:animate-in data-[expanded]:fade-in-0 data-[closed]:animate-out data-[closed]:fade-out-0" />
@@ -44,6 +40,11 @@ function SheetContent(props: SheetContentProps) {
         )}
         {...others}
       >
+        {/* Suspend native panel views for the sheet's OPEN lifetime only. Must
+            be a Content child — this wrapper's body runs eagerly when the Sheet
+            root mounts (even closed), so a blocker pushed there pins suspension
+            for every always-mounted <Sheet>. See dialog.tsx / surface-blocker.tsx. */}
+        <SuspendSurfacesWhileOpen />
         <CoViewModalMount
           getEl={() => contentEl}
           title={() => local.coViewTitle}

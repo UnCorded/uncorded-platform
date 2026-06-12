@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createRoot } from "solid-js";
 
 import { surfaceBlockersActive } from "@/lib/live-surface-host";
@@ -61,5 +63,28 @@ describe("SuspendSurfacesWhileOpen", () => {
 
     disposeB();
     expect(surfaceBlockersActive()).toBe(false); // both closed → restored
+  });
+});
+
+// Regression (second instance of the same leak class): dialog.tsx/sheet.tsx
+// called `pushSurfaceBlocker()` in their Content WRAPPER body, assuming the
+// wrapper mounts only while open. Wrong: a Solid component function runs
+// eagerly when its parent renders it — Kobalte's conditional mounting starts
+// at its Portal, INSIDE the wrapper's return value. Every always-mounted
+// <Dialog>/<Sheet> root (9 in the app shell) therefore pinned a blocker from
+// startup, and every docked live view reported visible:false (blank panels).
+//
+// Kobalte mount semantics can't be exercised here (no DOM in this harness), so
+// lock the rule at the source level instead: no UI primitive may reference raw
+// `pushSurfaceBlocker` — suspension must go through <SuspendSurfacesWhileOpen />
+// rendered as a `*.Content` CHILD, whose mount lifetime is provably open-scoped
+// (tests above).
+describe("ui primitives use SuspendSurfacesWhileOpen, never raw pushSurfaceBlocker", () => {
+  test("no components/ui module references pushSurfaceBlocker", () => {
+    const uiDir = import.meta.dir;
+    const offenders = readdirSync(uiDir)
+      .filter((name) => name.endsWith(".tsx") && name !== "surface-blocker.tsx")
+      .filter((name) => readFileSync(join(uiDir, name), "utf8").includes("pushSurfaceBlocker"));
+    expect(offenders).toEqual([]);
   });
 });

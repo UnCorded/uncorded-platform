@@ -1,9 +1,9 @@
 import { Dialog as KobalteDialog } from "@kobalte/core/dialog";
-import { type ComponentProps, type JSX, onCleanup, splitProps } from "solid-js";
+import { type ComponentProps, type JSX, splitProps } from "solid-js";
 import { X } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { CoViewModalMount } from "@/co-view/primitives";
-import { pushSurfaceBlocker } from "@/lib/live-surface-host";
+import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 const Dialog = KobalteDialog;
 const DialogTrigger = KobalteDialog.Trigger;
@@ -33,10 +33,6 @@ type DialogContentProps = ComponentProps<typeof KobalteDialog.Content> & {
 function DialogContent(props: DialogContentProps) {
   const [local, others] = splitProps(props, ["class", "children", "coViewTitle"]);
   let contentEl: HTMLElement | null = null;
-  // DialogContent mounts only while the dialog is open (Kobalte portals it
-  // conditionally), so this suspends native panel views for the modal's lifetime
-  // — they paint above all DOM and would otherwise punch through the scrim.
-  onCleanup(pushSurfaceBlocker());
   return (
     <KobalteDialog.Portal>
       <KobalteDialog.Overlay class="fixed inset-0 z-50 bg-black/60 data-[expanded]:animate-in data-[expanded]:fade-in-0 data-[closed]:animate-out data-[closed]:fade-out-0" />
@@ -51,6 +47,15 @@ function DialogContent(props: DialogContentProps) {
         )}
         {...others}
       >
+        {/* Suspend native panel views (they paint above all DOM and would punch
+            through the scrim) for the dialog's OPEN lifetime. Must be a Content
+            child: this wrapper component's body runs eagerly when the Dialog
+            ROOT mounts (Solid components are plain functions; Kobalte's
+            conditional mounting starts at its Portal), so a blocker pushed in
+            the body above is pinned for every always-mounted <Dialog> — 9 of
+            them at app startup — and every live view reports visible:false
+            (blank docked panels). See surface-blocker.tsx. */}
+        <SuspendSurfacesWhileOpen />
         <CoViewModalMount
           getEl={() => contentEl}
           title={() => local.coViewTitle}
