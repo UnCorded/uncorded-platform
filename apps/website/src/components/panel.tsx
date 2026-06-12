@@ -35,6 +35,7 @@ const ICON_MAP: Record<string, Component<LucideProps>> = {
   hash: Hash,
   users: Users,
   volume2: Volume2,
+  globe: Globe,
 };
 
 type SharedProps = {
@@ -118,8 +119,10 @@ export function PanelLayout(props: SharedProps & { node: PanelNode }) {
 function PanelPreviewGhost() {
   const ghostDisplay = () => {
     const ctx = dragContext();
-    if (ctx === null || ctx.kind !== "sidebar-item") return null;
-    return { label: ctx.item.label, icon: ctx.item.icon ?? "hash" };
+    if (ctx === null) return null;
+    if (ctx.kind === "sidebar-item") return { label: ctx.item.label, icon: ctx.item.icon ?? "hash" };
+    if (ctx.kind === "web-app") return { label: ctx.app.title, icon: "globe" };
+    return null;
   };
   return (
     <div
@@ -313,7 +316,9 @@ function PanelLeaf(props: {
       cancelRename();
       return;
     }
-    const next = renameValue().trim();
+    // Clamp to the layout contract's 256-char title limit (a longer pasted
+    // name would make the runtime reject the whole workspace sync).
+    const next = renameValue().trim().slice(0, 256);
     if (next.length === 0 || next === webapp.title) {
       cancelRename();
       return;

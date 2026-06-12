@@ -214,8 +214,8 @@ function CheckUpdatesButton(): JSX.Element {
           : "Update available — click to download";
       case "downloading":
         return s.downloadPercent === null
-          ? "Downloading update — click for details"
-          : `Downloading update (${s.downloadPercent}%) — click for details`;
+          ? "Downloading update…"
+          : `Downloading update (${s.downloadPercent}%)…`;
       case "downloaded":
         return s.downloadedVersion
           ? `Update v${s.downloadedVersion} ready — click to install`
@@ -232,7 +232,7 @@ function CheckUpdatesButton(): JSX.Element {
   const handleClick = async (): Promise<void> => {
     const s = state();
     if (!s || !s.enabled) return;
-    if (s.status === "checking") return;
+    if (s.status === "checking" || s.status === "downloading") return;
     try {
       if (s.status === "available") {
         await getElectron().update.download();
@@ -242,6 +242,9 @@ function CheckUpdatesButton(): JSX.Element {
         if (s.errorContext === "check") await getElectron().update.check();
         else if (s.errorContext === "download") await getElectron().update.download();
         else if (s.errorContext === "install") await getElectron().update.install();
+        // Missing/unknown errorContext: fall back to a fresh check rather
+        // than silently ignoring a click that promises a retry.
+        else await getElectron().update.check();
       } else {
         await getElectron().update.check();
       }

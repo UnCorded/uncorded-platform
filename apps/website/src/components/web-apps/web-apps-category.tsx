@@ -123,7 +123,7 @@ export function WebAppsCategory(props: {
                     <span class="flex-1 truncate">{app.title}</span>
                     <button
                       type="button"
-                      class="hidden shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground group-hover/webapp:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      class="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground opacity-0 pointer-events-none group-hover/webapp:opacity-100 group-hover/webapp:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       aria-label={`Remove ${app.title}`}
                       onClick={(e) => {
                         e.stopPropagation();

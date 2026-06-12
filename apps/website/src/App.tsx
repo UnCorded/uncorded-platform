@@ -1475,6 +1475,20 @@ function App() {
   // app is its own live surface (so dragging the same app in twice yields two
   // independent panels rather than two views fighting over one surface; B2).
   const handleWebAppDrop = (app: WebApp, target: DropTarget) => {
+    // Commit-time sync rebase (see handleMovePanel for the full rationale).
+    const queued = pendingSync;
+    pendingSync = null;
+    if (queued !== null && queued.localWorkspaceId === activeId()) {
+      if (!getLeafIds(queued.root).includes(target.leafId)) {
+        showInlineStatus("Drop target was closed elsewhere.", "warning");
+        applySync(queued);
+        return;
+      }
+      // Drop target is still present remotely — accept the remote tree first,
+      // then apply the web-app drop on top. Keeps the user's action.
+      applySync(queued);
+    }
+
     const content: PanelContent = {
       type: "webapp",
       webAppId: app.id,

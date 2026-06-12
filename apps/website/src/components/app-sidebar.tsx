@@ -206,7 +206,8 @@ export function AppSidebar(props: {
   // element unmounting along with the Sheet is fine.
   createEffect(() => {
     const ctx = dragContext();
-    if (ctx?.kind === "sidebar-item" && sidebarCtx.isMobile() && sidebarCtx.openMobile()) {
+    const kind = ctx?.kind;
+    if ((kind === "sidebar-item" || kind === "web-app") && sidebarCtx.isMobile() && sidebarCtx.openMobile()) {
       sidebarCtx.setOpenMobile(false);
     }
   });

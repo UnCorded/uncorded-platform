@@ -2547,8 +2547,12 @@ function registerIpcHandlers(): void {
       throw ipcError(IPC.WEB_APPS_ADD, new Error("input must be an object"));
     }
     const { url, title, faviconUrl } = input as Record<string, unknown>;
-    if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
-      throw ipcError(IPC.WEB_APPS_ADD, new Error("url must be a string ≤4KB"));
+    // 2048 (not the 4096 sanity cap used elsewhere): a saved Web App's url is
+    // persisted verbatim into synced layouts, whose validator rejects panel
+    // urls over 2048 — accepting more here would let an add succeed and then
+    // poison every workspace sync that includes the panel.
+    if (typeof url !== "string" || url.length === 0 || url.length > 2048) {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("url must be a string ≤2048 chars"));
     }
     let parsed: URL;
     try {
