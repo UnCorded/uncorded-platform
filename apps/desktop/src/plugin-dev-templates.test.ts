@@ -42,9 +42,10 @@ describe("scaffoldPluginFiles", () => {
   test("manifest passes the shared validateManifest", () => {
     const manifest: unknown = JSON.parse(fileMap(BASE_INPUT).get("manifest.json")!);
     const result = validateManifest(manifest);
-    if (!result.ok) {
-      throw new Error(`scaffolded manifest invalid: ${JSON.stringify(result.errors)}`);
-    }
+    // Assert the error list (not just ok) so a failure prints the validator's
+    // actual complaints in the diff.
+    expect(result.ok ? [] : result.errors).toEqual([]);
+    if (!result.ok) return; // narrowing only; unreachable after the assert
     expect(result.manifest.name).toBe("trip-planner");
     expect(result.manifest.type).toBe("standalone");
     expect(result.manifest.backend?.entry).toBe("backend/index.ts");

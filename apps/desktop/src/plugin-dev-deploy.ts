@@ -52,7 +52,7 @@ export type DeployOutcome =
 
 export type UndeployOutcome =
   | { ok: true; containerId: string }
-  | { ok: false; code: DeployErrorCode; message: string };
+  | { ok: false; code: DeployErrorCode | "UNINSTALL_FAILED"; message: string };
 
 export interface DeployOptions {
   /** User accepted flipping allow_unsigned_plugins on this server. */
@@ -89,6 +89,10 @@ export interface DeployDeps {
   /** Health-poll budget; tests shrink it. */
   healthTimeoutMs?: number;
   healthPollIntervalMs?: number;
+  /** Injected for failure-path tests (fs errors are not reliably
+   *  simulatable cross-platform). Production uses the real fs calls. */
+  renameFn?: (oldPath: string, newPath: string) => void;
+  removePathFn?: (path: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +210,9 @@ const COPY_EXCLUDE = new Set([".git", ".uncorded-dev.json", "PROMPT.md", "AGENTS
 function copyPluginToStaging(sourceDir: string, pluginsDir: string, slug: string): { ok: true; stagingDir: string } | { ok: false; message: string } {
   const stagingDir = join(pluginsDir, `.staging-${slug}`);
   try {
-    // Sweep stale staging dirs from crashed prior deploys.
+    // Sweep stale staging/backup dirs from crashed prior deploys.
     for (const name of existsSync(pluginsDir) ? readdirSync(pluginsDir) : []) {
-      if (name.startsWith(".staging-")) {
+      if (name.startsWith(".staging-") || name.startsWith(".backup-")) {
         rmSync(join(pluginsDir, name), { recursive: true, force: true });
       }
     }
@@ -445,11 +449,28 @@ async function runDeploy(
     await restartBestEffort(deps, serverId, progress);
     return fail("COPY_FAILED", staged.message);
   }
+  // Swap via backup/restore, never delete-then-rename: if the rename into
+  // place fails after a delete, installed_plugins points at a missing folder
+  // and the previous install is gone. With a backup, any failure restores
+  // the exact prior state.
+  const renameFn = deps.renameFn ?? renameSync;
+  const backupDir = join(pluginsDir, `.backup-${slug}`);
+  const hadExisting = existsSync(targetDir);
   try {
-    rmSync(targetDir, { recursive: true, force: true });
-    renameSync(staged.stagingDir, targetDir);
+    rmSync(backupDir, { recursive: true, force: true });
+    if (hadExisting) renameFn(targetDir, backupDir);
+    renameFn(staged.stagingDir, targetDir);
+    rmSync(backupDir, { recursive: true, force: true });
   } catch (err) {
-    rmSync(staged.stagingDir, { recursive: true, force: true });
+    try {
+      if (hadExisting && !existsSync(targetDir) && existsSync(backupDir)) {
+        renameFn(backupDir, targetDir);
+      }
+      rmSync(staged.stagingDir, { recursive: true, force: true });
+    } catch {
+      // Best effort — the staging/backup sweep at the next deploy collects
+      // whatever this leaves behind.
+    }
     await restartBestEffort(deps, serverId, progress);
     return fail("COPY_FAILED", err instanceof Error ? err.message : String(err));
   }
@@ -616,11 +637,27 @@ export async function undeployDevPlugin(
       return { ok: false, code: "CONFIG_WRITE_FAILED", message: written.message };
     }
 
-    rmSync(join(record.volumePath, "plugins", slug), { recursive: true, force: true });
-    if (options.deleteData) {
-      // The plugin's SQLite + uploads. Left intact by default so a redeploy
-      // picks up where it left off.
-      rmSync(join(record.volumePath, "data", "plugins", slug), { recursive: true, force: true });
+    // File removal happens with the container stopped — a throw here (e.g.
+    // EPERM from a scanner holding a handle on Windows) must not strand the
+    // server stopped: restart it and report, exactly like the config-write
+    // failure branch. force:true already swallows ENOENT.
+    const removePathFn =
+      deps.removePathFn ?? ((p: string) => rmSync(p, { recursive: true, force: true }));
+    try {
+      removePathFn(join(record.volumePath, "plugins", slug));
+      if (options.deleteData) {
+        // The plugin's SQLite + uploads. Left intact by default so a redeploy
+        // picks up where it left off.
+        removePathFn(join(record.volumePath, "data", "plugins", slug));
+      }
+    } catch (err) {
+      console.error("[plugin-dev] undeploy file removal failed", { slug, serverId, err });
+      await deps.startServerContainer(serverId).catch(() => undefined);
+      return {
+        ok: false,
+        code: "UNINSTALL_FAILED",
+        message: `Could not remove the plugin's files: ${err instanceof Error ? err.message : String(err)}. The server was restarted.`,
+      };
     }
 
     let containerId: string;

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { satisfiesRange } from "@uncorded/shared";
@@ -322,6 +322,54 @@ describe("deployDevPlugin — failure after stop restarts the server", () => {
     const result = await deployDevPlugin("trip-planner", "srv-1", {}, world.deps);
     expect(result).toMatchObject({ ok: false, code: "PLUGIN_FAILED_TO_LOAD" });
     expect(world.started).toBe(1); // the server was NOT torn back down
+  });
+});
+
+describe("swap failure restores the previous install", () => {
+  test("rename-into-place failure puts the backup back and restarts the server", async () => {
+    writePluginSource("trip-planner");
+    writeServerConfig({ installed_plugins: ["trip-planner"], settings: { allow_unsigned_plugins: true } });
+    const target = join(volumePath, "plugins", "trip-planner");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "manifest.json"), '{"name":"trip-planner"}', "utf8");
+
+    const world = makeWorld();
+    // Fail exactly the staging→target rename (second rename of the swap);
+    // fs failures aren't reliably simulatable cross-platform, hence the seam.
+    world.deps.renameFn = (oldPath, newPath) => {
+      if (oldPath.includes(".staging-")) throw new Error("EPERM: rename blocked");
+      renameSync(oldPath, newPath);
+    };
+
+    const result = await deployDevPlugin("trip-planner", "srv-1", {}, world.deps);
+    expect(result).toMatchObject({ ok: false, code: "COPY_FAILED" });
+    // The previous install was restored, not lost.
+    expect(readFileSync(join(target, "manifest.json"), "utf8")).toBe('{"name":"trip-planner"}');
+    expect(existsSync(join(volumePath, "plugins", ".backup-trip-planner"))).toBe(false);
+    // The server was brought back up after the failure.
+    expect(world.started).toBe(1);
+  });
+});
+
+describe("undeploy file-removal failure", () => {
+  test("restarts the server, reports UNINSTALL_FAILED, releases the lock", async () => {
+    writePluginSource("trip-planner");
+    writeServerConfig({ installed_plugins: ["trip-planner"], settings: { allow_unsigned_plugins: true } });
+    mkdirSync(join(volumePath, "plugins", "trip-planner"), { recursive: true });
+
+    const world = makeWorld();
+    world.deps.removePathFn = () => {
+      throw new Error("EPERM: file in use");
+    };
+
+    const result = await undeployDevPlugin("trip-planner", "srv-1", { deleteData: false }, world.deps);
+    expect(result).toMatchObject({ ok: false, code: "UNINSTALL_FAILED" });
+    expect(world.started).toBe(1); // server restarted despite the failure
+
+    // The lifecycle lock was released — a follow-up operation proceeds.
+    const retryWorld = makeWorld();
+    const retry = await undeployDevPlugin("trip-planner", "srv-1", { deleteData: false }, retryWorld.deps);
+    expect(retry.ok).toBe(true);
   });
 });
 

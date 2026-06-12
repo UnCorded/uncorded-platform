@@ -63,7 +63,11 @@ export function InstallPluginDialog(props: {
         setPhase({ kind: "confirm" });
         setSteps([]);
         if (plugin === null) return;
-        void listInstallTargets(plugin.slug).then((list) => {
+        const requestedSlug = plugin.slug;
+        void listInstallTargets(requestedSlug).then((list) => {
+          // Stale-response guard: the dialog may have moved to another plugin
+          // (or closed) while this IPC round trip was in flight.
+          if (props.plugin?.slug !== requestedSlug) return;
           setTarget(list.find((t) => t.serverId === props.serverId) ?? "not-local");
         });
       },
