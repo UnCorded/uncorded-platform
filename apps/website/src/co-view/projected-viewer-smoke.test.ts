@@ -199,9 +199,9 @@ describe("projected viewer smoke - dormant default", () => {
 
   test("the legacy arm has no store to deliver to (delivery throws, loudly)", () => {
     const harness = createProjectedViewerSmokeHarness({ serverId: "srv", sessionId: "A" });
-    expect(() => harness.deliver(envelope("A"))).toThrow(ProjectedViewerSmokeError);
     try {
       harness.deliver(envelope("A"));
+      expect.unreachable("legacy-arm delivery should throw");
     } catch (err) {
       expect(err).toBeInstanceOf(ProjectedViewerSmokeError);
       expect((err as ProjectedViewerSmokeError).code).toBe(
