@@ -67,6 +67,7 @@ import {
 } from "@/stores/auth-intent";
 import type { SidebarItem } from "@/stores/sidebar";
 import { mountSidebarStore, sections } from "@/stores/sidebar";
+import { mountServerRoute } from "@/lib/server-route";
 import { mountMembershipStore } from "@/stores/membership";
 import { mountPermissionsStores } from "@/stores/permissions";
 import { mountBrowserRecentStore } from "@/stores/browser-recent";
@@ -275,6 +276,9 @@ function App() {
     });
   });
   bootTrace("app.mountStores");
+  // Route ↔ selection sync (/s/<server-slug>): mounted FIRST so the pending
+  // segment is captured from the URL before any store effect can write to it.
+  mountServerRoute();
   mountSidebarStore();
   mountMembershipStore();
   mountPermissionsStores();
