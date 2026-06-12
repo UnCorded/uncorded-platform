@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration. The repo is public + MIT-licensed, so it qualifies
+# for CodeRabbit's open-source tier. Auto-review is paused after the first
+# reviewed commit on a PR to conserve the per-developer review allowance — push
+# freely, then request the next pass manually with `@coderabbitai review` when a
+# PR is ready.
+reviews:
+  auto_review:
+    enabled: true
+    auto_pause_after_reviewed_commits: 1
