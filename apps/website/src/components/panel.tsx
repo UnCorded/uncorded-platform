@@ -26,6 +26,7 @@ import {
 } from "@/lib/drag-state";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { requestSync } from "@/lib/live-surface-host";
+import { requestSync as requestPortalSync } from "@/lib/portal-host";
 import { clearLiveSurface, peekLiveSurface } from "@/lib/live-surfaces";
 import { liveSurfaceOpenWindow } from "@/stores/web-apps";
 import { isElectron } from "@/lib/electron";
@@ -713,7 +714,11 @@ function PanelSplit(props: SharedProps & { node: SplitNode }) {
           // frame, before paint — the view stays locked to the panel instead
           // of trailing the drag. Also the only signal for panels that only
           // MOVED (ResizeObserver fires for size changes, never position).
+          // Order matters: live-surface sync first (pure reads — one forced
+          // layout after the flex write), then portal sync (reads the clean
+          // layout, then writes portal styles that settle before paint).
           requestSync();
+          requestPortalSync();
         }
       });
     };

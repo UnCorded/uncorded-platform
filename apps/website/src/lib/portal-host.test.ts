@@ -3,7 +3,14 @@ import * as portalHost from "./portal-host";
 
 // portal-host is a singleton — give it a fresh root between every test.
 
+// portal-host creates ONE shared observer lazily; capture its callback so
+// tests can simulate an RO delivery and prove the sync is synchronous.
+let roCallback: (() => void) | null = null;
+
 class FakeResizeObserver {
+  constructor(cb: () => void) {
+    roCallback = cb;
+  }
   observe(): void {}
   unobserve(): void {}
   disconnect(): void {}
@@ -43,6 +50,7 @@ beforeEach(() => {
   };
   // rAF stub: never actually fire so poll loop doesn't leak state between tests.
   (globalThis as unknown as { requestAnimationFrame: () => number }).requestAnimationFrame = () => 0;
+  roCallback = null;
   portalHost._resetForTests();
   const root = new FakeElement();
   portalHost.registerPortalRoot(root as unknown as HTMLElement);
@@ -279,6 +287,85 @@ describe("portal-host refcount", () => {
     expect(el.style["top"]).toBe("60px");
     expect(el.style["width"]).toBe("200px");
     expect(el.style["height"]).toBe("150px");
+  });
+});
+
+describe("portal-host same-frame sync", () => {
+  // The rAF stub never fires, so any rect that lands is proof the sync ran
+  // synchronously — not on a later poll tick.
+
+  function mountAt(key: string, rect: { left: number; top: number; width: number; height: number }) {
+    const placeholder = new FakeElement();
+    placeholder.getBoundingClientRect = () => rect;
+    const el = new FakeElement();
+    portalHost.mount({
+      key,
+      workspaceId: "ws",
+      placeholder: placeholder as unknown as HTMLElement,
+      element: el as unknown as HTMLElement,
+    });
+    return { placeholder, el };
+  }
+
+  test("requestSync applies a changed placeholder rect synchronously", () => {
+    const { placeholder, el } = mountAt("s1", { left: 0, top: 0, width: 100, height: 100 });
+    expect(el.style["width"]).toBe("100px");
+
+    placeholder.getBoundingClientRect = () => ({ left: 10, top: 20, width: 300, height: 200 });
+    portalHost.requestSync();
+
+    expect(el.style["left"]).toBe("10px");
+    expect(el.style["top"]).toBe("20px");
+    expect(el.style["width"]).toBe("300px");
+    expect(el.style["height"]).toBe("200px");
+    expect(el.style["visibility"]).toBe("visible");
+  });
+
+  test("requestSync sweeps every changed mount in one call", () => {
+    const a = mountAt("s2a", { left: 0, top: 0, width: 100, height: 100 });
+    const b = mountAt("s2b", { left: 100, top: 0, width: 100, height: 100 });
+
+    a.placeholder.getBoundingClientRect = () => ({ left: 0, top: 0, width: 150, height: 100 });
+    b.placeholder.getBoundingClientRect = () => ({ left: 150, top: 0, width: 50, height: 100 });
+    portalHost.requestSync();
+
+    expect(a.el.style["width"]).toBe("150px");
+    expect(b.el.style["left"]).toBe("150px");
+    expect(b.el.style["width"]).toBe("50px");
+  });
+
+  test("ResizeObserver delivery syncs all mounts synchronously", () => {
+    const a = mountAt("s3a", { left: 0, top: 0, width: 100, height: 100 });
+    // A second mount that only MOVES (no resize) — the shared observer's
+    // sweep must still pick it up off the back of the first mount's resize.
+    const b = mountAt("s3b", { left: 100, top: 0, width: 100, height: 100 });
+
+    a.placeholder.getBoundingClientRect = () => ({ left: 0, top: 0, width: 80, height: 100 });
+    b.placeholder.getBoundingClientRect = () => ({ left: 80, top: 0, width: 100, height: 100 });
+    expect(roCallback).not.toBeNull();
+    roCallback!();
+
+    expect(a.el.style["width"]).toBe("80px");
+    expect(b.el.style["left"]).toBe("80px");
+  });
+
+  test("hidden mounts (refCount 0) are skipped by the sweep", () => {
+    const { placeholder, el } = mountAt("s4", { left: 0, top: 0, width: 100, height: 100 });
+    portalHost.unmount("s4");
+    expect(el.style["display"]).toBe("none");
+
+    placeholder.getBoundingClientRect = () => ({ left: 5, top: 5, width: 500, height: 500 });
+    portalHost.requestSync();
+
+    // Rect work skipped while hidden — stale styles are fine; adoption resyncs.
+    expect(el.style["width"]).toBe("100px");
+  });
+
+  test("zero-size placeholder hides the element instead of painting 0×0", () => {
+    const { placeholder, el } = mountAt("s5", { left: 0, top: 0, width: 100, height: 100 });
+    placeholder.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0 });
+    portalHost.requestSync();
+    expect(el.style["visibility"]).toBe("hidden");
   });
 });
 
