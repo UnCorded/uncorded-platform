@@ -25,6 +25,10 @@ export const AGENT_POINTER_PROMPT =
   "Read PROMPT.md in this directory, then implement the plugin it describes.";
 
 export function buildAgentPrompt(input: AgentPromptInput): string {
+  const idea =
+    input.idea.trim().length > 0
+      ? input.idea
+      : "(The author didn't elaborate — infer the details from the name and summary above, keep the scope minimal, and prefer asking over over-building.)";
   return `# Build the "${input.displayName}" UnCorded plugin
 
 You are working in an UnCorded plugin development workspace at:
@@ -44,7 +48,7 @@ Summary: ${input.description}
 
 What it should do, in the author's words:
 
-${input.idea}
+${idea}
 
 ## Before writing any code
 

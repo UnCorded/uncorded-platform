@@ -25,6 +25,11 @@ import type {
   DockerStatus,
 } from "@uncorded/electron-bridge";
 import { RESERVED_PLUGIN_SLUGS } from "./plugin-dev-templates";
+import {
+  releaseServerLifecycle,
+  tryAcquireServerLifecycle,
+  __resetServerLifecycleForTests,
+} from "./server-lifecycle-lock";
 
 // ---------------------------------------------------------------------------
 // Types — step/error unions live in @uncorded/electron-bridge (the renderer
@@ -259,14 +264,59 @@ export function readInstallTargetInfo(
 }
 
 // ---------------------------------------------------------------------------
-// Per-server serialization
+// Per-server serialization — the SHARED lifecycle lock, so deploys also
+// exclude runtime updates and voice-hostname rebuilds (and vice versa), not
+// just other deploys. All three flows docker-rm + re-run the same container.
 // ---------------------------------------------------------------------------
 
-const inFlight = new Set<string>();
-
-/** Test-only: clear the per-server deploy locks (Bun leaks module state). */
+/** Test-only: clear the per-server lifecycle locks. */
 export function __resetDeployLocksForTests(): void {
-  inFlight.clear();
+  __resetServerLifecycleForTests();
+}
+
+/**
+ * Preflight size check over the files the copy would actually ship (same
+ * exclusion rules). A dev folder can legitimately carry a large node_modules,
+ * but an unbounded copy into the server volume is a disk-filler — and far
+ * past this point it's almost always an accident (a stray .cache, a vendored
+ * toolchain). Marketplace packages cap at 50 MB (spec-11); sideload gets
+ * generous headroom, not infinity.
+ */
+export const DEPLOY_MAX_BYTES = 512 * 1024 * 1024;
+
+export function measureCopyBytes(dir: string, budget: number): { bytes: number; overBudget: boolean } {
+  let bytes = 0;
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let names: string[];
+    try {
+      names = readdirSync(current);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      // Same rule set as copyPluginToStaging's filter: excluded basenames
+      // apply at any depth, as do db files and symlinks.
+      if (COPY_EXCLUDE.has(name)) continue;
+      if (name.endsWith(".db") || name.endsWith(".db-wal") || name.endsWith(".db-shm")) continue;
+      const full = join(current, name);
+      let stat;
+      try {
+        stat = lstatSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        stack.push(full);
+      } else {
+        bytes += stat.size;
+        if (bytes > budget) return { bytes, overBudget: true };
+      }
+    }
+  }
+  return { bytes, overBudget: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -279,14 +329,18 @@ export async function deployDevPlugin(
   options: DeployOptions,
   deps: DeployDeps,
 ): Promise<DeployOutcome> {
-  if (inFlight.has(serverId)) {
-    return { ok: false, code: "DEPLOY_IN_PROGRESS", message: "Another install is already running for this server." };
+  if (!tryAcquireServerLifecycle(serverId)) {
+    return {
+      ok: false,
+      code: "DEPLOY_IN_PROGRESS",
+      message:
+        "Another operation (install, runtime update, or server rebuild) is already running for this server.",
+    };
   }
-  inFlight.add(serverId);
   try {
     return await runDeploy(slug, serverId, options, deps);
   } finally {
-    inFlight.delete(serverId);
+    releaseServerLifecycle(serverId);
   }
 }
 
@@ -316,6 +370,14 @@ async function runDeploy(
     // Core plugin dirs shadow /plugins in the runtime resolver — a collision
     // would silently load the CORE plugin, not this one.
     return fail("SLUG_RESERVED", `"${slug}" collides with a reserved or first-party plugin name.`);
+  }
+
+  const size = measureCopyBytes(sourceDir, DEPLOY_MAX_BYTES);
+  if (size.overBudget) {
+    return fail(
+      "PLUGIN_TOO_LARGE",
+      `The plugin folder exceeds ${String(DEPLOY_MAX_BYTES / (1024 * 1024))} MB of deployable files — check for stray caches or vendored toolchains before installing.`,
+    );
   }
 
   const record = deps.getServerRecord(serverId);
@@ -524,10 +586,14 @@ export async function undeployDevPlugin(
   options: { deleteData: boolean },
   deps: DeployDeps,
 ): Promise<UndeployOutcome> {
-  if (inFlight.has(serverId)) {
-    return { ok: false, code: "DEPLOY_IN_PROGRESS", message: "Another install is already running for this server." };
+  if (!tryAcquireServerLifecycle(serverId)) {
+    return {
+      ok: false,
+      code: "DEPLOY_IN_PROGRESS",
+      message:
+        "Another operation (install, runtime update, or server rebuild) is already running for this server.",
+    };
   }
-  inFlight.add(serverId);
   try {
     const record = deps.getServerRecord(serverId);
     if (record === null) return { ok: false, code: "SERVER_NOT_FOUND", message: "That server is not hosted on this machine." };
@@ -565,6 +631,6 @@ export async function undeployDevPlugin(
     }
     return { ok: true, containerId };
   } finally {
-    inFlight.delete(serverId);
+    releaseServerLifecycle(serverId);
   }
 }

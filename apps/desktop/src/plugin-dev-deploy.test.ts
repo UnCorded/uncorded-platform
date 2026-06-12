@@ -8,10 +8,12 @@ import {
   __resetDeployLocksForTests,
   caretSatisfies,
   deployDevPlugin,
+  measureCopyBytes,
   undeployDevPlugin,
   type DeployDeps,
   type DeployProgressEvent,
 } from "./plugin-dev-deploy";
+import { releaseServerLifecycle, tryAcquireServerLifecycle } from "./server-lifecycle-lock";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "uncorded-deploy-test-"));
 let caseIdx = 0;
@@ -334,6 +336,48 @@ describe("deploy lock", () => {
     ]);
     const codes = [first, second].map((r) => (r.ok ? "OK" : r.code)).sort();
     expect(codes).toEqual(["DEPLOY_IN_PROGRESS", "OK"]);
+  });
+
+  test("deploy is excluded by ANY holder of the shared lifecycle lock", async () => {
+    // The lock is shared with runtime updates and voice rebuilds — a deploy
+    // must refuse while any of them holds the server, not just other deploys.
+    writePluginSource("trip-planner");
+    writeServerConfig({ settings: { allow_unsigned_plugins: true } });
+    const world = makeWorld();
+    expect(tryAcquireServerLifecycle("srv-1")).toBe(true); // e.g. a runtime update
+    try {
+      const result = await deployDevPlugin("trip-planner", "srv-1", {}, world.deps);
+      expect(result).toMatchObject({ ok: false, code: "DEPLOY_IN_PROGRESS" });
+      expect(world.removed).toEqual([]);
+    } finally {
+      releaseServerLifecycle("srv-1");
+    }
+  });
+});
+
+describe("size guard (measureCopyBytes)", () => {
+  test("counts only deployable bytes — excluded files don't count", () => {
+    const dir = writePluginSource("trip-planner");
+    writeFileSync(join(dir, "data.bin"), Buffer.alloc(4096));
+    writeFileSync(join(dir, "AGENTS.md"), Buffer.alloc(100_000)); // excluded
+    writeFileSync(join(dir, "stale.db"), Buffer.alloc(100_000)); // excluded
+    const within = measureCopyBytes(dir, 1_000_000);
+    expect(within.overBudget).toBe(false);
+    expect(within.bytes).toBeGreaterThanOrEqual(4096);
+    expect(within.bytes).toBeLessThan(100_000); // the big excluded files didn't count
+  });
+
+  test("trips the budget and short-circuits", () => {
+    const dir = writePluginSource("trip-planner");
+    writeFileSync(join(dir, "blob.bin"), Buffer.alloc(64 * 1024));
+    expect(measureCopyBytes(dir, 1024).overBudget).toBe(true);
+  });
+
+  test("nested excluded basenames are skipped at any depth", () => {
+    const dir = writePluginSource("trip-planner");
+    mkdirSync(join(dir, "frontend", "assets"), { recursive: true });
+    writeFileSync(join(dir, "frontend", "assets", "PROMPT.md"), Buffer.alloc(50_000)); // excluded name
+    expect(measureCopyBytes(dir, 40_000).overBudget).toBe(false);
   });
 });
 

@@ -43,6 +43,7 @@ import {
   undeployDevPlugin,
   type DeployDeps,
 } from "./plugin-dev-deploy";
+import { releaseServerLifecycle, tryAcquireServerLifecycle } from "./server-lifecycle-lock";
 import {
   PLUGIN_DEV_SLUG_MAX,
   validateDevPluginSlug,
@@ -2341,40 +2342,33 @@ function registerIpcHandlers(): void {
       throw ipcError(IPC.VOICE_SET_HOSTNAME, new Error(`unknown server ${serverId}`));
     }
 
-    // Persist before rebuilding so a crash mid-rebuild leaves the registry
-    // pointed at the new hostname; the next restoreServerContainers run
-    // picks it up and re-rebuilds from a clean slate.
-    const nextRecord = { ...record };
-    if (hostname === null) {
-      delete nextRecord.voicePublicHostname;
-    } else {
-      nextRecord.voicePublicHostname = hostname;
+    if (!tryAcquireServerLifecycle(serverId)) {
+      throw ipcError(
+        IPC.VOICE_SET_HOSTNAME,
+        new Error("Another operation (install or runtime update) is running for this server."),
+      );
     }
-    registerServer(serverId, nextRecord);
+    try {
+      // Persist before rebuilding so a crash mid-rebuild leaves the registry
+      // pointed at the new hostname; the next restoreServerContainers run
+      // picks it up and re-rebuilds from a clean slate.
+      const nextRecord = { ...record };
+      if (hostname === null) {
+        delete nextRecord.voicePublicHostname;
+      } else {
+        nextRecord.voicePublicHostname = hostname;
+      }
+      registerServer(serverId, nextRecord);
 
-    // Rebuild the container with the updated env. Same shape as the launch
-    // path's restoreServerContainers — keep them in lock-step on tmpfs flags
-    // and tunnel-token piping.
-    await removeIfExists(record.containerId);
-    const tunnelToken = getSecret(tunnelSecretKey(serverId)) ?? undefined;
-    let runtimeEncryptionSecret = getSecret(encryptionSecretKey(serverId));
-    if (!runtimeEncryptionSecret) {
-      runtimeEncryptionSecret = randomBytes(32).toString("hex");
-      setSecret(encryptionSecretKey(serverId), runtimeEncryptionSecret);
+      // Rebuild via the shared recreate sequence (registry-driven, tunnel
+      // token piped at create time) — same path dev-plugin installs use.
+      await removeIfExists(record.containerId);
+      const newContainerId = await startServerFromRegistry(serverId);
+      log.info("voice hostname updated", { serverId, hostname, containerId: newContainerId });
+      return { containerId: newContainerId };
+    } finally {
+      releaseServerLifecycle(serverId);
     }
-    const newContainerId = await runServerContainer({
-      volumePath: record.volumePath,
-      hostPort: record.hostPort,
-      tunnelToken,
-      runtimeEncryptionSecret,
-      ...(record.tunnelPublicHostname ? { tunnelPublicHostname: record.tunnelPublicHostname } : {}),
-      ...(hostname !== null ? { voicePublicHostname: hostname } : {}),
-      ...(record.imageSignature ? { imageSignature: record.imageSignature } : {}),
-      devPluginFrontendMounts: devPluginFrontendMounts(),
-    });
-    registerServer(serverId, { ...nextRecord, containerId: newContainerId });
-    log.info("voice hostname updated", { serverId, hostname, containerId: newContainerId });
-    return { containerId: newContainerId };
   });
 
   // Runtime update orchestration (Phase 01 §8). Per D3/O8 the desktop is the
@@ -2803,6 +2797,9 @@ function registerIpcHandlers(): void {
       }
     },
     onProgress: (event) => {
+      // Mirror every step into the structured log — when a user reports a
+      // failed install, this is the trail that says how far it got.
+      log.info("plugin-dev deploy step", { slug, serverId, ...event });
       sendToWindow(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, { slug, serverId, ...event });
     },
   });

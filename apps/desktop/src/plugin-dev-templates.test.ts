@@ -140,6 +140,15 @@ describe("validateDevPluginSlug", () => {
   });
 });
 
+describe("reserved-slug parity", () => {
+  test("every provisioned core plugin slug is reserved for dev plugins", async () => {
+    const { CORE_PLUGIN_SLUGS } = await import("./provision");
+    for (const slug of CORE_PLUGIN_SLUGS) {
+      expect(RESERVED_PLUGIN_SLUGS.has(slug)).toBe(true);
+    }
+  });
+});
+
 describe("slug regex parity", () => {
   test("desktop literal matches the canonical shared PLUGIN_SLUG_RE", () => {
     expect(PLUGIN_DEV_SLUG_RE.source).toBe(PLUGIN_SLUG_RE.source);

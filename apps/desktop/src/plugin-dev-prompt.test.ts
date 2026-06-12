@@ -26,6 +26,17 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("AGENTS.md");
   });
 
+  test("empty idea gets an explicit fallback instead of a blank section", () => {
+    const sparse = buildAgentPrompt({
+      slug: "x-y",
+      displayName: "X Y",
+      description: "Something.",
+      idea: "   ",
+      pluginPath: "C:\\p",
+    });
+    expect(sparse).toContain("didn't elaborate");
+  });
+
   test("does not embed the full docs (AGENTS.md carries those)", () => {
     // Keep the clipboard payload readable; the docs bundle is ~65k chars.
     expect(prompt.length).toBeLessThan(5000);
