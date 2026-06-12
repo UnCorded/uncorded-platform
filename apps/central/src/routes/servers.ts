@@ -19,11 +19,11 @@ const RATE_SERVER_DELETE: RateLimitConfig = { maxTokens: 10, refillRate: 10 / 60
 // the single source — the directory filter, the derived flag, and
 // sweepStaleServers all reference it so they can't drift apart. Passed as a
 // parameter cast to interval (`${SERVER_STALE_INTERVAL}::interval`).
-const SERVER_STALE_INTERVAL = "30 minutes";
+export const SERVER_STALE_INTERVAL = "30 minutes";
 
 // --- Helpers ---
 
-interface ServerRow {
+export interface ServerRow {
   id: string;
   name: string;
   description: string | null;
@@ -43,7 +43,7 @@ interface ServerRow {
 // directory metadata. It is returned only by POST /v1/auth/token/server,
 // bundled with the token, after the membership check passes — so knowing a
 // server exists never reveals where it lives.
-function serverJson(row: ServerRow) {
+export function serverJson(row: ServerRow) {
   return {
     id: row.id,
     name: row.name,
