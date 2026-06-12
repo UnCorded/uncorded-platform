@@ -59,6 +59,12 @@ import {
   peekLiveSurface,
 } from "@/lib/live-surfaces";
 import { AuthPage } from "@/components/auth/auth-page";
+import {
+  consumePendingIntent,
+  parseJoinParam,
+  setPendingIntent,
+  setJoinTarget,
+} from "@/stores/auth-intent";
 import type { SidebarItem } from "@/stores/sidebar";
 import { mountSidebarStore, sections } from "@/stores/sidebar";
 import { mountMembershipStore } from "@/stores/membership";
@@ -195,6 +201,17 @@ function consumeAuthRedirectParams(href: string): string | null {
   const params = url.searchParams;
   let consumed = false;
 
+  // ?join=<serverId> deep link (invite links, Explore shares). Stash as a
+  // pending auth intent regardless of session state — the replay effect
+  // below fires it once the account resolves, so the same URL works logged
+  // in (immediate) and logged out (after AuthPage).
+  const joinId = parseJoinParam(params.get("join"));
+  if (joinId) {
+    setPendingIntent({ action: "join", serverId: joinId });
+    params.delete("join");
+    consumed = true;
+  }
+
   if (params.get("verified") === "1") {
     showInlineStatus("Email verified — welcome!", "info");
     params.delete("verified");
@@ -320,6 +337,21 @@ function App() {
     const wid = activeId();
     const path = sid ? `/server/${sid}/workspace/${wid}` : `/workspace/${wid}`;
     ctrl.setRoute({ pathname: path });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Auth-gate return-to: once the account resolves (cold bootstrap with a
+  // live session, or a fresh login after the gate), replay the stashed
+  // intent. consumePendingIntent clears as it reads, so an intent fires at
+  // most once; the join surface watches joinTarget and opens the
+  // request-to-join flow for that server.
+  // ---------------------------------------------------------------------------
+  createEffect(() => {
+    if (account() === null) return;
+    const intent = consumePendingIntent();
+    if (intent?.action === "join") {
+      setJoinTarget(intent.serverId);
+    }
   });
 
   createEffect(() => {
