@@ -336,7 +336,9 @@ function PanelLeaf(props: {
       cancelRename();
       return;
     }
-    props.onUpdateContent({ ...webapp, title: next });
+    // `renamed` pins the user's label: live page-title sync skips renamed
+    // panels, so navigation can't clobber a deliberate name.
+    props.onUpdateContent({ ...webapp, title: next, renamed: true });
     cancelRename();
   };
   const onRenameKeyDown = (e: KeyboardEvent) => {

@@ -247,6 +247,40 @@ describe("validateLayout", () => {
     if (!r.ok) expect(r.error.code).toBe("LAYOUT_PANEL_FIELD_TOO_LONG");
   });
 
+  it("accepts a webapp panel with a boolean renamed flag (user-rename pin)", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          instanceId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          url: "https://example.com",
+          title: "My Custom Name",
+          renamed: true,
+        },
+      },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("rejects a webapp panel with a non-boolean renamed", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          url: "https://example.com",
+          title: "X",
+          renamed: "yes",
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("LAYOUT_INVALID_PANEL_FIELD");
+  });
+
   it("accepts a valid focused leaf id", () => {
     const r = validateLayout({
       ...validSplitLayout,

@@ -703,6 +703,7 @@ function attachLiveViewPopupGuard(view: WebContentsView): void {
 // window; a full crashed-panel UI is deferred).
 function attachLiveViewResilience(surfaceId: number, view: WebContentsView): void {
   attachLiveViewPopupGuard(view);
+  attachLiveViewTitleSync(surfaceId, view);
   view.webContents.on("render-process-gone", (_event, details) => {
     if (view.webContents.isDestroyed()) return;
     if (crashReloadedSurfaces.has(surfaceId)) {
@@ -719,6 +720,40 @@ function attachLiveViewResilience(surfaceId: number, view: WebContentsView): voi
       url: view.webContents.getURL(),
     });
     view.webContents.reload();
+  });
+}
+
+// Mirror a live view's document title everywhere it's shown, like a browser
+// tab: the popout's OS window/taskbar title and the renderer (which tracks the
+// docked panel header via LIVE_SURFACE_TITLE_CHANGED). The popout chrome
+// strip's label intentionally stays the HOST, not the title — it's the
+// provenance cue, and a page must not be able to restyle it via document.title;
+// did-navigate refreshes it only when the host actually changes.
+function attachLiveViewTitleSync(surfaceId: number, view: WebContentsView): void {
+  view.webContents.on("page-title-updated", (_event, title) => {
+    const popout = surfacePopouts.get(surfaceId);
+    if (popout && !popout.isDestroyed()) popout.setTitle(title);
+    sendToWindow(IPC.LIVE_SURFACE_TITLE_CHANGED, { surfaceId, title });
+  });
+  view.webContents.on("did-navigate", (_event, url) => {
+    const popout = surfacePopouts.get(surfaceId);
+    if (!popout || popout.isDestroyed()) return;
+    let host = url;
+    try {
+      host = new URL(url).host;
+    } catch {
+      /* keep raw string */
+    }
+    // The chrome strip is our own data: page — poke its DOM directly rather
+    // than growing the popout preload's IPC surface for one label.
+    void popout.webContents
+      .executeJavaScript(
+        `(el => { if (el) { el.textContent = ${JSON.stringify(host)}; el.title = ${JSON.stringify(host)}; } })(document.querySelector(".host"))`,
+        true,
+      )
+      .catch((err: unknown) => {
+        log.warn("popout host-label update failed", { surfaceId, err: errorMessage(err) });
+      });
   });
 }
 
@@ -1890,6 +1925,9 @@ function createLiveSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
     height: 640,
     minWidth: 480,
     minHeight: 320,
+    // Taskbar label before the chrome page (whose <title> is also the host)
+    // finishes loading — never the bare app name.
+    title: host,
     frame: false,
     backgroundColor: "#0b0b0e",
     autoHideMenuBar: true,
@@ -1911,7 +1949,16 @@ function createLiveSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
   relayout();
   popout.on("resize", relayout);
   // Content size is only final once the chrome page has laid out.
-  popout.webContents.once("did-finish-load", relayout);
+  popout.webContents.once("did-finish-load", () => {
+    relayout();
+    // An already-loaded view popping out (panel-header "Pop out") won't refire
+    // page-title-updated — push its current title now, after the chrome page's
+    // own <title> (the host fallback) has been applied so it can't overwrite.
+    if (!view.webContents.isDestroyed()) {
+      const title = view.webContents.getTitle();
+      if (title !== "" && !popout.isDestroyed()) popout.setTitle(title);
+    }
+  });
 
   const dataUrl =
     "data:text/html;charset=utf-8," + encodeURIComponent(buildPopoutChromeHtml({ host }));

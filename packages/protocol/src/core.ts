@@ -131,6 +131,10 @@ export interface WebAppPanelContent {
   instanceId: string;
   url: string;
   title: string;
+  // True once the user has manually renamed the panel. Live page-title sync
+  // (desktop, LIVE_SURFACE_TITLE_CHANGED) skips renamed panels so navigation
+  // never clobbers a deliberate user label.
+  renamed?: boolean;
 }
 
 export type PanelContent =

@@ -190,6 +190,18 @@ export function onLiveSurfaceDockRequested(
 }
 
 /**
+ * A live view's document title changed (main mirrors `page-title-updated`).
+ * The subscriber (App) tracks docked panel headers with it, like a browser
+ * tab. Returns an unsubscribe fn; a no-op on web.
+ */
+export function onLiveSurfaceTitleChanged(
+  cb: (payload: { surfaceId: number; title: string }) => void,
+): () => void {
+  if (!isElectron()) return () => {};
+  return getElectron().liveSurface.onTitleChanged(cb);
+}
+
+/**
  * Dock a live native view into the CURRENT workspace as a panel: claim the view
  * from main (re-parent + close its popout), bind the live `surfaceId` to a fresh
  * per-panel instanceId, and request the panel be opened. Pure layout act — no

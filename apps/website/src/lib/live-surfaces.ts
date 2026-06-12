@@ -62,6 +62,19 @@ export function peekLiveSurface(instanceId: string): number | null {
 }
 
 /**
+ * Non-reactive reverse lookup: the panel instance currently bound to a live
+ * surface, or null. Main-process events (e.g. LIVE_SURFACE_TITLE_CHANGED) are
+ * keyed by surfaceId; this maps them back to the panel they belong to. O(n)
+ * scan is fine — the map holds a handful of open panels.
+ */
+export function instanceIdForSurface(surfaceId: number): string | null {
+  for (const [instanceId, sid] of map()) {
+    if (sid === surfaceId) return instanceId;
+  }
+  return null;
+}
+
+/**
  * Reactive snapshot of every instanceId currently bound to a live surface. The
  * App-level reconciliation effect compares this against the instanceIds present
  * in panelContents to find orphaned surfaces (panel closed / replaced / its

@@ -39,7 +39,7 @@ const BROWSER_RECENT_ALLOWED_KEYS = new Set(["title", "url"]);
 // required: layouts saved before it existed lack it, and the renderer backfills
 // one on load. Rejecting its absence would flip every restored pre-instanceId
 // workspace to "error" — same tolerate-and-backfill stance as `tunnelUrl` above.
-const WEBAPP_ALLOWED_KEYS = new Set(["type", "webAppId", "instanceId", "url", "title"]);
+const WEBAPP_ALLOWED_KEYS = new Set(["type", "webAppId", "instanceId", "url", "title", "renamed"]);
 const MAX_BROWSER_TABS = 16;
 const MAX_BROWSER_RECENT = 6;
 
@@ -244,6 +244,10 @@ function validateWebAppPanel(
   }
   if (title.length > 256) {
     return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].title must not exceed 256 characters.`);
+  }
+  // Optional user-rename pin (desktop title sync skips renamed panels).
+  if ("renamed" in content && typeof content["renamed"] !== "boolean") {
+    return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].renamed must be a boolean.`);
   }
   for (const key of Object.keys(content)) {
     if (!WEBAPP_ALLOWED_KEYS.has(key)) {

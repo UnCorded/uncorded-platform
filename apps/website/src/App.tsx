@@ -48,10 +48,16 @@ import type { WebApp } from "@uncorded/electron-bridge";
 import {
   onOpenWebAppAsPanel,
   onLiveSurfaceDockRequested,
+  onLiveSurfaceTitleChanged,
   dockLiveSurface,
   liveSurfaceRelease,
 } from "@/stores/web-apps";
-import { allLiveInstanceIds, clearLiveSurface, peekLiveSurface } from "@/lib/live-surfaces";
+import {
+  allLiveInstanceIds,
+  clearLiveSurface,
+  instanceIdForSurface,
+  peekLiveSurface,
+} from "@/lib/live-surfaces";
 import { AuthPage } from "@/components/auth/auth-page";
 import type { SidebarItem } from "@/stores/sidebar";
 import { mountSidebarStore, sections } from "@/stores/sidebar";
@@ -1109,6 +1115,38 @@ function App() {
   createEffect(() => {
     const unsubscribe = onLiveSurfaceDockRequested(({ surfaceId, url, title }) => {
       void dockLiveSurface(surfaceId, url, title);
+    });
+    onCleanup(unsubscribe);
+  });
+
+  // Live title sync: a docked panel's header tracks the page's document title
+  // like a browser tab (main mirrors `page-title-updated`). Skips panels the
+  // user has renamed (`renamed` pin — a deliberate label must never be
+  // clobbered by navigation) and empty titles. The title is clamped to the
+  // layout validator's 256-char cap so a hostile page's giant document.title
+  // can't poison the synced layout. Popped-out surfaces have no panel here —
+  // instanceIdForSurface misses and the event is a no-op (main updates the
+  // popout's OS title itself).
+  createEffect(() => {
+    const unsubscribe = onLiveSurfaceTitleChanged(({ surfaceId, title }) => {
+      const next = title.trim().slice(0, 256);
+      if (next.length === 0) return;
+      const instanceId = instanceIdForSurface(surfaceId);
+      if (instanceId === null) return;
+      for (const [workspaceId, ws] of Object.entries(panelContents())) {
+        for (const [leafId, content] of Object.entries(ws)) {
+          if (content.type !== "webapp" || content.instanceId !== instanceId) continue;
+          if (content.renamed === true || content.title === next) return;
+          mutatePanelContents(workspaceId, (prev) => {
+            const cur = prev[leafId];
+            if (cur === undefined || cur.type !== "webapp" || cur.instanceId !== instanceId) {
+              return prev;
+            }
+            return { ...prev, [leafId]: { ...cur, title: next } };
+          });
+          return;
+        }
+      }
     });
     onCleanup(unsubscribe);
   });

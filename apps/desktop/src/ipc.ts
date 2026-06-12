@@ -134,6 +134,7 @@ export const IPC = {
   LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window",
   LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock",
   LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested",
+  LIVE_SURFACE_TITLE_CHANGED: "desktop:live-surface:title-changed",
   LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock",
   LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close",
   LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external",

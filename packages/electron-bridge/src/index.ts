@@ -607,6 +607,15 @@ export interface ElectronBridge {
     onDockRequested(
       handler: (payload: { surfaceId: number; url: string; title: string }) => void,
     ): CleanupFn;
+    /**
+     * Fires when a live view's document title changes (`page-title-updated`),
+     * so a docked panel's header can track the page like a browser tab does.
+     * Main also mirrors the title onto a popout's OS window title itself; this
+     * event is for renderer-owned chrome only.
+     */
+    onTitleChanged(
+      handler: (payload: { surfaceId: number; title: string }) => void,
+    ): CleanupFn;
   };
 }
 
@@ -725,6 +734,7 @@ export interface IpcChannelMap {
   readonly LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window";
   readonly LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock";
   readonly LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested";
+  readonly LIVE_SURFACE_TITLE_CHANGED: "desktop:live-surface:title-changed";
   // Sent by the popout window's own chrome (popout-preload) to main.
   readonly LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock";
   readonly LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close";
