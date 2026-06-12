@@ -118,6 +118,10 @@ let nativeSurfaceSeq = 1;
 // Electron, so we track the hidden→visible transition ourselves to fire a single
 // repaint kick on dock (see NATIVE_SURFACE_SET_BOUNDS).
 const visibleNativeSurfaces = new Set<number>();
+// Surfaces that already used their one automatic crash recovery (see
+// attachLiveViewResilience). A second renderer crash stays dead rather than
+// spinning a reload loop; entries clear when the surface is destroyed.
+const crashReloadedSurfaces = new Set<number>();
 
 // Free, frameless OS windows that host a popped-out native view directly (the
 // view is a child of the popout's own contentView, so it moves with the window
@@ -598,6 +602,97 @@ function isBrowserPanelGuest(contents: WebContents): boolean {
   return contents.session === session.fromPartition("persist:browser");
 }
 
+// Live views whose popup guard is already attached (mirrors
+// guardedBrowserContents for WebContentsView-hosted pages).
+const guardedLiveViewContents = new WeakSet<WebContents>();
+
+// window.open from a LIVE view (a Web App panel's view, a docked captured
+// popup, or a popped-out window's content). Same http(s) validation and
+// createWindow adoption as attachBrowserGuestPopupGuard, but there is no
+// Browser Panel to route a floating frame to — the captured popup opens
+// directly as its own frameless live popout window (dockable later).
+// Recursive: the popup's view gets this same guard, so popups-from-popups
+// stay inside the capture model instead of leaking default Electron windows.
+// Idempotent per webContents.
+function attachLiveViewPopupGuard(view: WebContentsView): void {
+  const contents = view.webContents;
+  if (guardedLiveViewContents.has(contents)) return;
+  guardedLiveViewContents.add(contents);
+
+  contents.setWindowOpenHandler(({ url }) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      log.warn("blocked live-view window.open with malformed url", { url });
+      return { action: "deny" };
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      log.warn("blocked live-view window.open to non-http url", { url });
+      return { action: "deny" };
+    }
+    return {
+      action: "allow",
+      createWindow: (options) => {
+        // Adopt the pre-created WebContents (live session: cookies +
+        // sessionStorage + opener); only `background-tab` disposition leaves it
+        // undefined — there we build a fresh sandboxed view on the shared
+        // partition and load the URL ourselves. Same contract as
+        // attachBrowserGuestPopupGuard's createWindow.
+        const adopted = (options as { webContents?: WebContents }).webContents;
+        const popupView = adopted
+          ? new WebContentsView({ webContents: adopted })
+          : new WebContentsView({
+              webPreferences: {
+                partition: "persist:browser",
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true,
+              },
+            });
+        const surfaceId = nativeSurfaceSeq++;
+        nativeSurfaces.set(surfaceId, popupView);
+        if (!adopted) void popupView.webContents.loadURL(url);
+        popupView.webContents.on("destroyed", () => {
+          nativeSurfaces.delete(surfaceId);
+          visibleNativeSurfaces.delete(surfaceId);
+          crashReloadedSurfaces.delete(surfaceId);
+        });
+        attachLiveViewResilience(surfaceId, popupView);
+        // Straight into its own popout window — never parked in main, so there
+        // is no renderer hand-off to leak if nothing claims it.
+        createNativeSurfacePopout(surfaceId, url);
+        return popupView.webContents;
+      },
+    };
+  });
+}
+
+// Every live-view creation chokepoint runs this: capture the view's window.open
+// into the popout model, and give a crashed renderer ONE automatic reload. A
+// second crash is a crash loop — leave it dead (the user can close the panel /
+// window; a full crashed-panel UI is deferred).
+function attachLiveViewResilience(surfaceId: number, view: WebContentsView): void {
+  attachLiveViewPopupGuard(view);
+  view.webContents.on("render-process-gone", (_event, details) => {
+    if (view.webContents.isDestroyed()) return;
+    if (crashReloadedSurfaces.has(surfaceId)) {
+      log.warn("live view crashed again after auto-reload; leaving it dead", {
+        surfaceId,
+        reason: details.reason,
+      });
+      return;
+    }
+    crashReloadedSurfaces.add(surfaceId);
+    log.warn("live view renderer gone; auto-reloading once", {
+      surfaceId,
+      reason: details.reason,
+      url: view.webContents.getURL(),
+    });
+    view.webContents.reload();
+  });
+}
+
 // Handle a Browser Panel guest's window.open (a site's "detach"/"pop-out").
 // Instead of an OS window, we capture the popup into an in-app `WebContentsView`
 // via `createWindow`: it returns a WebContents we construct, and Electron
@@ -676,7 +771,9 @@ function attachBrowserGuestPopupGuard(contents: WebContents): void {
         view.webContents.on("destroyed", () => {
           nativeSurfaces.delete(surfaceId);
           visibleNativeSurfaces.delete(surfaceId);
+          crashReloadedSurfaces.delete(surfaceId);
         });
+        attachLiveViewResilience(surfaceId, view);
         sendToWindow(IPC.NATIVE_SURFACE_INTERCEPTED, {
           surfaceId,
           url,
@@ -1691,7 +1788,9 @@ function createNativeSurface(url: string): number {
   view.webContents.on("destroyed", () => {
     nativeSurfaces.delete(surfaceId);
     visibleNativeSurfaces.delete(surfaceId);
+    crashReloadedSurfaces.delete(surfaceId);
   });
+  attachLiveViewResilience(surfaceId, view);
   restackNativeSurfaces();
   return surfaceId;
 }
@@ -1699,13 +1798,16 @@ function createNativeSurface(url: string): number {
 // Move a captured native view OUT of the main window and into its own free,
 // frameless OS window that owns it directly. The live session is preserved (no
 // reload) and the window can move anywhere, off-app / onto another monitor.
-function createNativeSurfacePopout(surfaceId: number): void {
+function createNativeSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
   const view = nativeSurfaces.get(surfaceId);
   if (!view || view.webContents.isDestroyed()) return;
   // Detach from the main window if it's currently parented there (docked/parked).
   if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
 
-  const currentUrl = view.webContents.getURL();
+  // A view popped out the instant it was captured (live-view popup guard) hasn't
+  // committed its navigation yet, so getURL() is still "" — fall back to the
+  // window.open URL for the chrome strip's host label.
+  const currentUrl = view.webContents.getURL() || fallbackUrl;
   let host = currentUrl;
   try {
     host = new URL(currentUrl).host;
