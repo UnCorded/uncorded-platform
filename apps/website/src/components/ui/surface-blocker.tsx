@@ -1,5 +1,5 @@
 import { onCleanup } from "solid-js";
-import { pushSurfaceBlocker } from "@/lib/native-surface-host";
+import { pushSurfaceBlocker } from "@/lib/live-surface-host";
 
 // Suspends native panel views (live WebContentsViews paint ABOVE all DOM) for as
 // long as THIS component is mounted, then releases on cleanup.

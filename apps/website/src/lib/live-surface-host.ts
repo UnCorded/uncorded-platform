@@ -6,7 +6,7 @@
 //   `style.left/top/width/height` so they sit over an in-tree placeholder. A
 //   native `WebContentsView` is NOT in the DOM — it's an OS-level view the main
 //   process paints over the window's content area. We can't style it; we can
-//   only tell main where to put it via IPC (`nativeSurface.setBounds`).
+//   only tell main where to put it via IPC (`liveSurface.setBounds`).
 //
 //   So this module mirrors portal-host's *proven* rect loop (ResizeObserver
 //   invalidator + rAF settle, window resize/scroll invalidation) but, instead
@@ -23,7 +23,7 @@
 //       surface to visible:false (the view would otherwise paint over the modal),
 //       restored on close.
 //   This host never destroys a view — release is owned by panel-close /
-//   web-app-removal via `nativeSurface.release`. untrack() merely stops tracking
+//   web-app-removal via `liveSurface.release`. untrack() merely stops tracking
 //   and reports a final visible:false.
 
 import { createSignal } from "solid-js";
@@ -111,7 +111,7 @@ export function track(surfaceId: number, placeholder: HTMLElement): void {
  * panel-close / web-app-removal.
  *
  * `placeholder` is an ownership guard for the dock hand-off: when a floating
- * frame docks, the panel's NativeViewSurface re-`track`s the SAME surfaceId
+ * frame docks, the panel's LiveViewSurface re-`track`s the SAME surfaceId
  * (repointing to its own placeholder) before the floating frame's onCleanup
  * runs. Passing the caller's own placeholder makes a stale untrack a no-op once
  * a newer placeholder owns the surface, so the freshly-docked view isn't hidden.
@@ -129,7 +129,7 @@ export function untrack(surfaceId: number, placeholder?: HTMLElement): void {
   reportBounds(surfaceId, { x: 0, y: 0, width: 0, height: 0 }, false);
 }
 
-// Reactive count of open "native-surface blockers" — full-bleed/modal overlays
+// Reactive count of open "live-surface blockers" — full-bleed/modal overlays
 // that must paint above the panels. A native WebContentsView always renders
 // above ALL renderer DOM, so an overlay can never sit above a panel by z-index;
 // the only way to honor "overlays display above panels" is to HIDE the native
@@ -145,7 +145,7 @@ export function surfaceBlockersActive(): boolean {
 }
 
 /**
- * Register a native-surface blocker for an overlay's open lifetime. Increments
+ * Register a live-surface blocker for an overlay's open lifetime. Increments
  * the reactive count; the returned cleanup decrements it. Pair with onCleanup so
  * the count releases when the overlay unmounts (including its exit animation).
  */
@@ -198,7 +198,7 @@ function boundsEqual(a: Bounds | null, b: Bounds): boolean {
 
 function reportBounds(surfaceId: number, bounds: Bounds, visible: boolean): void {
   if (!isElectron()) return;
-  void getElectron().nativeSurface.setBounds(surfaceId, bounds, visible);
+  void getElectron().liveSurface.setBounds(surfaceId, bounds, visible);
 }
 
 /** Returns true if it emitted an IPC update (i.e. something changed). */

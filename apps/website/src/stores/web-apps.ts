@@ -72,16 +72,6 @@ export async function removeWebApp(serverId: string, id: string): Promise<void> 
   }
 }
 
-/** Open `url` in a native, login-sticky pop-out window. No-op on web. */
-export async function popOutWebApp(url: string): Promise<void> {
-  if (!isElectron()) return;
-  try {
-    await getElectron().webApps.popOut(url);
-  } catch (err) {
-    console.error("[web-apps] popOut failed", { url, err });
-  }
-}
-
 /**
  * The dock overlay's saved per-URL choice (keyed by exact URL). Returns null on
  * web or when the user hasn't saved a preference for this URL yet.
@@ -115,11 +105,11 @@ export async function setWebAppPref(url: string, action: WebAppPref): Promise<vo
  * <webview> guest (to route the floating frame onto the panel that triggered
  * it). Returns an unsubscribe fn; a no-op on web.
  */
-export function onNativeSurfaceIntercepted(
+export function onLiveSurfaceIntercepted(
   cb: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
 ): () => void {
   if (!isElectron()) return () => {};
-  return getElectron().nativeSurface.onIntercepted(cb);
+  return getElectron().liveSurface.onIntercepted(cb);
 }
 
 /**
@@ -129,12 +119,12 @@ export function onNativeSurfaceIntercepted(
  * live view. Cookies/localStorage carry over via persist:browser; no in-memory
  * session is preserved (fresh load).
  */
-export async function nativeSurfaceCreate(url: string): Promise<number | null> {
+export async function liveSurfaceCreate(url: string): Promise<number | null> {
   if (!isElectron()) return null;
   try {
-    return await getElectron().nativeSurface.create(url);
+    return await getElectron().liveSurface.create(url);
   } catch (err) {
-    console.error("[web-apps] nativeSurface.create failed", { url, err });
+    console.error("[web-apps] liveSurface.create failed", { url, err });
     return null;
   }
 }
@@ -145,12 +135,12 @@ export async function nativeSurfaceCreate(url: string): Promise<number | null> {
  * release the same URL falls back to a fresh <webview> (cookie-logged-in).
  * No-op on web.
  */
-export async function nativeSurfaceRelease(surfaceId: number): Promise<void> {
+export async function liveSurfaceRelease(surfaceId: number): Promise<void> {
   if (!isElectron()) return;
   try {
-    await getElectron().nativeSurface.release(surfaceId);
+    await getElectron().liveSurface.release(surfaceId);
   } catch (err) {
-    console.error("[web-apps] nativeSurface.release failed", { surfaceId, err });
+    console.error("[web-apps] liveSurface.release failed", { surfaceId, err });
   }
 }
 
@@ -160,12 +150,12 @@ export async function nativeSurfaceRelease(surfaceId: number): Promise<void> {
  * session is preserved — no reload. Where it docks is resolved at dock time
  * (whatever server is active then), so no target is passed. No-op on web.
  */
-export async function nativeSurfaceOpenWindow(surfaceId: number): Promise<void> {
+export async function liveSurfaceOpenWindow(surfaceId: number): Promise<void> {
   if (!isElectron()) return;
   try {
-    await getElectron().nativeSurface.openWindow(surfaceId);
+    await getElectron().liveSurface.openWindow(surfaceId);
   } catch (err) {
-    console.error("[web-apps] nativeSurface.openWindow failed", { surfaceId, err });
+    console.error("[web-apps] liveSurface.openWindow failed", { surfaceId, err });
   }
 }
 
@@ -175,12 +165,12 @@ export async function nativeSurfaceOpenWindow(surfaceId: number): Promise<void> 
  * Returns whether the view is parked and ready to be tracked — on false the
  * caller must NOT open a panel (the popout stays open, the user loses nothing).
  */
-async function nativeSurfaceClaimDock(surfaceId: number): Promise<boolean> {
+async function liveSurfaceClaimDock(surfaceId: number): Promise<boolean> {
   if (!isElectron()) return false;
   try {
-    return await getElectron().nativeSurface.claimDock(surfaceId);
+    return await getElectron().liveSurface.claimDock(surfaceId);
   } catch (err) {
-    console.error("[web-apps] nativeSurface.claimDock failed", { surfaceId, err });
+    console.error("[web-apps] liveSurface.claimDock failed", { surfaceId, err });
     return false;
   }
 }
@@ -192,11 +182,11 @@ async function nativeSurfaceClaimDock(surfaceId: number): Promise<boolean> {
  * fn; a no-op on web. Survives the originating browser panel closing (App wires
  * this at the top level, not per-panel).
  */
-export function onNativeSurfaceDockRequested(
+export function onLiveSurfaceDockRequested(
   cb: (payload: { surfaceId: number; url: string; title: string }) => void,
 ): () => void {
   if (!isElectron()) return () => {};
-  return getElectron().nativeSurface.onDockRequested(cb);
+  return getElectron().liveSurface.onDockRequested(cb);
 }
 
 /**
@@ -204,26 +194,28 @@ export function onNativeSurfaceDockRequested(
  * from main (re-parent + close its popout), bind the live `surfaceId` to a fresh
  * per-panel instanceId, and request the panel be opened. Pure layout act — no
  * bookmark is created (dock ≠ save; "Save as Web App" stays explicit). Shared by
- * the "panel" pref auto-dock and the popout window's "Dock" button. Fail-closed:
+ * the "dock" pref auto-dock and the popout window's "Dock" button. Fail-closed:
  * with no active server (the workspace can't host panels) we toast and stop
- * BEFORE claiming, so the popout stays open and the user loses nothing.
+ * BEFORE claiming, so the popout stays open and the user loses nothing. Returns
+ * whether a panel was opened, so callers that just created the view (the
+ * toolbar path) can release it instead of leaking it parked.
  */
 export async function dockLiveSurface(
   surfaceId: number,
   url: string,
   title = "",
-): Promise<void> {
-  if (!isElectron()) return;
+): Promise<boolean> {
+  if (!isElectron()) return false;
   if (!activeServerId()) {
     showToast("Open a server to dock this window", "info");
-    return;
+    return false;
   }
   // Claim BEFORE opening the panel: after a successful claim the view is parked
   // hidden in the main window and nothing else owns it, so no stale popout-side
   // geometry can race the panel's first setBounds. On false the view is gone or
   // unclaimable — opening a panel would mount blank, so we stop (the popout, if
   // any, is untouched).
-  if (!(await nativeSurfaceClaimDock(surfaceId))) return;
+  if (!(await liveSurfaceClaimDock(surfaceId))) return false;
   // Mint a FRESH per-panel instanceId and bind the incoming live surface to it.
   // The panel opened below carries this same instanceId, so its always-live path
   // adopts THIS surface instead of creating a second one.
@@ -240,6 +232,35 @@ export async function dockLiveSurface(
     registerLiveSurface(instanceId, surfaceId);
     emitOpenWebAppAsPanel({ url, title }, instanceId);
   });
+  return true;
+}
+
+/**
+ * Open `url` as a FRESH live view in its own frameless popout window — the
+ * toolbar "Pop out" action and the "window" pref. There's no live session to
+ * preserve here (the source is a <webview> browser tab that can't be moved);
+ * the view loads fresh on persist:browser, so cookie logins carry over. This
+ * replaces the old lossy webApps.popOut (a bare BrowserWindow with no dock
+ * affordance). No-op on web.
+ */
+export async function openUrlInWindow(url: string): Promise<void> {
+  const surfaceId = await liveSurfaceCreate(url);
+  if (surfaceId === null) return;
+  await liveSurfaceOpenWindow(surfaceId);
+}
+
+/**
+ * Open `url` as a FRESH live view docked straight into the current workspace —
+ * the toolbar "Dock" action and the "dock" pref. Releases the just-created view
+ * if the dock fails (no server, claim raced a teardown), so nothing leaks
+ * parked. No-op on web.
+ */
+export async function openUrlAsDockedPanel(url: string, title = ""): Promise<void> {
+  const surfaceId = await liveSurfaceCreate(url);
+  if (surfaceId === null) return;
+  if (!(await dockLiveSurface(surfaceId, url, title))) {
+    await liveSurfaceRelease(surfaceId);
+  }
 }
 
 // Pub/sub so the post-hoc dock prompt (rendered deep inside the browser panel)

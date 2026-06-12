@@ -29,15 +29,14 @@ import {
 import { isElectron } from "@/lib/electron";
 import { activeServer } from "@/stores/servers";
 import {
-  addWebApp,
   getWebAppPref,
-  popOutWebApp,
-  onNativeSurfaceIntercepted,
-  nativeSurfaceOpenWindow,
+  onLiveSurfaceIntercepted,
+  liveSurfaceOpenWindow,
   dockLiveSurface,
+  openUrlInWindow,
+  openUrlAsDockedPanel,
 } from "@/stores/web-apps";
 import { DockPrompt } from "@/components/web-apps/dock-prompt";
-import { showToast } from "@/lib/feedback";
 import * as portalHost from "@/lib/portal-host";
 import { surfaceKeyOf } from "@/lib/surface-key";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -107,7 +106,7 @@ let popupInterceptSubscribed = false;
 function ensurePopupInterceptSubscription(): void {
   if (popupInterceptSubscribed) return;
   popupInterceptSubscribed = true;
-  onNativeSurfaceIntercepted(({ surfaceId, url, webContentsId }) => {
+  onLiveSurfaceIntercepted(({ surfaceId, url, webContentsId }) => {
     popupInterceptHandlers.get(webContentsId)?.(surfaceId, url);
   });
 }
@@ -133,11 +132,11 @@ export function BrowserPanel(props: {
   const reloadNonceFor = (tabId: string) => iframeReloadNonces()[tabId] ?? 0;
   const [webviewControls, setWebviewControls] = createSignal<WebviewControls | null>(null);
 
-  // The dock overlay (Popout / Create Panel / Cancel). Opened by the nav bar's
-  // Popout button unless the user has a saved per-URL preference, in which case
-  // we execute that action directly and skip the overlay. This is the toolbar
-  // path only — a SITE-initiated window.open is handled by handlePopupIntercepted
-  // (which opens a free OS popout window), not this overlay.
+  // The dock overlay (Dock / Pop out / Save as Web App / Cancel). Opened by the
+  // nav bar's Pop out button unless the user has a saved per-URL preference, in
+  // which case we execute that action directly and skip the overlay. This is the
+  // toolbar path only — a SITE-initiated window.open is handled by
+  // handlePopupIntercepted (already a captured live view), not this overlay.
   const [dockPrompt, setDockPrompt] = createSignal<{
     url: string;
     title: string;
@@ -155,13 +154,12 @@ export function BrowserPanel(props: {
     }
     if (!isHttp) return;
     const pref = await getWebAppPref(tab.url);
-    if (pref === "popout") {
-      await popOutWebApp(tab.url);
+    if (pref === "window") {
+      await openUrlInWindow(tab.url);
       return;
     }
-    if (pref === "panel") {
-      const entry = await addWebApp(server.id, { url: tab.url, title: tab.title });
-      if (entry) showToast(`Added ${entry.title} to Web Apps`, "info");
+    if (pref === "dock") {
+      await openUrlAsDockedPanel(tab.url, tab.title);
       return;
     }
     setDockPrompt({ url: tab.url, title: tab.title });
@@ -169,11 +167,11 @@ export function BrowserPanel(props: {
 
   // A site-initiated window.open that main captured into a native WebContentsView
   // (live session preserved, parked hidden) keyed by `surfaceId`. Honor a saved
-  // per-URL preference: "panel" with an active server → auto-dock the live view
-  // into a workspace panel; everything else (the "popout" pref AND the default,
+  // per-URL preference: "dock" with an active server → auto-dock the live view
+  // into a workspace panel; everything else (the "window" pref AND the default,
   // no-pref case) → open it as a free, frameless OS window that owns the view.
-  // The window carries its own Dock-as-panel control, so it's the right default
-  // even with no server. The native view must be consumed (docked / windowed /
+  // The window carries its own Dock control, so it's the right default even
+  // with no server. The native view must be consumed (docked / windowed /
   // released) or it stays parked hidden.
   const handlePopupIntercepted = async (
     surfaceId: number,
@@ -184,11 +182,11 @@ export function BrowserPanel(props: {
     // can't host panels, so dockLiveSurface would toast-and-stop — leaving the
     // freshly intercepted view parked hidden forever (leak). Fall through to
     // the window path instead, which works serverless and still offers Dock.
-    if (pref === "panel" && activeServer()) {
+    if (pref === "dock" && activeServer()) {
       await dockLiveSurface(surfaceId, url);
       return;
     }
-    await nativeSurfaceOpenWindow(surfaceId);
+    await liveSurfaceOpenWindow(surfaceId);
   };
 
   // Reset displayUrl only when the active tab's identity changes, not on every
@@ -598,8 +596,8 @@ function BrowserNavBar(props: {
             class="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30"
             onClick={props.onPopout}
             disabled={!pinnable()}
-            title="Popout or save as a Web App"
-            aria-label="Popout or save as a Web App"
+            title="Pop out, dock, or save as a Web App"
+            aria-label="Pop out, dock, or save as a Web App"
           >
             <ExternalLink class="size-3" />
           </button>

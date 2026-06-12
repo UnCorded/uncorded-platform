@@ -47,9 +47,9 @@ import { browserContentEquals } from "@/lib/browser-panel-state";
 import type { WebApp } from "@uncorded/electron-bridge";
 import {
   onOpenWebAppAsPanel,
-  onNativeSurfaceDockRequested,
+  onLiveSurfaceDockRequested,
   dockLiveSurface,
-  nativeSurfaceRelease,
+  liveSurfaceRelease,
 } from "@/stores/web-apps";
 import { allLiveInstanceIds, clearLiveSurface, peekLiveSurface } from "@/lib/live-surfaces";
 import { AuthPage } from "@/components/auth/auth-page";
@@ -73,7 +73,7 @@ import { ScreenSharePicker } from "@/components/voice/screen-share-picker";
 import { UserCardSheet } from "@/components/user-card-sheet";
 import { FilePreviewOverlay } from "@/components/file-preview-overlay";
 import { filePreview } from "@/stores/file-preview";
-import * as nativeSurfaceHost from "@/lib/native-surface-host";
+import * as liveSurfaceHost from "@/lib/live-surface-host";
 import { MemberManageSheet } from "@/components/server/member-manage-sheet";
 import { CoViewSheet } from "@/co-view/co-view-sheet";
 import { HostShellRunner } from "@/co-view/host-shell-runner";
@@ -1093,7 +1093,7 @@ function App() {
     else dropChannelToEdge(targetLeafId, content, "horizontal", "after");
   };
 
-  // The dock flow (a "panel"-pref interception, or the popout window's "Dock"
+  // The dock flow (a "dock"-pref interception, or the popout window's "Dock"
   // button) docks a live page by emitting here, so we don't drill a callback
   // through the panel tree. Opens as a NEW panel (split).
   createEffect(() => {
@@ -1107,7 +1107,7 @@ function App() {
   // main, and only then flows through the subscription above to open a panel.
   // Top-level (not per-panel) so it survives the originating browser panel closing.
   createEffect(() => {
-    const unsubscribe = onNativeSurfaceDockRequested(({ surfaceId, url, title }) => {
+    const unsubscribe = onLiveSurfaceDockRequested(({ surfaceId, url, title }) => {
       void dockLiveSurface(surfaceId, url, title);
     });
     onCleanup(unsubscribe);
@@ -1122,10 +1122,10 @@ function App() {
   // cinematic/update takeover. Restored when they all close.
   createEffect(() => {
     const overlayOpen =
-      nativeSurfaceHost.surfaceBlockersActive() ||
+      liveSurfaceHost.surfaceBlockersActive() ||
       filePreview() !== null ||
       cinematicState() !== "idle";
-    nativeSurfaceHost.setSuspended(overlayOpen);
+    liveSurfaceHost.setSuspended(overlayOpen);
   });
 
   // Release leaked live surfaces (B3). A Web App panel owns a live
@@ -1137,7 +1137,7 @@ function App() {
   // release any surface whose panel is gone. One effect covers close / replace /
   // workspace-delete uniformly. Surfaces for inactive-workspace panels stay alive
   // (their content is still present under that workspace id). A surface currently
-  // popped out into its own window is protected by main's NATIVE_SURFACE_RELEASE
+  // popped out into its own window is protected by main's LIVE_SURFACE_RELEASE
   // no-op (surfacePopouts membership), so this won't yank a live popout.
   createEffect(() => {
     const present = new Set<string>();
@@ -1150,7 +1150,7 @@ function App() {
     for (const instanceId of live) {
       if (present.has(instanceId)) continue;
       const sid = peekLiveSurface(instanceId);
-      if (sid !== null) void nativeSurfaceRelease(sid);
+      if (sid !== null) void liveSurfaceRelease(sid);
       clearLiveSurface(instanceId);
     }
   });

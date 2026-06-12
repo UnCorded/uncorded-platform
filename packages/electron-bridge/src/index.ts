@@ -246,9 +246,10 @@ export interface WebApp {
   addedAt: number;
 }
 
-/** The dock overlay's two outcomes, also the value of a saved per-URL pref:
- *  pop out to a native window, or save the page as a Web App ("Create Panel"). */
-export type WebAppPref = "popout" | "panel";
+/** A saved per-URL preference for where a page opens: docked into the current
+ *  workspace as a panel, or in its own frameless live popout window. Legacy
+ *  values "panel"/"popout" are migrated on read (apps/desktop/web-apps-store). */
+export type WebAppPref = "dock" | "window";
 
 export interface ElectronBridge {
   central: {
@@ -521,12 +522,6 @@ export interface ElectronBridge {
     ): Promise<WebApp>;
     remove(serverId: string, id: string): Promise<void>;
     /**
-     * Open `url` in a native window that shares the `persist:browser` session,
-     * so the page stays logged in (same cookie jar as the browser pane + the
-     * saved Web App panels). Drives the dock overlay's "Popout" button.
-     */
-    popOut(url: string): Promise<void>;
-    /**
      * The dock overlay's "save preference for this URL" — keyed by the EXACT
      * URL (not host), global (the choice is about the URL, not the server).
      * `getPref` returns null until the user has saved a choice for this URL.
@@ -541,7 +536,7 @@ export interface ElectronBridge {
   // free, frameless OS popout window (where it OWNS the view directly) or docked
   // into the main window and positioned by the renderer reporting an on-screen
   // rect over IPC (anchored to a panel body).
-  nativeSurface: {
+  liveSurface: {
     /**
      * Create a fresh live native view loading `url` (http(s) only), parked hidden
      * until the renderer reports a host rect. Returns the `surfaceId` to bind to
@@ -711,7 +706,6 @@ export interface IpcChannelMap {
   readonly WEB_APPS_LIST: "desktop:web-apps:list";
   readonly WEB_APPS_ADD: "desktop:web-apps:add";
   readonly WEB_APPS_REMOVE: "desktop:web-apps:remove";
-  readonly WEB_APPS_POP_OUT: "desktop:web-apps:pop-out";
   readonly WEB_APPS_GET_PREF: "desktop:web-apps:get-pref";
   readonly WEB_APPS_SET_PREF: "desktop:web-apps:set-pref";
 
@@ -719,17 +713,17 @@ export interface IpcChannelMap {
   // window.open is captured into a native view hosted in a free OS popout window
   // (which owns it directly) or docked into the main window and positioned via
   // bounds-over-IPC — preserving the popup's live session either way.
-  readonly NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted";
-  readonly NATIVE_SURFACE_CREATE: "desktop:native-surface:create";
-  readonly NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds";
-  readonly NATIVE_SURFACE_RELEASE: "desktop:native-surface:release";
-  readonly NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window";
-  readonly NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock";
-  readonly NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested";
+  readonly LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted";
+  readonly LIVE_SURFACE_CREATE: "desktop:live-surface:create";
+  readonly LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds";
+  readonly LIVE_SURFACE_RELEASE: "desktop:live-surface:release";
+  readonly LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window";
+  readonly LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock";
+  readonly LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested";
   // Sent by the popout window's own chrome (popout-preload) to main.
-  readonly NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock";
-  readonly NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close";
-  readonly NATIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:native-surface:window-open-external";
+  readonly LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock";
+  readonly LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close";
+  readonly LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external";
 }
 
 declare global {

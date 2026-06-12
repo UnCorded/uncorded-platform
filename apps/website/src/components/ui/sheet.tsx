@@ -2,7 +2,7 @@ import { Dialog } from "@kobalte/core/dialog";
 import { type ComponentProps, type JSX, onCleanup, splitProps } from "solid-js";
 import { cn } from "@/lib/utils";
 import { CoViewModalMount } from "@/co-view/primitives";
-import { pushSurfaceBlocker } from "@/lib/native-surface-host";
+import { pushSurfaceBlocker } from "@/lib/live-surface-host";
 
 const Sheet = Dialog;
 const SheetTrigger = Dialog.Trigger;

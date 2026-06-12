@@ -114,7 +114,6 @@ export const IPC = {
   WEB_APPS_LIST: "desktop:web-apps:list",
   WEB_APPS_ADD: "desktop:web-apps:add",
   WEB_APPS_REMOVE: "desktop:web-apps:remove",
-  WEB_APPS_POP_OUT: "desktop:web-apps:pop-out",
   WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
   WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
 
@@ -128,14 +127,14 @@ export const IPC = {
   // renderer's commit (main re-parents the view, then closes the popout).
   // WINDOW_DOCK/CLOSE/OPEN_EXTERNAL are sent by the popout window's own chrome
   // (popout-preload) back to main.
-  NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted",
-  NATIVE_SURFACE_CREATE: "desktop:native-surface:create",
-  NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds",
-  NATIVE_SURFACE_RELEASE: "desktop:native-surface:release",
-  NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window",
-  NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock",
-  NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested",
-  NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock",
-  NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close",
-  NATIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:native-surface:window-open-external",
+  LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted",
+  LIVE_SURFACE_CREATE: "desktop:live-surface:create",
+  LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds",
+  LIVE_SURFACE_RELEASE: "desktop:live-surface:release",
+  LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window",
+  LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock",
+  LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested",
+  LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock",
+  LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close",
+  LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external",
 } as const satisfies IpcChannelMap;

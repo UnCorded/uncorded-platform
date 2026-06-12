@@ -3,7 +3,7 @@ import { type ComponentProps, type JSX, onCleanup, splitProps } from "solid-js";
 import { X } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { CoViewModalMount } from "@/co-view/primitives";
-import { pushSurfaceBlocker } from "@/lib/native-surface-host";
+import { pushSurfaceBlocker } from "@/lib/live-surface-host";
 
 const Dialog = KobalteDialog;
 const DialogTrigger = KobalteDialog.Trigger;

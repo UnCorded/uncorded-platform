@@ -39,7 +39,7 @@ export function registerLiveSurface(instanceId: string, surfaceId: number): void
 
 /**
  * Drop the live link for a panel instance. Called when the native view is
- * released (panel closed, web app removed). Pairs with nativeSurfaceRelease.
+ * released (panel closed, web app removed). Pairs with liveSurfaceRelease.
  */
 export function clearLiveSurface(instanceId: string): void {
   if (!map().has(instanceId)) return;

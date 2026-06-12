@@ -53,7 +53,16 @@ const WebAppsEnvelopeSchema = z.object({
   urlPrefs: z.record(z.string(), z.unknown()).optional(),
 });
 
-const WebAppPrefSchema = z.enum(["popout", "panel"]);
+const WebAppPrefSchema = z.enum(["dock", "window"]);
+
+// Legacy pref values written before the naming settlement: "panel" meant dock
+// into the workspace, "popout" meant open in a window. Mapped on READ (files
+// migrate the next time they're rewritten); anything else stays unknown and is
+// dropped by the per-entry validation below.
+const LEGACY_PREF_MAP: Record<string, WebAppPref> = {
+  panel: "dock",
+  popout: "window",
+};
 
 let quarantinedThisSession = false;
 let lastQuarantine: string | null = null;
@@ -151,7 +160,8 @@ function read(): WebAppsEnvelope {
   // that fails the stricter WebApp schema rather than trusting the loose parse.
   const cleanPrefs: Record<string, WebAppPref> = {};
   for (const [url, value] of Object.entries(envelope.data.urlPrefs ?? {})) {
-    const parsed = WebAppPrefSchema.safeParse(value);
+    const migrated = typeof value === "string" ? (LEGACY_PREF_MAP[value] ?? value) : value;
+    const parsed = WebAppPrefSchema.safeParse(migrated);
     if (parsed.success) cleanPrefs[url] = parsed.data;
   }
   const cleaned: WebAppsEnvelope = {

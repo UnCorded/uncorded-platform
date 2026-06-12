@@ -109,8 +109,8 @@ describe("web-apps-store — per-URL prefs (global)", () => {
     const { getUrlPref, setUrlPref } = storeModule;
     const url = "https://app.roll20.net/editor/?game=1";
     expect(getUrlPref(url)).toBeNull();
-    setUrlPref(url, "panel");
-    expect(getUrlPref(url)).toBe("panel");
+    setUrlPref(url, "dock");
+    expect(getUrlPref(url)).toBe("dock");
     // Keyed by exact URL — a different page on the same site is independent.
     expect(getUrlPref("https://app.roll20.net/editor/?game=2")).toBeNull();
   });
@@ -118,13 +118,31 @@ describe("web-apps-store — per-URL prefs (global)", () => {
   test("setUrlPref overwrites the prior choice for the same URL", () => {
     const { getUrlPref, setUrlPref } = storeModule;
     const url = "https://miro.com/app/board/x/";
-    setUrlPref(url, "popout");
-    setUrlPref(url, "panel");
-    expect(getUrlPref(url)).toBe("panel");
+    setUrlPref(url, "window");
+    setUrlPref(url, "dock");
+    expect(getUrlPref(url)).toBe("dock");
     const raw = JSON.parse(readFileSync(storePath(), "utf8")) as {
       urlPrefs: Record<string, string>;
     };
-    expect(raw.urlPrefs[url]).toBe("panel");
+    expect(raw.urlPrefs[url]).toBe("dock");
+  });
+
+  test("legacy 'panel'/'popout' pref values migrate on read to 'dock'/'window'", () => {
+    const { getUrlPref, webAppsWereQuarantinedThisSession } = storeModule;
+    mkdirSync(join(tmpRoot, ".uncorded"), { recursive: true });
+    // Files written before the T4 naming settlement carry the old action names.
+    writeFileSync(
+      storePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        servers: {},
+        urlPrefs: { "https://a.test/": "panel", "https://b.test/": "popout" },
+      }),
+      "utf8",
+    );
+    expect(getUrlPref("https://a.test/")).toBe("dock");
+    expect(getUrlPref("https://b.test/")).toBe("window");
+    expect(webAppsWereQuarantinedThisSession()).toBe(false);
   });
 
   test("a legacy file carrying dismissedHosts loads without quarantining", () => {
@@ -150,11 +168,11 @@ describe("web-apps-store — per-URL prefs (global)", () => {
       JSON.stringify({
         schemaVersion: 1,
         servers: {},
-        urlPrefs: { "https://ok.test/": "panel", "https://bad.test/": "nonsense" },
+        urlPrefs: { "https://ok.test/": "dock", "https://bad.test/": "nonsense" },
       }),
       "utf8",
     );
-    expect(getUrlPref("https://ok.test/")).toBe("panel");
+    expect(getUrlPref("https://ok.test/")).toBe("dock");
     expect(getUrlPref("https://bad.test/")).toBeNull();
     expect(webAppsWereQuarantinedThisSession()).toBe(false);
   });

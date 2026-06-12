@@ -109,19 +109,18 @@ const IPC = {
   WEB_APPS_LIST: "desktop:web-apps:list",
   WEB_APPS_ADD: "desktop:web-apps:add",
   WEB_APPS_REMOVE: "desktop:web-apps:remove",
-  WEB_APPS_POP_OUT: "desktop:web-apps:pop-out",
   WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
   WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
-  NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted",
-  NATIVE_SURFACE_CREATE: "desktop:native-surface:create",
-  NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds",
-  NATIVE_SURFACE_RELEASE: "desktop:native-surface:release",
-  NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window",
-  NATIVE_SURFACE_CLAIM_DOCK: "desktop:native-surface:claim-dock",
-  NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested",
-  NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock",
-  NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close",
-  NATIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:native-surface:window-open-external",
+  LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted",
+  LIVE_SURFACE_CREATE: "desktop:live-surface:create",
+  LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds",
+  LIVE_SURFACE_RELEASE: "desktop:live-surface:release",
+  LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window",
+  LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock",
+  LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested",
+  LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock",
+  LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close",
+  LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external",
 } as const satisfies IpcChannelMap;
 
 function ipcInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -433,9 +432,6 @@ contextBridge.exposeInMainWorld("electron", {
     remove(serverId: string, id: string): Promise<void> {
       return ipcInvoke<void>(IPC.WEB_APPS_REMOVE, serverId, id);
     },
-    popOut(url: string): Promise<void> {
-      return ipcInvoke<void>(IPC.WEB_APPS_POP_OUT, url);
-    },
     getPref(url: string): Promise<WebAppPref | null> {
       return ipcInvoke<WebAppPref | null>(IPC.WEB_APPS_GET_PREF, url);
     },
@@ -444,25 +440,25 @@ contextBridge.exposeInMainWorld("electron", {
     },
   },
 
-  nativeSurface: {
+  liveSurface: {
     create(url: string): Promise<number> {
-      return ipcInvoke<number>(IPC.NATIVE_SURFACE_CREATE, url);
+      return ipcInvoke<number>(IPC.LIVE_SURFACE_CREATE, url);
     },
     setBounds(
       surfaceId: number,
       bounds: { x: number; y: number; width: number; height: number },
       visible: boolean,
     ): Promise<void> {
-      return ipcInvoke<void>(IPC.NATIVE_SURFACE_SET_BOUNDS, surfaceId, bounds, visible);
+      return ipcInvoke<void>(IPC.LIVE_SURFACE_SET_BOUNDS, surfaceId, bounds, visible);
     },
     release(surfaceId: number): Promise<void> {
-      return ipcInvoke<void>(IPC.NATIVE_SURFACE_RELEASE, surfaceId);
+      return ipcInvoke<void>(IPC.LIVE_SURFACE_RELEASE, surfaceId);
     },
     openWindow(surfaceId: number): Promise<void> {
-      return ipcInvoke<void>(IPC.NATIVE_SURFACE_OPEN_WINDOW, surfaceId);
+      return ipcInvoke<void>(IPC.LIVE_SURFACE_OPEN_WINDOW, surfaceId);
     },
     claimDock(surfaceId: number): Promise<boolean> {
-      return ipcInvoke<boolean>(IPC.NATIVE_SURFACE_CLAIM_DOCK, surfaceId);
+      return ipcInvoke<boolean>(IPC.LIVE_SURFACE_CLAIM_DOCK, surfaceId);
     },
     onIntercepted(
       handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
@@ -471,8 +467,8 @@ contextBridge.exposeInMainWorld("electron", {
         _event: Electron.IpcRendererEvent,
         payload: { surfaceId: number; url: string; webContentsId: number },
       ): void => handler(payload);
-      ipcRenderer.on(IPC.NATIVE_SURFACE_INTERCEPTED, listener);
-      return () => ipcRenderer.removeListener(IPC.NATIVE_SURFACE_INTERCEPTED, listener);
+      ipcRenderer.on(IPC.LIVE_SURFACE_INTERCEPTED, listener);
+      return () => ipcRenderer.removeListener(IPC.LIVE_SURFACE_INTERCEPTED, listener);
     },
     onDockRequested(
       handler: (payload: { surfaceId: number; url: string; title: string }) => void,
@@ -481,8 +477,8 @@ contextBridge.exposeInMainWorld("electron", {
         _event: Electron.IpcRendererEvent,
         payload: { surfaceId: number; url: string; title: string },
       ): void => handler(payload);
-      ipcRenderer.on(IPC.NATIVE_SURFACE_DOCK_REQUESTED, listener);
-      return () => ipcRenderer.removeListener(IPC.NATIVE_SURFACE_DOCK_REQUESTED, listener);
+      ipcRenderer.on(IPC.LIVE_SURFACE_DOCK_REQUESTED, listener);
+      return () => ipcRenderer.removeListener(IPC.LIVE_SURFACE_DOCK_REQUESTED, listener);
     },
   },
 

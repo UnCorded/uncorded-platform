@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createRoot } from "solid-js";
 
-import { surfaceBlockersActive } from "@/lib/native-surface-host";
+import { surfaceBlockersActive } from "@/lib/live-surface-host";
 import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 // Regression: panel-header dropdown/context menus suspended native panel views

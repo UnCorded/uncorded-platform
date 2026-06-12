@@ -12,8 +12,8 @@
 // → two independent live views (they still share the `persist:browser` cookie jar,
 // so logins carry across).
 //
-// The live view paints ABOVE renderer DOM and lives in main; NativeViewSurface
-// here only reports its on-screen rect (native-surface-host) so main positions
+// The live view paints ABOVE renderer DOM and lives in main; LiveViewSurface
+// here only reports its on-screen rect (live-surface-host) so main positions
 // the view. Release (destroy) is owned elsewhere (App's reconciliation effect /
 // web-app removal), so the view survives transient unmounts.
 //
@@ -25,12 +25,12 @@ import { Globe } from "lucide-solid";
 import type { WebAppPanelContent } from "@uncorded/protocol";
 import { isElectron } from "@/lib/electron";
 import { liveSurfaceId, peekLiveSurface, registerLiveSurface } from "@/lib/live-surfaces";
-import { nativeSurfaceCreate, nativeSurfaceRelease } from "@/stores/web-apps";
-import * as nativeSurfaceHost from "@/lib/native-surface-host";
-import { NativeViewSurface } from "@/components/web-apps/native-view-surface";
+import { liveSurfaceCreate, liveSurfaceRelease } from "@/stores/web-apps";
+import * as liveSurfaceHost from "@/lib/live-surface-host";
+import { LiveViewSurface } from "@/components/web-apps/live-view-surface";
 
 // Guard against a double-create when a panel remounts while its first
-// nativeSurfaceCreate is still in flight: the live-surfaces map isn't populated
+// liveSurfaceCreate is still in flight: the live-surfaces map isn't populated
 // until the await resolves, so peekLiveSurface alone can't dedupe an overlap.
 // Keyed by instanceId; cleared once create settles.
 const creating = new Set<string>();
@@ -48,20 +48,20 @@ export function WebAppPanel(props: { content: WebAppPanelContent; panelId: strin
     // Kick the rect poll: a panel that mounts while its tab is inactive has a 0×0
     // placeholder, and ResizeObserver doesn't reliably fire on the later
     // activation transition (mirrors the old portalHost.requestSync kick).
-    nativeSurfaceHost.requestSync();
+    liveSurfaceHost.requestSync();
 
     const instanceId = props.content.instanceId;
     if (peekLiveSurface(instanceId) !== null) return;
     if (creating.has(instanceId)) return;
     creating.add(instanceId);
-    void nativeSurfaceCreate(props.content.url)
+    void liveSurfaceCreate(props.content.url)
       .then((sid) => {
         if (sid === null) return;
         // A dock flow (or a racing remount) may have registered a surface for
         // this instance while ours was in flight. If so, our freshly-created view
         // is redundant — release it so it doesn't leak.
         if (peekLiveSurface(instanceId) !== null) {
-          void nativeSurfaceRelease(sid);
+          void liveSurfaceRelease(sid);
           return;
         }
         registerLiveSurface(instanceId, sid);
@@ -98,7 +98,7 @@ export function WebAppPanel(props: { content: WebAppPanelContent; panelId: strin
           </div>
         }
       >
-        {(id) => <NativeViewSurface surfaceId={id()} />}
+        {(id) => <LiveViewSurface surfaceId={id()} />}
       </Show>
     </Show>
   );
