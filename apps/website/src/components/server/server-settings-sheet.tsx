@@ -230,6 +230,29 @@ function AccessSection(props: { serverId: string }) {
   // Initial load — the section mounts fresh each time the Members tab activates.
   void loadAll();
 
+  // Liveness: join requests and invite settlements land server-side while the
+  // owner sits on the open tab, and Central has no push channel. A quiet poll
+  // plus a throttled focus refresh keep the lists current; both are scoped to
+  // the section's lifetime (this data is only visible here), so onCleanup
+  // tears them down when the tab switches or the sheet closes. The poll skips
+  // while a load or row action is in flight so it can't stomp the two-click
+  // confirm latches mid-decision.
+  const ACCESS_POLL_INTERVAL_MS = 30_000;
+  const pollHandle = setInterval(() => {
+    if (!loading() && busyKey() === null) void loadAll();
+  }, ACCESS_POLL_INTERVAL_MS);
+  let lastFocusRefresh = 0;
+  const onFocus = (): void => {
+    if (Date.now() - lastFocusRefresh < 5_000) return;
+    lastFocusRefresh = Date.now();
+    if (!loading() && busyKey() === null) void loadAll();
+  };
+  window.addEventListener("focus", onFocus);
+  onCleanup(() => {
+    clearInterval(pollHandle);
+    window.removeEventListener("focus", onFocus);
+  });
+
   async function handleInvite(e: Event): Promise<void> {
     e.preventDefault();
     const username = inviteName().trim();
