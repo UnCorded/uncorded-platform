@@ -19,7 +19,11 @@ import { runServerContainer, SERVER_IMAGE } from "./server-runtime";
 // Keep this in sync with Dockerfile's COPY plugins/ lines. Adding a slug here
 // without shipping the plugin in the image will cause the runtime's plugin
 // resolver to bail on boot (fail-closed per engineering principles).
-const CORE_PLUGIN_SLUGS = ["text-channels", "voice-channels"] as const;
+// Exported for the plugin-dev reservation parity test: every core slug must
+// also be reserved in plugin-dev-templates (the runtime's core-plugins dir
+// shadows /plugins, so a dev plugin with a core slug silently loads the core
+// plugin instead).
+export const CORE_PLUGIN_SLUGS = ["text-channels", "voice-channels"] as const;
 const HEALTH_TIMEOUT_MS = 60_000;
 const HEARTBEAT_TIMEOUT_MS = 60_000;
 // After the first heartbeat lands the runtime may still be advertising the

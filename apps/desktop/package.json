@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@uncorded/shared": "workspace:*",
     "electron": "^42.0.0",
     "electron-builder": "^26.15.2",
     "typescript": "^5.0.0"

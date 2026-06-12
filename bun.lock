@@ -28,7 +28,7 @@
     },
     "apps/desktop": {
       "name": "@uncorded/desktop",
-      "version": "0.0.29",
+      "version": "0.0.33",
       "dependencies": {
         "@napi-rs/keyring": "^1.3.0",
         "@uncorded/electron-bridge": "workspace:*",
@@ -38,6 +38,7 @@
       },
       "devDependencies": {
         "@types/node": "^22.0.0",
+        "@uncorded/shared": "workspace:*",
         "electron": "^42.0.0",
         "electron-builder": "^26.15.2",
         "typescript": "^5.0.0",

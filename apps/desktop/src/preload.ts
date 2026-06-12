@@ -1,9 +1,19 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   Account,
+  AgentDetection,
   AvatarUploadUrl,
   CloudflareConnectionState,
+  CreateDevPluginInput,
+  CreateDevPluginResult,
+  DevPlugin,
+  DevPluginDeployProgress,
+  DevPluginInstallTarget,
+  InstallDevPluginOptions,
+  InstallDevPluginResult,
   IpcChannelMap,
+  LaunchAgentResult,
+  UninstallDevPluginResult,
   ProvisionDoneEvent,
   ProvisionProgressEvent,
   RuntimeCheckOutcome,
@@ -113,6 +123,19 @@ const IPC = {
   WEB_APPS_REMOVE: "desktop:web-apps:remove",
   WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
   WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
+
+  // Plugin Development Workspace
+  PLUGIN_DEV_LIST: "desktop:plugin-dev:list",
+  PLUGIN_DEV_CREATE: "desktop:plugin-dev:create",
+  PLUGIN_DEV_DELETE: "desktop:plugin-dev:delete",
+  PLUGIN_DEV_OPEN_FOLDER: "desktop:plugin-dev:open-folder",
+  PLUGIN_DEV_COPY_PROMPT: "desktop:plugin-dev:copy-prompt",
+  PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent",
+  PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent",
+  PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server",
+  PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets",
+  PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy",
+  PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress",
   LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted",
   LIVE_SURFACE_CREATE: "desktop:live-surface:create",
   LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds",
@@ -454,6 +477,58 @@ contextBridge.exposeInMainWorld("electron", {
     },
     setPref(url: string, action: WebAppPref): Promise<void> {
       return ipcInvoke<void>(IPC.WEB_APPS_SET_PREF, url, action);
+    },
+  },
+
+  pluginDev: {
+    list(): Promise<DevPlugin[]> {
+      return ipcInvoke<DevPlugin[]>(IPC.PLUGIN_DEV_LIST);
+    },
+    create(input: CreateDevPluginInput): Promise<CreateDevPluginResult> {
+      return ipcInvoke<CreateDevPluginResult>(IPC.PLUGIN_DEV_CREATE, input);
+    },
+    remove(slug: string): Promise<boolean> {
+      return ipcInvoke<boolean>(IPC.PLUGIN_DEV_DELETE, slug);
+    },
+    openFolder(slug: string): Promise<void> {
+      return ipcInvoke<void>(IPC.PLUGIN_DEV_OPEN_FOLDER, slug);
+    },
+    copyPrompt(slug: string): Promise<string> {
+      return ipcInvoke<string>(IPC.PLUGIN_DEV_COPY_PROMPT, slug);
+    },
+    detectAgent(): Promise<AgentDetection> {
+      return ipcInvoke<AgentDetection>(IPC.PLUGIN_DEV_DETECT_AGENT);
+    },
+    launchAgent(slug: string): Promise<LaunchAgentResult> {
+      return ipcInvoke<LaunchAgentResult>(IPC.PLUGIN_DEV_LAUNCH_AGENT, slug);
+    },
+    listInstallTargets(slug: string): Promise<DevPluginInstallTarget[]> {
+      return ipcInvoke<DevPluginInstallTarget[]>(IPC.PLUGIN_DEV_LIST_TARGETS, slug);
+    },
+    installIntoServer(
+      slug: string,
+      serverId: string,
+      options?: InstallDevPluginOptions,
+    ): Promise<InstallDevPluginResult> {
+      return ipcInvoke<InstallDevPluginResult>(
+        IPC.PLUGIN_DEV_INSTALL_INTO_SERVER,
+        slug,
+        serverId,
+        options ?? {},
+      );
+    },
+    uninstallFromServer(
+      slug: string,
+      serverId: string,
+      deleteData: boolean,
+    ): Promise<UninstallDevPluginResult> {
+      return ipcInvoke<UninstallDevPluginResult>(IPC.PLUGIN_DEV_UNDEPLOY, slug, serverId, deleteData);
+    },
+    onDeployProgress(handler: (event: DevPluginDeployProgress) => void): CleanupFn {
+      const listener = (_event: Electron.IpcRendererEvent, payload: DevPluginDeployProgress) =>
+        handler(payload);
+      ipcRenderer.on(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, listener);
+      return () => ipcRenderer.removeListener(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, listener);
     },
   },
 

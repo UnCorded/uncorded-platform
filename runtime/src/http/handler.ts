@@ -6,6 +6,7 @@ import { join, resolve, normalize, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, rename, unlink, readdir, stat } from "node:fs/promises";
 import { CapabilityChecker } from "../capabilities/checker";
+import { PLUGIN_API_VERSION } from "../api-version";
 import { sniffMime, extensionForMime, INLINE_SAFE_MIMES } from "./mime-sniff";
 import { verifyFileSig } from "../signing/files";
 import { extractAuth, requireMinLevel } from "./auth";
@@ -523,6 +524,10 @@ function handleHealth(
   return Response.json({
     status: "ok",
     version: deps.runtimeVersion,
+    // The plugin-SDK contract version (api-version.ts), distinct from the
+    // release version above. Lets the desktop preflight a dev plugin's
+    // manifest api_version against this server before deploying to it.
+    plugin_api_version: PLUGIN_API_VERSION,
     plugins: deps.pluginRegistry.getPluginCount(),
     uptime: uptimeSeconds,
   });

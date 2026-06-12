@@ -119,6 +119,24 @@ export const IPC = {
   WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
   WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
 
+  // Plugin Development Workspace — desktop-owned, machine-global plugin dev
+  // folders (~/.uncorded/plugin-dev/<slug>/) that survive server deletion.
+  // CREATE scaffolds + copies the agent prompt to the clipboard; LAUNCH_AGENT
+  // opens a terminal running the claude CLI in the plugin folder;
+  // INSTALL_INTO_SERVER is the deploy seam (NOT_IMPLEMENTED until the deploy
+  // phase lands).
+  PLUGIN_DEV_LIST: "desktop:plugin-dev:list",
+  PLUGIN_DEV_CREATE: "desktop:plugin-dev:create",
+  PLUGIN_DEV_DELETE: "desktop:plugin-dev:delete",
+  PLUGIN_DEV_OPEN_FOLDER: "desktop:plugin-dev:open-folder",
+  PLUGIN_DEV_COPY_PROMPT: "desktop:plugin-dev:copy-prompt",
+  PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent",
+  PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent",
+  PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server",
+  PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets",
+  PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy",
+  PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress",
+
   // In-app native popup views (WebContentsView). INTERCEPTED is a main→renderer
   // push: main captured a Browser Panel guest's window.open into a native view
   // (preserving its live session) and routes it to the owning panel by

@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
   dialog,
   ipcMain,
@@ -28,6 +29,25 @@ import { deleteSecret, encryptionSecretKey, getSecret, getSecretStoreStatus, mig
 import { registerServer, getServerRecord, removeServerRecord, listServerRecords, registryWasQuarantinedThisSession, lastQuarantinePath } from "./server-registry";
 import { listWebApps, addWebApp, removeWebApp, getUrlPref, setUrlPref } from "./web-apps-store";
 import type { WebAppPref } from "./web-apps-store";
+import {
+  createDevPlugin,
+  deleteDevPlugin,
+  devPluginPath,
+  listDevPlugins,
+  regenerateDevPrompt,
+} from "./plugin-dev-store";
+import { detectAgent, launchAgentTerminal } from "./plugin-dev-agent";
+import {
+  deployDevPlugin,
+  readInstallTargetInfo,
+  undeployDevPlugin,
+  type DeployDeps,
+} from "./plugin-dev-deploy";
+import { releaseServerLifecycle, tryAcquireServerLifecycle } from "./server-lifecycle-lock";
+import {
+  PLUGIN_DEV_SLUG_MAX,
+  validateDevPluginSlug,
+} from "./plugin-dev-templates";
 import type {
   ScreenSharePermissionStatus,
   ScreenShareSelection,
@@ -2392,40 +2412,33 @@ function registerIpcHandlers(): void {
       throw ipcError(IPC.VOICE_SET_HOSTNAME, new Error(`unknown server ${serverId}`));
     }
 
-    // Persist before rebuilding so a crash mid-rebuild leaves the registry
-    // pointed at the new hostname; the next restoreServerContainers run
-    // picks it up and re-rebuilds from a clean slate.
-    const nextRecord = { ...record };
-    if (hostname === null) {
-      delete nextRecord.voicePublicHostname;
-    } else {
-      nextRecord.voicePublicHostname = hostname;
+    if (!tryAcquireServerLifecycle(serverId)) {
+      throw ipcError(
+        IPC.VOICE_SET_HOSTNAME,
+        new Error("Another operation (install or runtime update) is running for this server."),
+      );
     }
-    registerServer(serverId, nextRecord);
+    try {
+      // Persist before rebuilding so a crash mid-rebuild leaves the registry
+      // pointed at the new hostname; the next restoreServerContainers run
+      // picks it up and re-rebuilds from a clean slate.
+      const nextRecord = { ...record };
+      if (hostname === null) {
+        delete nextRecord.voicePublicHostname;
+      } else {
+        nextRecord.voicePublicHostname = hostname;
+      }
+      registerServer(serverId, nextRecord);
 
-    // Rebuild the container with the updated env. Same shape as the launch
-    // path's restoreServerContainers — keep them in lock-step on tmpfs flags
-    // and tunnel-token piping.
-    await removeIfExists(record.containerId);
-    const tunnelToken = getSecret(tunnelSecretKey(serverId)) ?? undefined;
-    let runtimeEncryptionSecret = getSecret(encryptionSecretKey(serverId));
-    if (!runtimeEncryptionSecret) {
-      runtimeEncryptionSecret = randomBytes(32).toString("hex");
-      setSecret(encryptionSecretKey(serverId), runtimeEncryptionSecret);
+      // Rebuild via the shared recreate sequence (registry-driven, tunnel
+      // token piped at create time) — same path dev-plugin installs use.
+      await removeIfExists(record.containerId);
+      const newContainerId = await startServerFromRegistry(serverId);
+      log.info("voice hostname updated", { serverId, hostname, containerId: newContainerId });
+      return { containerId: newContainerId };
+    } finally {
+      releaseServerLifecycle(serverId);
     }
-    const newContainerId = await runServerContainer({
-      volumePath: record.volumePath,
-      hostPort: record.hostPort,
-      tunnelToken,
-      runtimeEncryptionSecret,
-      ...(record.tunnelPublicHostname ? { tunnelPublicHostname: record.tunnelPublicHostname } : {}),
-      ...(hostname !== null ? { voicePublicHostname: hostname } : {}),
-      ...(record.imageSignature ? { imageSignature: record.imageSignature } : {}),
-      devPluginFrontendMounts: devPluginFrontendMounts(),
-    });
-    registerServer(serverId, { ...nextRecord, containerId: newContainerId });
-    log.info("voice hostname updated", { serverId, hostname, containerId: newContainerId });
-    return { containerId: newContainerId };
   });
 
   // Runtime update orchestration (Phase 01 §8). Per D3/O8 the desktop is the
@@ -2686,6 +2699,217 @@ function registerIpcHandlers(): void {
       throw ipcError(IPC.WEB_APPS_SET_PREF, new Error("action must be 'dock' or 'window'"));
     }
     setUrlPref(url, action satisfies WebAppPref);
+  });
+
+  // Plugin Development Workspace — desktop-owned, machine-global dev plugin
+  // folders under ~/.uncorded/plugin-dev/<slug>/. Storage is the directory
+  // tree itself (no central index); every slug-taking handler resolves through
+  // devPluginPath(), which is the path-traversal guard. CREATE/COPY_PROMPT own
+  // the clipboard side effect here in main (the renderer has no clipboard IPC).
+  const requireDevPluginSlug = (channel: string, slug: unknown): string => {
+    if (
+      typeof slug !== "string" ||
+      slug.length === 0 ||
+      slug.length > PLUGIN_DEV_SLUG_MAX ||
+      !validateDevPluginSlug(slug).ok
+    ) {
+      throw ipcError(channel, new Error("slug must be a valid dev plugin slug"));
+    }
+    return slug;
+  };
+  handleIpc(IPC.PLUGIN_DEV_LIST, () => listDevPlugins());
+  handleIpc(IPC.PLUGIN_DEV_CREATE, (_event, input: unknown) => {
+    if (!input || typeof input !== "object") {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("input must be an object"));
+    }
+    const { slug, displayName, description, idea, author, pluginType, extendsSlug, icon } =
+      input as Record<string, unknown>;
+    // Bound the free-text fields here; the store re-validates slug grammar,
+    // reservations, and collisions and answers with typed error codes the
+    // dialog renders inline (so those are NOT thrown as ipcError).
+    if (typeof slug !== "string" || slug.length === 0 || slug.length > PLUGIN_DEV_SLUG_MAX) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("slug must be a string ≤50 chars"));
+    }
+    if (typeof displayName !== "string" || displayName.length === 0 || displayName.length > 100) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("displayName must be a string ≤100 chars"));
+    }
+    if (typeof description !== "string" || description.length === 0 || description.length > 500) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("description must be a string ≤500 chars"));
+    }
+    if (typeof idea !== "string" || idea.length > 20_000) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("idea must be a string ≤20000 chars"));
+    }
+    if (typeof author !== "string" || author.length === 0 || author.length > 100) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("author must be a string ≤100 chars"));
+    }
+    if (pluginType !== "standalone" && pluginType !== "extension") {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("pluginType must be standalone|extension"));
+    }
+    if (extendsSlug !== undefined && (typeof extendsSlug !== "string" || extendsSlug.length > PLUGIN_DEV_SLUG_MAX)) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("extendsSlug must be a string ≤50 chars"));
+    }
+    if (icon !== undefined && (typeof icon !== "string" || icon.length === 0 || icon.length > 64)) {
+      throw ipcError(IPC.PLUGIN_DEV_CREATE, new Error("icon must be a string ≤64 chars"));
+    }
+    const result = createDevPlugin({
+      slug,
+      displayName,
+      description,
+      idea,
+      author,
+      pluginType,
+      ...(extendsSlug !== undefined ? { extendsSlug } : {}),
+      ...(icon !== undefined ? { icon } : {}),
+    });
+    if (!result.ok) return result;
+    let promptCopied = false;
+    try {
+      clipboard.writeText(result.prompt);
+      promptCopied = true;
+    } catch (err) {
+      log.warn("plugin-dev clipboard write failed", { err });
+    }
+    return { ok: true, plugin: result.plugin, promptCopied };
+  });
+  handleIpc(IPC.PLUGIN_DEV_DELETE, (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_DELETE, slug);
+    return deleteDevPlugin(valid, (p) => shell.trashItem(p));
+  });
+  handleIpc(IPC.PLUGIN_DEV_OPEN_FOLDER, async (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_OPEN_FOLDER, slug);
+    const dir = devPluginPath(valid);
+    if (dir === null) {
+      throw ipcError(IPC.PLUGIN_DEV_OPEN_FOLDER, new Error("dev plugin not found"));
+    }
+    const failure = await shell.openPath(dir);
+    if (failure.length > 0) {
+      throw ipcError(IPC.PLUGIN_DEV_OPEN_FOLDER, new Error(failure));
+    }
+  });
+  handleIpc(IPC.PLUGIN_DEV_COPY_PROMPT, (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_COPY_PROMPT, slug);
+    const prompt = regenerateDevPrompt(valid);
+    if (prompt === null) {
+      throw ipcError(IPC.PLUGIN_DEV_COPY_PROMPT, new Error("dev plugin not found"));
+    }
+    clipboard.writeText(prompt);
+    return prompt;
+  });
+  handleIpc(IPC.PLUGIN_DEV_DETECT_AGENT, () => detectAgent());
+  handleIpc(IPC.PLUGIN_DEV_LAUNCH_AGENT, async (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_LAUNCH_AGENT, slug);
+    const dir = devPluginPath(valid);
+    if (dir === null) {
+      return { ok: false, code: "PLUGIN_NOT_FOUND", message: "dev plugin not found" };
+    }
+    // Copy first: every launch failure degrades to "the prompt is on your
+    // clipboard — run claude in the plugin folder yourself".
+    const prompt = regenerateDevPrompt(valid);
+    if (prompt !== null) {
+      try {
+        clipboard.writeText(prompt);
+      } catch (err) {
+        log.warn("plugin-dev clipboard write failed", { err });
+      }
+    }
+    return launchAgentTerminal(dir, {
+      // Preferred path: the documented claude-cli:// deep link (opens a
+      // session in the plugin dir with the prompt pre-filled). The
+      // hand-rolled terminal spawn remains the fallback.
+      openExternalFn: (url) => shell.openExternal(url),
+      ...(prompt !== null ? { deepLinkPrompt: prompt } : {}),
+    });
+  });
+  // Restart a registry server with its current persisted settings — the same
+  // docker-run recreate sequence as VOICE_SET_HOSTNAME (the tunnel token is
+  // piped at create time, so a bare `docker start` is never correct). Reads
+  // the record fresh so a containerId persisted mid-flow isn't clobbered.
+  const startServerFromRegistry = async (serverId: string): Promise<string> => {
+    const record = getServerRecord(serverId);
+    if (!record) throw new Error(`unknown server ${serverId}`);
+    const tunnelToken = getSecret(tunnelSecretKey(serverId)) ?? undefined;
+    let runtimeEncryptionSecret = getSecret(encryptionSecretKey(serverId));
+    if (!runtimeEncryptionSecret) {
+      runtimeEncryptionSecret = randomBytes(32).toString("hex");
+      setSecret(encryptionSecretKey(serverId), runtimeEncryptionSecret);
+    }
+    const newContainerId = await runServerContainer({
+      volumePath: record.volumePath,
+      hostPort: record.hostPort,
+      tunnelToken,
+      runtimeEncryptionSecret,
+      ...(record.tunnelPublicHostname ? { tunnelPublicHostname: record.tunnelPublicHostname } : {}),
+      ...(record.voicePublicHostname ? { voicePublicHostname: record.voicePublicHostname } : {}),
+      ...(record.imageSignature ? { imageSignature: record.imageSignature } : {}),
+      devPluginFrontendMounts: devPluginFrontendMounts(),
+    });
+    registerServer(serverId, { ...record, containerId: newContainerId });
+    return newContainerId;
+  };
+
+  const pluginDevDeployDeps = (slug: string, serverId: string): DeployDeps => ({
+    resolveDevPluginPath: devPluginPath,
+    getServerRecord: (id) => {
+      const record = getServerRecord(id);
+      return record
+        ? { containerId: record.containerId, volumePath: record.volumePath, hostPort: record.hostPort }
+        : null;
+    },
+    getDockerStatus: () => docker.getDockerStatus(),
+    removeContainer: (containerId) => removeIfExists(containerId),
+    startServerContainer: startServerFromRegistry,
+    getAdminToken: async (id) => {
+      try {
+        const { token } = await central.getServerToken(id);
+        return token;
+      } catch {
+        return null; // Central unreachable — verify degrades, deploy stands
+      }
+    },
+    onProgress: (event) => {
+      // Mirror every step into the structured log — when a user reports a
+      // failed install, this is the trail that says how far it got.
+      log.info("plugin-dev deploy step", { slug, serverId, ...event });
+      sendToWindow(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, { slug, serverId, ...event });
+    },
+  });
+
+  handleIpc(IPC.PLUGIN_DEV_LIST_TARGETS, (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_LIST_TARGETS, slug);
+    return listServerRecords().flatMap(({ serverId, record }) => {
+      const info = readInstallTargetInfo(record.volumePath, valid);
+      // Unreadable server.json → not a valid target; the deploy preflight
+      // would fail closed on it anyway.
+      return info ? [{ serverId, ...info }] : [];
+    });
+  });
+  handleIpc(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, (_event, slug: unknown, serverId: unknown, options: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, slug);
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, new Error("serverId must be a non-empty string"));
+    }
+    const o = (options && typeof options === "object" ? options : {}) as Record<string, unknown>;
+    return deployDevPlugin(
+      valid,
+      serverId,
+      {
+        consentUnsigned: o["consentUnsigned"] === true,
+        overwriteExisting: o["overwriteExisting"] === true,
+      },
+      pluginDevDeployDeps(valid, serverId),
+    );
+  });
+  handleIpc(IPC.PLUGIN_DEV_UNDEPLOY, (_event, slug: unknown, serverId: unknown, deleteData: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_UNDEPLOY, slug);
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.PLUGIN_DEV_UNDEPLOY, new Error("serverId must be a non-empty string"));
+    }
+    return undeployDevPlugin(
+      valid,
+      serverId,
+      { deleteData: deleteData === true },
+      pluginDevDeployDeps(valid, serverId),
+    );
   });
   // Position an in-app native popup view over a renderer-reported rect (CSS px ==
   // DIPs at zoom 1; the shell fills the content area whose origin is 0,0 under the

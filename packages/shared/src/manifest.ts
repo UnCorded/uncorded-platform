@@ -238,6 +238,13 @@ export type ManifestResult =
 /** Lowercase alphanumeric with hyphens, no leading/trailing/consecutive hyphens */
 const SLUG_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
+/**
+ * The canonical plugin-slug grammar, exported for UIs that validate slugs
+ * before a manifest exists (e.g. the desktop Plugin Dev workspace's New
+ * Plugin form). Same object as the validator's internal SLUG_RE.
+ */
+export const PLUGIN_SLUG_RE = SLUG_RE;
+
 /** Strict semver: MAJOR.MINOR.PATCH (no pre-release/build metadata for now) */
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 

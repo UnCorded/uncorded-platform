@@ -259,6 +259,137 @@ export interface WebApp {
  *  values "panel"/"popout" are migrated on read (apps/desktop/web-apps-store). */
 export type WebAppPref = "dock" | "window";
 
+// --- Plugin Development Workspace -----------------------------------------
+// Desktop-owned plugin dev folders under ~/.uncorded/plugin-dev/<slug>/ —
+// the persistent source of truth for user-authored plugins (server copies
+// are disposable). Directory-scan-as-truth: the folders ARE the registry;
+// the desktop store (apps/desktop/plugin-dev-store) derives these shapes.
+
+/** Health of a dev plugin's manifest.json — agents edit these files live, so
+ *  a broken manifest is a state to surface, not an error to hide. */
+export type DevPluginManifestStatus = "ok" | "invalid" | "missing";
+
+export interface DevPlugin {
+  slug: string;
+  displayName: string;
+  description: string;
+  /** Absolute path of the plugin folder on this machine. */
+  path: string;
+  /** Epoch ms; from the sidecar metadata, or folder mtime when absent. */
+  createdAt: number;
+  /** Scaffold template version at creation; null for hand-dropped folders. */
+  scaffoldVersion: number | null;
+  manifestStatus: DevPluginManifestStatus;
+}
+
+export interface CreateDevPluginInput {
+  slug: string;
+  displayName: string;
+  description: string;
+  /** The user's "what should it do?" text — feeds the agent prompt. */
+  idea: string;
+  author: string;
+  pluginType: "standalone" | "extension";
+  /** Required when pluginType is "extension". */
+  extendsSlug?: string;
+  /** Lucide icon name; defaults to "Puzzle". */
+  icon?: string;
+}
+
+export type CreateDevPluginErrorCode =
+  | "SLUG_INVALID"
+  | "SLUG_RESERVED"
+  | "SLUG_TAKEN"
+  | "WRITE_FAILED";
+
+export type CreateDevPluginResult =
+  | { ok: true; plugin: DevPlugin; promptCopied: boolean }
+  | { ok: false; code: CreateDevPluginErrorCode; message: string };
+
+export interface AgentDetection {
+  found: boolean;
+  /** Resolved executable path when found. */
+  path?: string;
+}
+
+export type LaunchAgentResult =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "AGENT_NOT_FOUND" | "NO_TERMINAL" | "SPAWN_FAILED" | "PLUGIN_NOT_FOUND";
+      message: string;
+    };
+
+// "Install into server" — copies a dev plugin into a locally-hosted server's
+// volume and restarts the server (the runtime loads plugins only at boot).
+// These unions are the single source for the desktop deploy module
+// (apps/desktop/plugin-dev-deploy) and the renderer's progress UI.
+
+export type DevPluginDeployStep =
+  | "validate"
+  | "stop-container"
+  | "copy-files"
+  | "write-config"
+  | "start-container"
+  | "wait-health"
+  | "verify-plugin"
+  | "done";
+
+export type DevPluginDeployErrorCode =
+  | "WORKSPACE_NOT_FOUND"
+  | "MANIFEST_INVALID"
+  | "SLUG_MISMATCH"
+  | "SLUG_RESERVED"
+  | "SERVER_NOT_FOUND"
+  | "DOCKER_NOT_RUNNING"
+  | "RUNTIME_TOO_OLD"
+  | "API_VERSION_INCOMPATIBLE"
+  | "CONSENT_REQUIRED"
+  | "SLUG_CONFLICT_EXISTING"
+  | "CONFIG_READ_FAILED"
+  | "CONFIG_WRITE_FAILED"
+  | "PLUGIN_TOO_LARGE"
+  | "COPY_FAILED"
+  | "CONTAINER_START_FAILED"
+  | "HEALTH_TIMEOUT"
+  | "PLUGIN_FAILED_TO_LOAD"
+  | "DEPLOY_IN_PROGRESS";
+
+export interface DevPluginDeployProgress {
+  slug: string;
+  serverId: string;
+  step: DevPluginDeployStep;
+  status: "running" | "completed" | "warning";
+  message: string;
+  detail?: string;
+}
+
+export interface InstallDevPluginOptions {
+  /** User accepted enabling unsigned local plugins on this server. */
+  consentUnsigned?: boolean;
+  /** Replace a /plugins/<slug> folder this flow doesn't own. */
+  overwriteExisting?: boolean;
+}
+
+export type InstallDevPluginResult =
+  | { ok: true; containerId: string; pluginStatus: "ready" | "starting" | "unknown" }
+  | { ok: false; code: DevPluginDeployErrorCode | "INSTALL_FAILED" | "NOT_IMPLEMENTED"; message: string };
+
+export type UninstallDevPluginResult =
+  | { ok: true }
+  | { ok: false; code: DevPluginDeployErrorCode | "UNINSTALL_FAILED"; message: string };
+
+/** A locally-hosted server a dev plugin could be installed into, with the
+ *  facts the picker needs up front (consent + already-installed). Names come
+ *  from the renderer's servers store — main only knows ids. */
+export interface DevPluginInstallTarget {
+  serverId: string;
+  /** This slug is already in the server's installed_plugins (redeploy). */
+  deployed: boolean;
+  /** server.json already allows unsigned plugins (no consent step needed). */
+  allowUnsigned: boolean;
+}
+
 export interface ElectronBridge {
   central: {
     register(
@@ -550,6 +681,53 @@ export interface ElectronBridge {
     getPref(url: string): Promise<WebAppPref | null>;
     setPref(url: string, action: WebAppPref): Promise<void>;
   };
+  // Plugin Development Workspace — desktop-owned, machine-GLOBAL (not
+  // per-server): persistent plugin dev folders under
+  // ~/.uncorded/plugin-dev/<slug>/ that survive server deletion. The renderer
+  // gates the whole surface on isElectron(). Creation always copies the
+  // generated agent prompt to the clipboard; launching an external agent
+  // terminal is best-effort on top of that.
+  pluginDev: {
+    list(): Promise<DevPlugin[]>;
+    /** Scaffolds the folder, writes PROMPT.md, and copies the full agent
+     *  prompt to the clipboard (promptCopied reports that side effect). */
+    create(input: CreateDevPluginInput): Promise<CreateDevPluginResult>;
+    /** Moves the plugin folder to the OS trash (recoverable). Resolves false
+     *  when the slug doesn't resolve to a workspace folder. */
+    remove(slug: string): Promise<boolean>;
+    /** Reveal the plugin folder in the OS file manager. */
+    openFolder(slug: string): Promise<void>;
+    /** Regenerate the agent prompt (PROMPT.md rewritten), copy it to the
+     *  clipboard, and return it. */
+    copyPrompt(slug: string): Promise<string>;
+    /** Is the `claude` CLI on PATH? Cached by the renderer per sheet-open. */
+    detectAgent(): Promise<AgentDetection>;
+    /** Copy the prompt, then open a terminal in the plugin folder running
+     *  the agent. Failure modes degrade to "prompt is on your clipboard". */
+    launchAgent(slug: string): Promise<LaunchAgentResult>;
+    /** Locally-hosted servers this plugin could be installed into. */
+    listInstallTargets(slug: string): Promise<DevPluginInstallTarget[]>;
+    /**
+     * Copy the dev plugin into the server's volume and restart the server.
+     * CONSENT_REQUIRED / SLUG_CONFLICT_EXISTING results prompt the UI to ask
+     * and retry with the matching option set. Progress streams on
+     * onDeployProgress for the duration of the call.
+     */
+    installIntoServer(
+      slug: string,
+      serverId: string,
+      options?: InstallDevPluginOptions,
+    ): Promise<InstallDevPluginResult>;
+    /** Remove the plugin from a server (files + registration + restart).
+     *  Its /data stays unless deleteData — redeploys keep their state. */
+    uninstallFromServer(
+      slug: string,
+      serverId: string,
+      deleteData: boolean,
+    ): Promise<UninstallDevPluginResult>;
+    /** Deploy/undeploy step stream (main → renderer push). */
+    onDeployProgress(handler: (event: DevPluginDeployProgress) => void): CleanupFn;
+  };
   // In-app native popup views. When a Browser Panel guest calls `window.open`,
   // main captures it (via `setWindowOpenHandler`'s `createWindow`) into a fresh
   // `WebContentsView` instead of an OS window — preserving the popup's live
@@ -745,6 +923,19 @@ export interface IpcChannelMap {
   readonly WEB_APPS_REMOVE: "desktop:web-apps:remove";
   readonly WEB_APPS_GET_PREF: "desktop:web-apps:get-pref";
   readonly WEB_APPS_SET_PREF: "desktop:web-apps:set-pref";
+
+  // Plugin Development Workspace (desktop-owned, global)
+  readonly PLUGIN_DEV_LIST: "desktop:plugin-dev:list";
+  readonly PLUGIN_DEV_CREATE: "desktop:plugin-dev:create";
+  readonly PLUGIN_DEV_DELETE: "desktop:plugin-dev:delete";
+  readonly PLUGIN_DEV_OPEN_FOLDER: "desktop:plugin-dev:open-folder";
+  readonly PLUGIN_DEV_COPY_PROMPT: "desktop:plugin-dev:copy-prompt";
+  readonly PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent";
+  readonly PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent";
+  readonly PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server";
+  readonly PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets";
+  readonly PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy";
+  readonly PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress";
 
   // In-app native popup views (WebContentsView). A Browser Panel guest's
   // window.open is captured into a native view hosted in a free OS popout window

@@ -23,6 +23,7 @@ import {
 } from "./desktop-secrets";
 import * as docker from "./docker";
 import { recreateContainerForServer } from "./recreate-container";
+import { withServerLifecycle } from "./server-lifecycle-lock";
 import { removeIfExists, runServerContainer, SERVER_IMAGE } from "./server-runtime";
 import {
   createPreUpdateBackup,
@@ -506,6 +507,18 @@ export async function checkForUpdate(
 }
 
 export async function performUpdateForServer(
+  serverId: string,
+  deps: OrchestratorDeps = {},
+): Promise<RuntimeUpdateOutcome> {
+  // Exclude the other container-lifecycle flows (dev-plugin deploys,
+  // voice-hostname rebuilds) for the whole update — every one of them
+  // docker-rms and re-runs the same container, and an interleaving strands a
+  // dead container id in the registry. ServerBusyError propagates to the IPC
+  // caller as the error message.
+  return withServerLifecycle(serverId, () => performUpdateForServerLocked(serverId, deps));
+}
+
+async function performUpdateForServerLocked(
   serverId: string,
   deps: OrchestratorDeps = {},
 ): Promise<RuntimeUpdateOutcome> {
