@@ -189,7 +189,9 @@ export async function listMyServers(): Promise<Server[]> {
     return desktop.listServers();
   }
   const res = await request<{ servers: Server[] }>("/v1/me/servers");
-  return res.servers;
+  // Central omits tunnel_url entirely; pin it to null so the Server contract
+  // (string | null) holds at every call site instead of leaking undefined.
+  return res.servers.map((s) => ({ ...s, tunnel_url: s.tunnel_url ?? null }));
 }
 
 // Online-only public directory — the Explore surface.
@@ -204,7 +206,7 @@ export async function listPublicServers(): Promise<Server[]> {
     page: number;
     per_page: number;
   }>("/v1/servers");
-  return res.servers;
+  return res.servers.map((s) => ({ ...s, tunnel_url: s.tunnel_url ?? null }));
 }
 
 export async function createServer(

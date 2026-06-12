@@ -1452,8 +1452,19 @@ function runReconcileRegistryWithCentral(): Promise<void> {
       // kicked) — both fine to swallow; the reaper backstops a lost confirm.
       try {
         await central.confirmServerPurge(serverId);
-      } catch {
-        // Best-effort by design.
+      } catch (err) {
+        // 404 = already settled, 409 = not a delete (we left / were kicked) —
+        // both expected. Anything else still resolves via Central's reaper,
+        // but log it so a systematic confirm failure is operationally visible.
+        const benign =
+          central.isCentralNotFound(err) ||
+          (err instanceof central.CentralHttpError && err.status === 409);
+        if (!benign) {
+          log.warn("reconcile purge-confirm failed — Central reaper will free the slot", {
+            serverId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     },
     log,
@@ -2226,8 +2237,7 @@ function registerIpcHandlers(): void {
     try {
       await central.deleteServer(serverId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/404|not found/i.test(msg)) throw err;
+      if (!central.isCentralNotFound(err)) throw err;
       log.info("central delete returned 404 — server already gone", { serverId });
     }
 
@@ -2240,11 +2250,10 @@ function registerIpcHandlers(): void {
     try {
       await central.confirmServerPurge(serverId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/404|not found/i.test(msg)) {
+      if (!central.isCentralNotFound(err)) {
         log.warn("purge-confirm failed — Central reaper will free the slot", {
           serverId,
-          err: msg,
+          err: err instanceof Error ? err.message : String(err),
         });
       }
     }

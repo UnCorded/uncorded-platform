@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { ApiError } from "../api/types";
 import type { Server } from "../api/types";
 
 // loadServers talks to central.listMyServers and — on missing ids — dynamically
@@ -158,7 +159,9 @@ describe("loadServers reconcile", () => {
 
   test("central error → servers preserved, error signal set, no purges", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B")]);
-    listMyServers.mockRejectedValueOnce(new Error("network down"));
+    listMyServers.mockRejectedValueOnce(
+      new ApiError("NETWORK_ERROR", "network down", 0),
+    );
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).not.toHaveBeenCalled();

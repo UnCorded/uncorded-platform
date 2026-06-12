@@ -139,15 +139,34 @@ function extractSessionToken(res: Response): string | null {
   return null;
 }
 
+// Typed HTTP error so callers can branch on status/code instead of regexing
+// message text (e.g. the delete handler's idempotent-404 path).
+export class CentralHttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = "CentralHttpError";
+  }
+}
+
+export function isCentralNotFound(err: unknown): boolean {
+  return err instanceof CentralHttpError && err.status === 404;
+}
+
 async function parseError(res: Response): Promise<Error> {
   let message = `Request failed with status ${res.status}`;
+  let code = "UNKNOWN";
   try {
     const body = (await res.json()) as ApiErrorBody;
     if (body.error?.message) message = body.error.message;
+    if (body.error?.code) code = body.error.code;
   } catch {
     // ignore parse failures
   }
-  return new Error(message);
+  return new CentralHttpError(message, res.status, code);
 }
 
 async function request<T>(
@@ -304,8 +323,11 @@ export async function getAvatarUploadUrl(
 // liveness — an inactive server stays listed and startable. The public
 // directory (listPublicServers) is a separate, online-only surface.
 export async function listServers(): Promise<unknown> {
-  const res = await request<{ servers: unknown[] }>("/v1/me/servers");
-  return res.servers;
+  const res = await request<{ servers: Record<string, unknown>[] }>("/v1/me/servers");
+  // Central omits tunnel_url (it travels only with the join token); the
+  // bridge contract says string | null, so pin it before crossing the
+  // preload boundary instead of leaking undefined.
+  return res.servers.map((s) => ({ ...s, tunnel_url: s["tunnel_url"] ?? null }));
 }
 
 export async function listPublicServers(): Promise<unknown> {
@@ -315,7 +337,10 @@ export async function listPublicServers(): Promise<unknown> {
     page: number;
     per_page: number;
   }>("/v1/servers");
-  return res.servers;
+  return res.servers.map((s) => ({
+    ...(s as Record<string, unknown>),
+    tunnel_url: (s as Record<string, unknown>)["tunnel_url"] ?? null,
+  }));
 }
 
 export async function createServer(

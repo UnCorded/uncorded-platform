@@ -396,18 +396,22 @@ export async function handleUpdateServer(
     "description" in updates ? updates["description"] : undefined;
   const visibility = updates["visibility"] ?? undefined;
 
+  // deleted_at IS NULL repeats here (not just in the pre-check) so a DELETE
+  // landing between the check and this UPDATE can't mutate a deleting server
+  // — the race loser gets the same 404 every other read path gives.
   const rows = await ctx.sql`
     UPDATE servers SET
       name = COALESCE(${name ?? null}, name),
       description = ${description !== undefined ? description : ctx.sql`description`},
       visibility = COALESCE(${visibility ?? null}, visibility),
       updated_at = now()
-    WHERE id = ${serverId}
+    WHERE id = ${serverId} AND deleted_at IS NULL
     RETURNING id, name, description, visibility, owner_id, tunnel_state,
               runtime_version, connected_users, plugin_count,
               (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
               last_heartbeat_at, created_at, updated_at
   `;
+  if (rows.length === 0) return notFound("Server not found");
 
   return Response.json(serverJson(rows[0] as unknown as ServerRow));
 }
