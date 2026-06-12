@@ -4,6 +4,10 @@ import type {
   Plugin,
   PluginDetail,
   AvatarUploadUrl,
+  MyInvite,
+  ServerInvite,
+  JoinRequest,
+  ServerMember,
 } from "./types";
 import { ApiError } from "./types";
 import { getElectron, isElectron } from "../lib/electron";
@@ -263,6 +267,89 @@ export async function patchServer(
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// --- Membership: invites, join requests, access list ---
+// Plain request() like patchServer — these are session-cookie endpoints with
+// no desktop-IPC indirection needed.
+
+export async function listMyInvites(): Promise<MyInvite[]> {
+  const res = await request<{ invites: MyInvite[] }>("/v1/me/invites");
+  return res.invites;
+}
+
+export async function acceptInvite(inviteId: string): Promise<{ server_id: string }> {
+  return request<{ server_id: string; status: string }>(`/v1/me/invites/${inviteId}/accept`, {
+    method: "POST",
+  });
+}
+
+export async function declineInvite(inviteId: string): Promise<void> {
+  await request<void>(`/v1/me/invites/${inviteId}/decline`, { method: "POST" });
+}
+
+export async function leaveServer(serverId: string): Promise<void> {
+  await request<void>(`/v1/me/servers/${serverId}`, { method: "DELETE" });
+}
+
+export async function createInvite(
+  serverId: string,
+  username: string,
+): Promise<{ invite_id: string; expires_at: string }> {
+  return request<{ invite_id: string; expires_at: string; status: string }>(
+    `/v1/servers/${serverId}/invites`,
+    { method: "POST", body: JSON.stringify({ username }) },
+  );
+}
+
+export async function listServerInvites(serverId: string): Promise<ServerInvite[]> {
+  const res = await request<{ invites: ServerInvite[] }>(`/v1/servers/${serverId}/invites`);
+  return res.invites;
+}
+
+export async function revokeInvite(serverId: string, inviteId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/invites/${inviteId}`, { method: "DELETE" });
+}
+
+export async function createJoinRequest(serverId: string): Promise<{ request_id: string }> {
+  return request<{ request_id: string; status: string }>(
+    `/v1/servers/${serverId}/join-requests`,
+    { method: "POST" },
+  );
+}
+
+export async function listJoinRequests(serverId: string): Promise<JoinRequest[]> {
+  const res = await request<{ requests: JoinRequest[] }>(`/v1/servers/${serverId}/join-requests`);
+  return res.requests;
+}
+
+export async function acceptJoinRequest(serverId: string, requestId: string): Promise<void> {
+  await request<unknown>(`/v1/servers/${serverId}/join-requests/${requestId}/accept`, {
+    method: "POST",
+  });
+}
+
+export async function declineJoinRequest(serverId: string, requestId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/join-requests/${requestId}/decline`, {
+    method: "POST",
+  });
+}
+
+export async function listServerMembers(serverId: string): Promise<ServerMember[]> {
+  const res = await request<{ members: ServerMember[] }>(`/v1/servers/${serverId}/members`);
+  return res.members;
+}
+
+export async function kickMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}`, { method: "DELETE" });
+}
+
+export async function banMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}/ban`, { method: "POST" });
+}
+
+export async function unbanMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}/ban`, { method: "DELETE" });
 }
 
 export async function deleteServer(serverId: string): Promise<void> {

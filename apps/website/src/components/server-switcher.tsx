@@ -1,5 +1,5 @@
-import { Show, For, type JSX } from "solid-js";
-import { Compass, ChevronsUpDown, Plus, Wifi, WifiOff } from "lucide-solid";
+import { Show, For, createSignal, createEffect, type JSX } from "solid-js";
+import { Check, Compass, ChevronsUpDown, LogOut, Mail, Plus, Wifi, WifiOff, X } from "lucide-solid";
 import { useImgRetry } from "@/lib/img-retry";
 import {
   DropdownMenu,
@@ -21,11 +21,16 @@ import {
   activeServer,
   setActiveServer,
   getServerIconVersion,
+  loadServers,
 } from "@/stores/servers";
 import {
   RuntimeUpdatePill,
   runtimeUpdatePillVisible,
 } from "@/components/server/runtime-update-pill";
+import * as central from "@/api/central";
+import { ApiError, type MyInvite } from "@/api/types";
+import { joinTarget } from "@/stores/auth-intent";
+import { ExploreServersDialog } from "@/components/server/explore-servers-dialog";
 
 export function ServerIcon(props: {
   serverId: string;
@@ -95,10 +100,87 @@ export function ServerSwitcher(props: {
 
   const current = () => activeServer();
 
+  // Pending invites — loaded once on mount and refreshed every time the
+  // dropdown opens, so a freshly-sent invite shows up without a reload.
+  const [myInvites, setMyInvites] = createSignal<MyInvite[]>([]);
+  const [inviteBusyId, setInviteBusyId] = createSignal<string | null>(null);
+  // One inline error slot for invite/leave actions inside the menu.
+  const [menuError, setMenuError] = createSignal<string | null>(null);
+  // Two-click confirm latch for the per-row "Leave" affordance.
+  const [leaveConfirmId, setLeaveConfirmId] = createSignal<string | null>(null);
+  const [exploreOpen, setExploreOpen] = createSignal(false);
+
+  async function refreshInvites(): Promise<void> {
+    try {
+      setMyInvites(await central.listMyInvites());
+    } catch {
+      // Unauthenticated or Central unreachable — keep whatever we had.
+    }
+  }
+  void refreshInvites();
+
+  // A ?join= deep link / post-login intent replay opens Explore; the dialog
+  // itself fires the join request and clears the target.
+  createEffect(() => {
+    if (joinTarget() !== null) setExploreOpen(true);
+  });
+
+  async function handleAcceptInvite(inv: MyInvite): Promise<void> {
+    if (inviteBusyId() !== null) return;
+    setInviteBusyId(inv.id);
+    setMenuError(null);
+    try {
+      const { server_id } = await central.acceptInvite(inv.id);
+      await Promise.all([refreshInvites(), loadServers()]);
+      setActiveServer(server_id);
+    } catch (err) {
+      setMenuError(err instanceof ApiError ? err.message : "Could not accept invite");
+      void refreshInvites();
+    } finally {
+      setInviteBusyId(null);
+    }
+  }
+
+  async function handleDeclineInvite(inv: MyInvite): Promise<void> {
+    if (inviteBusyId() !== null) return;
+    setInviteBusyId(inv.id);
+    setMenuError(null);
+    try {
+      await central.declineInvite(inv.id);
+      await refreshInvites();
+    } catch (err) {
+      setMenuError(err instanceof ApiError ? err.message : "Could not decline invite");
+      void refreshInvites();
+    } finally {
+      setInviteBusyId(null);
+    }
+  }
+
+  async function handleLeave(serverId: string): Promise<void> {
+    setMenuError(null);
+    try {
+      await central.leaveServer(serverId);
+      setLeaveConfirmId(null);
+      if (activeServer()?.id === serverId) setActiveServer(null);
+      await loadServers();
+    } catch (err) {
+      setMenuError(err instanceof ApiError ? err.message : "Could not leave server");
+    }
+  }
+
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <DropdownMenu>
+        <DropdownMenu
+          onOpenChange={(open) => {
+            if (open) {
+              void refreshInvites();
+            } else {
+              setLeaveConfirmId(null);
+              setMenuError(null);
+            }
+          }}
+        >
           <DropdownMenuTrigger
             as={SidebarMenuButton as any}
             size="lg"
@@ -137,7 +219,15 @@ export function ServerSwitcher(props: {
                 </>
               )}
             </Show>
-            <ChevronsUpDown class="ml-auto size-4 shrink-0" />
+            <div class="ml-auto flex shrink-0 items-center gap-1">
+              {/* Invite count badge — visible without opening the menu. */}
+              <Show when={myInvites().length > 0}>
+                <span class="rounded-full bg-sidebar-primary px-1.5 py-0.5 text-[10px] font-semibold text-sidebar-primary-foreground">
+                  {myInvites().length} invite{myInvites().length === 1 ? "" : "s"}
+                </span>
+              </Show>
+              <ChevronsUpDown class="size-4" />
+            </div>
           </DropdownMenuTrigger>
 
           <DropdownMenuContent
@@ -165,7 +255,7 @@ export function ServerSwitcher(props: {
                 const pillVisible = runtimeUpdatePillVisible(server.id);
                 return (
                   <DropdownMenuItem
-                    class="gap-2 p-2"
+                    class="group/row gap-2 p-2"
                     onSelect={() => setActiveServer(server.id)}
                   >
                     <div class="relative shrink-0">
@@ -179,6 +269,37 @@ export function ServerSwitcher(props: {
                       />
                     </div>
                     <span class="truncate flex-1">{server.name}</span>
+                    {/* Leave (non-owner only) — hover-revealed, two-click
+                        confirm. Pointer events are stopped so the row's
+                        onSelect doesn't fire and the menu stays open. */}
+                    <Show when={server.role === "member"}>
+                      <button
+                        type="button"
+                        class="flex h-5 shrink-0 items-center gap-1 rounded px-1 text-[10px] text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover/row:opacity-100"
+                        classList={{
+                          "opacity-100 text-destructive": leaveConfirmId() === server.id,
+                        }}
+                        data-tooltip="Leave server"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onPointerUp={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          if (leaveConfirmId() === server.id) {
+                            void handleLeave(server.id);
+                          } else {
+                            setLeaveConfirmId(server.id);
+                          }
+                        }}
+                      >
+                        <Show
+                          when={leaveConfirmId() === server.id}
+                          fallback={<LogOut class="size-3" />}
+                        >
+                          Leave?
+                        </Show>
+                      </button>
+                    </Show>
                     <Show
                       when={pillVisible()}
                       fallback={
@@ -197,6 +318,54 @@ export function ServerSwitcher(props: {
               }}
             </For>
 
+            {/* Pending invites — plain rows (not menu items) so the Accept /
+                Decline buttons don't trigger item selection or close the menu. */}
+            <Show when={myInvites().length > 0}>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel class="text-xs text-muted-foreground">
+                Invitations
+              </DropdownMenuLabel>
+              <For each={myInvites()}>
+                {(inv) => (
+                  <div class="flex items-center gap-2 px-2 py-1.5">
+                    <div class="flex size-6 items-center justify-center rounded-md border bg-background shrink-0">
+                      <Mail class="size-3.5" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm">{inv.server_name}</p>
+                      <p class="truncate text-[10px] text-muted-foreground">
+                        invited by @{inv.invited_by_username}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="flex size-6 shrink-0 items-center justify-center rounded-md border bg-background text-emerald-500 transition-colors hover:bg-emerald-500/10 disabled:opacity-50"
+                      disabled={inviteBusyId() !== null}
+                      data-tooltip="Accept"
+                      aria-label={`Accept invite to ${inv.server_name}`}
+                      onClick={() => void handleAcceptInvite(inv)}
+                    >
+                      <Check class="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      class="flex size-6 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                      disabled={inviteBusyId() !== null}
+                      data-tooltip="Decline"
+                      aria-label={`Decline invite to ${inv.server_name}`}
+                      onClick={() => void handleDeclineInvite(inv)}
+                    >
+                      <X class="size-3.5" />
+                    </button>
+                  </div>
+                )}
+              </For>
+            </Show>
+
+            <Show when={menuError()}>
+              <p class="px-2 py-1 text-[11px] text-destructive">{menuError()}</p>
+            </Show>
+
             <DropdownMenuSeparator />
 
             <DropdownMenuItem class="gap-2 p-2" onSelect={() => props.onCreateServer()}>
@@ -207,15 +376,16 @@ export function ServerSwitcher(props: {
               <span class="ml-auto text-[10px] text-muted-foreground/50 font-medium">Advanced</span>
             </DropdownMenuItem>
 
-            <DropdownMenuItem class="gap-2 p-2" disabled>
+            <DropdownMenuItem class="gap-2 p-2" onSelect={() => setExploreOpen(true)}>
               <div class="flex size-6 items-center justify-center rounded-md border bg-background shrink-0">
                 <Compass class="size-4" />
               </div>
               <span class="font-medium text-muted-foreground">Explore servers</span>
-              <span class="ml-auto text-[10px] text-muted-foreground/50 font-medium">Soon</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        <ExploreServersDialog open={exploreOpen()} onOpenChange={setExploreOpen} />
       </SidebarMenuItem>
     </SidebarMenu>
   );

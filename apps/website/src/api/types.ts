@@ -43,6 +43,47 @@ export interface Server {
   updated_at: string;
 }
 
+// --- Central membership surfaces (invites, join requests, access list) ---
+
+export interface MyInvite {
+  id: string;
+  server_id: string;
+  server_name: string;
+  invited_by_username: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface ServerInvite {
+  id: string;
+  invited_account_id: string;
+  username: string;
+  display_name: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface JoinRequest {
+  id: string;
+  account_id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string | null;
+  created_at: string;
+}
+
+/** A Central access-membership row — who may mint tokens for the server.
+ *  Distinct from the runtime core module's presence members. */
+export interface ServerMember {
+  account_id: string;
+  username: string;
+  display_name: string;
+  avatar_url: string | null;
+  role: "owner" | "member";
+  status: "active" | "banned";
+  joined_at: string;
+}
+
 export interface Plugin {
   slug: string;
   name: string;

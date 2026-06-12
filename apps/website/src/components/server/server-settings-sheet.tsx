@@ -1,5 +1,5 @@
 import { createSignal, createResource, createMemo, createEffect, onCleanup, Show, Switch, Match, For, type Component } from "solid-js";
-import { AlertTriangle, ChevronDown, ChevronUp, Folders, Pencil, Puzzle, Search, Settings, ShieldCheck, Trash2, Upload, Users, X } from "lucide-solid";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Folders, Mail, Pencil, Puzzle, Search, Settings, ShieldCheck, Trash2, Upload, UserPlus, Users, X } from "lucide-solid";
 import type { LucideProps } from "lucide-solid";
 import {
   Sheet,
@@ -11,7 +11,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import * as central from "@/api/central";
-import type { Server } from "@/api/types";
+import { ApiError } from "@/api/types";
+import type { JoinRequest, Server, ServerInvite, ServerMember } from "@/api/types";
 import { activeServer, loadServers, bumpServerIconVersion, getServerIconVersion } from "@/stores/servers";
 import { isAdmin, currentMember } from "@/stores/membership";
 import { request, onPluginMessage } from "@/lib/ws";
@@ -140,6 +141,13 @@ export function ServerSettingsSheet(props: ServerSettingsSheetProps) {
                   <InfoSection server={s()} />
                 </Match>
                 <Match when={activeTab() === "members"}>
+                  {/* Central access management — owner-only (every endpoint
+                      403s for non-owners, so gate at the call site). Sits
+                      above the runtime presence list below. */}
+                  <Show when={account()?.id === s().owner_id}>
+                    <AccessSection serverId={s().id} />
+                    <div class="h-px bg-border" />
+                  </Show>
                   <MembersSection serverId={s().id} />
                 </Match>
                 <Match when={activeTab() === "categories"}>
@@ -164,6 +172,325 @@ export function ServerSettingsSheet(props: ServerSettingsSheetProps) {
         </Show>
       </SheetContent>
     </Sheet>
+  );
+}
+
+// ── Access section ────────────────────────────────────────────────────────────
+
+// Central's access membership — who may mint tokens for this server. Distinct
+// from the runtime presence members in MembersSection below. Owner-only:
+// every endpoint here 403s for non-owners, so the parent gates rendering.
+function AccessSection(props: { serverId: string }) {
+  const [expanded, setExpanded] = createSignal(true);
+
+  // Invite-by-username form.
+  const [inviteName, setInviteName] = createSignal("");
+  const [inviteBusy, setInviteBusy] = createSignal(false);
+  const [inviteNotice, setInviteNotice] = createSignal<{ ok: boolean; text: string } | null>(null);
+
+  // The three Central lists. One shared load-error slot — they load together
+  // and the realistic failure (Central unreachable) hits all three at once.
+  const [invites, setInvites] = createSignal<ServerInvite[]>([]);
+  const [requests, setRequests] = createSignal<JoinRequest[]>([]);
+  const [accessList, setAccessList] = createSignal<ServerMember[]>([]);
+  const [loading, setLoading] = createSignal(false);
+  const [listError, setListError] = createSignal<string | null>(null);
+
+  // Row-action state: which row has an in-flight call, the two-click confirm
+  // latch ("kick:<id>" / "ban:<id>"), and the latest action error.
+  const [busyKey, setBusyKey] = createSignal<string | null>(null);
+  const [confirmKey, setConfirmKey] = createSignal<string | null>(null);
+  const [actionError, setActionError] = createSignal<string | null>(null);
+
+  function apiMessage(err: unknown, fallback: string): string {
+    return err instanceof ApiError ? err.message : fallback;
+  }
+
+  async function refreshInvites(): Promise<void> {
+    setInvites(await central.listServerInvites(props.serverId));
+  }
+  async function refreshRequests(): Promise<void> {
+    setRequests(await central.listJoinRequests(props.serverId));
+  }
+  async function refreshAccessList(): Promise<void> {
+    setAccessList(await central.listServerMembers(props.serverId));
+  }
+
+  async function loadAll(): Promise<void> {
+    setLoading(true);
+    setListError(null);
+    try {
+      await Promise.all([refreshInvites(), refreshRequests(), refreshAccessList()]);
+    } catch (err) {
+      setListError(apiMessage(err, "Failed to load access lists"));
+    } finally {
+      setLoading(false);
+    }
+  }
+  // Initial load — the section mounts fresh each time the Members tab activates.
+  void loadAll();
+
+  async function handleInvite(e: Event): Promise<void> {
+    e.preventDefault();
+    const username = inviteName().trim();
+    if (!username || inviteBusy()) return;
+    setInviteBusy(true);
+    setInviteNotice(null);
+    try {
+      await central.createInvite(props.serverId, username);
+      setInviteName("");
+      setInviteNotice({ ok: true, text: "Invite sent" });
+      await refreshInvites();
+    } catch (err) {
+      // 404 unknown username / 409 already member or pending / 403 quota —
+      // Central's message is human-readable, surface it verbatim.
+      setInviteNotice({ ok: false, text: apiMessage(err, "Could not send invite") });
+    } finally {
+      setInviteBusy(false);
+    }
+  }
+
+  /** Serialize row actions: one in flight at a time, errors surfaced inline. */
+  async function runRowAction(key: string, fn: () => Promise<void>): Promise<void> {
+    if (busyKey() !== null) return;
+    setBusyKey(key);
+    setActionError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setActionError(apiMessage(err, "Action failed"));
+    } finally {
+      setBusyKey(null);
+      setConfirmKey(null);
+    }
+  }
+
+  /** Two-click destructive confirm: first click arms, second click fires. */
+  function confirmThen(key: string, fn: () => Promise<void>): void {
+    if (confirmKey() === key) {
+      void runRowAction(key, fn);
+    } else {
+      setConfirmKey(key);
+    }
+  }
+
+  const rowActionBtn =
+    "h-6 shrink-0 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition-colors disabled:opacity-50";
+
+  return (
+    <section>
+      <button
+        type="button"
+        class="flex w-full items-center justify-between px-4 pb-2 pt-4"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded()}
+      >
+        <span class="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          Access
+        </span>
+        {expanded()
+          ? <ChevronUp class="size-3.5 text-muted-foreground" />
+          : <ChevronDown class="size-3.5 text-muted-foreground" />}
+      </button>
+
+      <Show when={expanded()}>
+        <div class="space-y-4 px-4 pb-4">
+          <Show when={listError()}>
+            <p class="text-xs text-destructive">{listError()}</p>
+          </Show>
+          <Show when={actionError()}>
+            <p class="text-xs text-destructive">{actionError()}</p>
+          </Show>
+
+          {/* Invite by username */}
+          <form class="space-y-1.5" onSubmit={(e) => void handleInvite(e)}>
+            <label class="text-xs font-medium text-muted-foreground">Invite by username</label>
+            <div class="flex gap-2">
+              <Input
+                value={inviteName()}
+                onInput={(e) => setInviteName(e.currentTarget.value)}
+                placeholder="username"
+                class="h-8 text-sm"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                class="h-8 shrink-0"
+                disabled={inviteBusy() || !inviteName().trim()}
+              >
+                <UserPlus class="size-3.5" />
+                {inviteBusy() ? "Sending…" : "Invite"}
+              </Button>
+            </div>
+            <Show when={inviteNotice()}>
+              {(n) => (
+                <p class={cn("text-xs", n().ok ? "text-emerald-500" : "text-destructive")}>
+                  {n().text}
+                </p>
+              )}
+            </Show>
+          </form>
+
+          {/* Pending invites */}
+          <Show when={invites().length > 0}>
+            <div class="space-y-1.5">
+              <p class="text-xs font-medium text-muted-foreground">Pending invites</p>
+              <For each={invites()}>
+                {(inv) => (
+                  <div class="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
+                    <Mail class="size-3.5 shrink-0 text-muted-foreground" />
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm">@{inv.username}</p>
+                      <p class="text-[10px] text-muted-foreground">
+                        expires {new Date(inv.expires_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class={cn(rowActionBtn, "hover:bg-destructive hover:text-white")}
+                      disabled={busyKey() !== null}
+                      onClick={() =>
+                        void runRowAction(`revoke:${inv.id}`, async () => {
+                          await central.revokeInvite(props.serverId, inv.id);
+                          await refreshInvites();
+                        })
+                      }
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+
+          {/* Join requests */}
+          <Show when={requests().length > 0}>
+            <div class="space-y-1.5">
+              <p class="text-xs font-medium text-muted-foreground">Join requests</p>
+              <For each={requests()}>
+                {(req) => (
+                  <div class="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm">{req.display_name}</p>
+                      <p class="truncate text-[10px] text-muted-foreground">@{req.username}</p>
+                    </div>
+                    <button
+                      type="button"
+                      class="flex size-6 shrink-0 items-center justify-center rounded-md border border-border text-emerald-500 transition-colors hover:bg-emerald-500/10 disabled:opacity-50"
+                      disabled={busyKey() !== null}
+                      data-tooltip="Accept"
+                      aria-label={`Accept join request from ${req.display_name}`}
+                      onClick={() =>
+                        void runRowAction(`accept:${req.id}`, async () => {
+                          await central.acceptJoinRequest(props.serverId, req.id);
+                          await Promise.all([refreshRequests(), refreshAccessList()]);
+                        })
+                      }
+                    >
+                      <Check class="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      class="flex size-6 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                      disabled={busyKey() !== null}
+                      data-tooltip="Decline"
+                      aria-label={`Decline join request from ${req.display_name}`}
+                      onClick={() =>
+                        void runRowAction(`decline:${req.id}`, async () => {
+                          await central.declineJoinRequest(props.serverId, req.id);
+                          await refreshRequests();
+                        })
+                      }
+                    >
+                      <X class="size-3.5" />
+                    </button>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+
+          {/* Access list */}
+          <div class="space-y-1.5">
+            <p class="text-xs font-medium text-muted-foreground">Access list</p>
+            <Show when={loading() && accessList().length === 0}>
+              <p class="text-xs text-muted-foreground">Loading…</p>
+            </Show>
+            <For each={accessList()}>
+              {(m) => (
+                <div class="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate text-sm">{m.display_name}</p>
+                    <p class="truncate text-[10px] text-muted-foreground">@{m.username}</p>
+                  </div>
+                  <span class="inline-flex h-5 shrink-0 items-center rounded-full border border-border bg-muted/40 px-2 text-[10px] text-foreground/80">
+                    {m.role}
+                  </span>
+                  <Show when={m.status === "banned"}>
+                    <span class="inline-flex h-5 shrink-0 items-center rounded-full border border-destructive/30 bg-destructive/10 px-2 text-[10px] text-destructive">
+                      banned
+                    </span>
+                  </Show>
+                  <Show when={m.role === "member"}>
+                    <Show
+                      when={m.status === "active"}
+                      fallback={
+                        <button
+                          type="button"
+                          class={cn(rowActionBtn, "hover:bg-muted hover:text-foreground")}
+                          disabled={busyKey() !== null}
+                          onClick={() =>
+                            void runRowAction(`unban:${m.account_id}`, async () => {
+                              await central.unbanMember(props.serverId, m.account_id);
+                              await refreshAccessList();
+                            })
+                          }
+                        >
+                          Unban
+                        </button>
+                      }
+                    >
+                      <button
+                        type="button"
+                        class={cn(rowActionBtn, "hover:bg-destructive hover:text-white")}
+                        classList={{ "border-destructive/50 text-destructive": confirmKey() === `kick:${m.account_id}` }}
+                        disabled={busyKey() !== null}
+                        onClick={() =>
+                          confirmThen(`kick:${m.account_id}`, async () => {
+                            await central.kickMember(props.serverId, m.account_id);
+                            await refreshAccessList();
+                          })
+                        }
+                      >
+                        {confirmKey() === `kick:${m.account_id}` ? "Confirm kick?" : "Kick"}
+                      </button>
+                      <button
+                        type="button"
+                        class={cn(rowActionBtn, "hover:bg-destructive hover:text-white")}
+                        classList={{ "border-destructive/50 text-destructive": confirmKey() === `ban:${m.account_id}` }}
+                        disabled={busyKey() !== null}
+                        onClick={() =>
+                          confirmThen(`ban:${m.account_id}`, async () => {
+                            await central.banMember(props.serverId, m.account_id);
+                            await refreshAccessList();
+                          })
+                        }
+                      >
+                        {confirmKey() === `ban:${m.account_id}` ? "Confirm ban?" : "Ban"}
+                      </button>
+                    </Show>
+                  </Show>
+                </div>
+              )}
+            </For>
+            <Show when={!loading() && accessList().length === 0 && listError() === null}>
+              <p class="text-xs text-muted-foreground">No members yet.</p>
+            </Show>
+          </div>
+        </div>
+      </Show>
+    </section>
   );
 }
 
