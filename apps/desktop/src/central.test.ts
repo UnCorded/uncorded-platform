@@ -1,5 +1,4 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { app } from "electron";
 
 const mockKeychainGet = mock<(key: string) => string | null>();
 const mockKeychainSet = mock<(key: string, value: string) => void>();
@@ -40,51 +39,64 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-describe("getContainerCentralUrl", () => {
-  const ORIGINAL_OVERRIDE = process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-  // getContainerCentralUrl reads app.isPackaged live. The electron stub is a
-  // process-global mock.module shared by every desktop test in the worker, so a
-  // sibling file can leave isPackaged flipped to true — which would send these
-  // dev-path cases down the packaged=prod branch. Pin it to dev here (and
-  // restore) so the suite is independent of file execution order.
-  const appRef = app as unknown as { isPackaged: boolean };
-  const ORIGINAL_IS_PACKAGED = appRef.isPackaged;
-  beforeEach(() => {
-    appRef.isPackaged = false;
-  });
-  afterEach(() => {
-    appRef.isPackaged = ORIGINAL_IS_PACKAGED;
-    if (ORIGINAL_OVERRIDE === undefined) delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-    else process.env["UNCORDED_CONTAINER_CENTRAL_URL"] = ORIGINAL_OVERRIDE;
+// Pure resolver — no electron / env dependency, so these can't be perturbed by
+// a sibling file mutating the shared electron stub's app.isPackaged (which is
+// exactly what made the earlier env-driven version flaky across file orders).
+describe("resolveContainerCentralUrl", () => {
+  test("explicit override wins verbatim", () => {
+    expect(centralModule.resolveContainerCentralUrl({
+      override: "https://my-tunnel.example.com",
+      isPackaged: false,
+      baseUrl: "http://localhost:4000",
+    })).toBe("https://my-tunnel.example.com");
   });
 
-  test("explicit UNCORDED_CONTAINER_CENTRAL_URL override wins verbatim", () => {
-    process.env["UNCORDED_CONTAINER_CENTRAL_URL"] = "https://my-tunnel.example.com";
-    expect(centralModule.getContainerCentralUrl()).toBe("https://my-tunnel.example.com");
+  test("override wins even in dev with a loopback base", () => {
+    expect(centralModule.resolveContainerCentralUrl({
+      override: "https://staging.example.com",
+      isPackaged: false,
+      baseUrl: "http://localhost:4000",
+    })).toBe("https://staging.example.com");
+  });
+
+  test("packaged builds always resolve to prod Central", () => {
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: true,
+      baseUrl: "http://localhost:4000",
+    })).toBe("https://central.uncorded.app");
   });
 
   test("dev: rewrites a localhost base to host.docker.internal so the bridged container can reach it", () => {
-    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-    process.env["VITE_CENTRAL_URL"] = "http://localhost:4000";
-    expect(centralModule.getContainerCentralUrl()).toBe("http://host.docker.internal:4000");
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: false,
+      baseUrl: "http://localhost:4000",
+    })).toBe("http://host.docker.internal:4000");
   });
 
   test("dev: rewrites 127.0.0.1 the same way", () => {
-    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-    process.env["VITE_CENTRAL_URL"] = "http://127.0.0.1:4000";
-    expect(centralModule.getContainerCentralUrl()).toBe("http://host.docker.internal:4000");
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: false,
+      baseUrl: "http://127.0.0.1:4000",
+    })).toBe("http://host.docker.internal:4000");
   });
 
   test("dev: passes a routable base through untouched (e.g. web pointed at prod)", () => {
-    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-    process.env["VITE_CENTRAL_URL"] = "https://central.uncorded.app";
-    expect(centralModule.getContainerCentralUrl()).toBe("https://central.uncorded.app");
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: false,
+      baseUrl: "https://central.uncorded.app",
+    })).toBe("https://central.uncorded.app");
   });
 
   test("dev: falls back to prod Central when the base URL is unparseable", () => {
-    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-    process.env["VITE_CENTRAL_URL"] = "not a url";
-    expect(centralModule.getContainerCentralUrl()).toBe("https://central.uncorded.app");
+    expect(centralModule.resolveContainerCentralUrl({
+      override: undefined,
+      isPackaged: false,
+      baseUrl: "not a url",
+    })).toBe("https://central.uncorded.app");
   });
 });
 

@@ -65,15 +65,13 @@ function toContainerReachableUrl(baseUrl: string): string {
   return `${url.protocol}//${url.host}`;
 }
 
-// Central URL written into a provisioned server's config (server.json), used by
-// the runtime for heartbeats and for fetching Central's JWT-signing public
-// keys. This MUST resolve to the same Central instance the desktop registered
-// the server against (getBaseUrl) — otherwise Central never sees the heartbeat
-// and the provision wizard soft-warns on every run while the server is in fact
-// healthy.
+// Pure resolution of the container's central_url from explicit inputs. Split
+// out from getContainerCentralUrl so it's unit-testable without the
+// process-global electron stub or env vars — whose shared, mutable state across
+// the test worker made order-dependent tests flaky.
 //
 // Resolution order:
-//   1. UNCORDED_CONTAINER_CENTRAL_URL — explicit override for custom tunnel
+//   1. override (UNCORDED_CONTAINER_CENTRAL_URL) — explicit, for custom tunnel
 //      hostnames or a staging Central.
 //   2. Packaged builds — always production Central. (The web origin can be
 //      repointed via VITE_CENTRAL_URL for testing; the container's Central is
@@ -81,11 +79,28 @@ function toContainerReachableUrl(baseUrl: string): string {
 //      dev box.)
 //   3. Dev — the desktop's own base URL, rewritten so a bridged container can
 //      reach a Central on the host loopback (localhost → host.docker.internal).
+export function resolveContainerCentralUrl(opts: {
+  override: string | undefined;
+  isPackaged: boolean;
+  baseUrl: string;
+}): string {
+  if (opts.override) return opts.override;
+  if (opts.isPackaged) return PROD_CENTRAL_URL;
+  return toContainerReachableUrl(opts.baseUrl);
+}
+
+// Central URL written into a provisioned server's config (server.json), used by
+// the runtime for heartbeats and for fetching Central's JWT-signing public
+// keys. MUST resolve to the same Central instance the desktop registered the
+// server against (getBaseUrl) — otherwise Central never sees the heartbeat and
+// the provision wizard soft-warns on every run while the server is in fact
+// healthy.
 export function getContainerCentralUrl(): string {
-  const override = process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
-  if (override) return override;
-  if (app.isPackaged) return PROD_CENTRAL_URL;
-  return toContainerReachableUrl(getBaseUrl());
+  return resolveContainerCentralUrl({
+    override: process.env["UNCORDED_CONTAINER_CENTRAL_URL"],
+    isPackaged: app.isPackaged,
+    baseUrl: getBaseUrl(),
+  });
 }
 
 function getSessionToken(): string | null {
