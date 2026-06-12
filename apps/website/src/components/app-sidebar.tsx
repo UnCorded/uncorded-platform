@@ -7,7 +7,8 @@ import type { WebApp } from "@uncorded/electron-bridge";
 import { NavSecondary } from "@/components/nav-secondary";
 import { NavUser } from "@/components/nav-user";
 import { VoiceIndicator } from "@/components/voice-indicator";
-import { ServerSwitcher, openExploreServers } from "@/components/server-switcher";
+import { ServerSwitcher } from "@/components/server-switcher";
+import { openExploreServers, ExploreServersHost } from "@/components/server/explore-servers-dialog";
 import {
   Sidebar,
   SidebarContent,
@@ -332,6 +333,7 @@ export function AppSidebar(props: {
       </SidebarFooter>
 
       <CreateServerWizard open={wizardOpen()} onOpenChange={setWizardOpen} />
+      <ExploreServersHost />
       <ServerSettingsSheet
         open={settingsOpen()}
         onOpenChange={setSettingsOpen}

@@ -29,6 +29,29 @@ interface RowState {
 
 const IDLE_ROW: RowState = { phase: "idle", error: null };
 
+// Open state lives at module scope, with a single always-mounted host (see
+// ExploreServersHost), so every surface that can open Explore — the switcher
+// dropdown, the sidebar's no-server view, a joinTarget replay — drives the
+// same dialog instance. Mounting the dialog inside one of those surfaces is
+// the bug this prevents: the switcher only renders when a server is active,
+// so an "open" signal fired from the no-server view had no dialog to show.
+const [exploreOpen, setExploreOpen] = createSignal(false);
+
+export function openExploreServers(): void {
+  setExploreOpen(true);
+}
+
+/** Mount exactly once, somewhere that always renders (AppSidebar root). */
+export function ExploreServersHost() {
+  // joinTarget replay must open the dialog from here, not from the switcher:
+  // a ?join= deep link usually lands with NO server selected, which is
+  // precisely when the switcher (and any effect inside it) isn't mounted.
+  createEffect(() => {
+    if (joinTarget() !== null) setExploreOpen(true);
+  });
+  return <ExploreServersDialog open={exploreOpen()} onOpenChange={setExploreOpen} />;
+}
+
 export function ExploreServersDialog(props: ExploreServersDialogProps) {
   const [directory, setDirectory] = createSignal<Server[]>([]);
   const [loading, setLoading] = createSignal(false);

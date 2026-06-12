@@ -30,17 +30,7 @@ import {
 } from "@/components/server/runtime-update-pill";
 import * as central from "@/api/central";
 import { ApiError, type MyInvite } from "@/api/types";
-import { joinTarget } from "@/stores/auth-intent";
-import { ExploreServersDialog } from "@/components/server/explore-servers-dialog";
-
-// Explore-dialog open state lives at module scope so surfaces outside the
-// switcher (the sidebar's no-server view) can open the same single dialog
-// instance instead of mounting their own (two instances would double-react
-// to joinTarget replays).
-const [exploreOpen, setExploreOpen] = createSignal(false);
-export function openExploreServers(): void {
-  setExploreOpen(true);
-}
+import { openExploreServers } from "@/components/server/explore-servers-dialog";
 
 export function ServerIcon(props: {
   serverId: string;
@@ -134,12 +124,6 @@ export function ServerSwitcher(props: {
   // after the auth gate), not just at mount time.
   createEffect(() => {
     if (account() !== null) void refreshInvites();
-  });
-
-  // A ?join= deep link / post-login intent replay opens Explore; the dialog
-  // itself fires the join request and clears the target.
-  createEffect(() => {
-    if (joinTarget() !== null) setExploreOpen(true);
   });
 
   async function handleAcceptInvite(inv: MyInvite): Promise<void> {
@@ -393,7 +377,7 @@ export function ServerSwitcher(props: {
               <span class="ml-auto text-[10px] text-muted-foreground/50 font-medium">Advanced</span>
             </DropdownMenuItem>
 
-            <DropdownMenuItem class="gap-2 p-2" onSelect={() => setExploreOpen(true)}>
+            <DropdownMenuItem class="gap-2 p-2" onSelect={() => openExploreServers()}>
               <div class="flex size-6 items-center justify-center rounded-md border bg-background shrink-0">
                 <Compass class="size-4" />
               </div>
@@ -402,7 +386,6 @@ export function ServerSwitcher(props: {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <ExploreServersDialog open={exploreOpen()} onOpenChange={setExploreOpen} />
       </SidebarMenuItem>
     </SidebarMenu>
   );
