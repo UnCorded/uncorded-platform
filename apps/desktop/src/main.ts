@@ -693,6 +693,37 @@ function attachLiveViewResilience(surfaceId: number, view: WebContentsView): voi
   });
 }
 
+// Tear down a live view's contents the way the PAGE would close itself.
+//
+// A direct webContents.close() destroys the contents, but for a CAPTURED
+// window.open popup the close is INVISIBLE to the web platform: the opener's
+// window proxy never flips `closed`, and the popup's unload handlers never
+// notify the opener. A site that tracks its popout (e.g. a roll20 character
+// sheet) therefore still believes the popup is open — clicking "pop out" again
+// does nothing (no window.open call ever reaches our capture handler) and the
+// site renders its in-page surrogate blank. Evidence: the popout→close→reopen
+// trace showed contents destroyed cleanly, then ZERO window.open activity on
+// the reopen attempt.
+//
+// Running window.close() INSIDE the page takes the full browser close path:
+// unload fires and the opener observes the close, so the site can re-open
+// later. Script may not be able to self-close (crashed renderer, never-loaded
+// view, non-script-opened page) — a short fallback hard-closes anything still
+// alive, restoring the old behavior at worst.
+function closeLiveViewContents(surfaceId: number, view: WebContentsView): void {
+  const contents = view.webContents;
+  if (contents.isDestroyed()) return;
+  contents.executeJavaScript("window.close()", true).catch(() => {
+    /* dead/never-loaded renderer — the fallback below hard-closes */
+  });
+  setTimeout(() => {
+    if (!contents.isDestroyed()) {
+      log.info("live view ignored window.close(); hard-closing contents", { surfaceId });
+      contents.close();
+    }
+  }, 1500);
+}
+
 // Handle a Browser Panel guest's window.open (a site's "detach"/"pop-out").
 // Instead of an OS window, we capture the popup into an in-app `WebContentsView`
 // via `createWindow`: it returns a WebContents we construct, and Electron
@@ -1050,7 +1081,7 @@ function createWindow(): void {
       liveSurfaces.delete(surfaceId);
       visibleLiveSurfaces.delete(surfaceId);
       if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
-      if (!view.webContents.isDestroyed()) view.webContents.close();
+      closeLiveViewContents(surfaceId, view);
     }
   });
 
@@ -1753,6 +1784,12 @@ function restackLiveSurfaces(): void {
   if (!win || win.isDestroyed()) return;
   const ids = [...liveSurfaces.keys()].sort((a, b) => a - b);
   for (const id of ids) {
+    // A popped-out view lives in its popout window's contentView. addChildView
+    // on the MAIN window would silently re-parent it (Electron moves a view to
+    // the new parent), yanking the live view out of the window the user is
+    // looking at — the popout goes blank. POPPED-OUT means the popout owns the
+    // view exclusively (same invariant as the SET_BOUNDS / RELEASE guards).
+    if (surfacePopouts.has(id)) continue;
     const view = liveSurfaces.get(id);
     if (view && !view.webContents.isDestroyed()) win.contentView.addChildView(view);
   }
@@ -1857,7 +1894,7 @@ function createLiveSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
     if (entry === popout) {
       surfacePopouts.delete(surfaceId);
       liveSurfaces.delete(surfaceId);
-      if (!view.webContents.isDestroyed()) view.webContents.close();
+      closeLiveViewContents(surfaceId, view);
     }
   });
 }
@@ -1894,6 +1931,11 @@ function claimDockLiveSurface(surfaceId: number): boolean {
   if (!view || view.webContents.isDestroyed()) return false;
   if (!win || win.isDestroyed()) return false;
   const popout = surfacePopouts.get(surfaceId);
+  // Drop the popout entry FIRST: (a) the popout's 'closed' handler must not
+  // destroy the view we're claiming, and (b) restackLiveSurfaces skips
+  // popped-out surfaces, so the entry must be gone before the re-normalize
+  // below or the claimed view would be left out of the stack.
+  surfacePopouts.delete(surfaceId);
   if (popout && !popout.isDestroyed()) popout.contentView.removeChildView(view);
   win.contentView.addChildView(view);
   view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
@@ -1904,11 +1946,7 @@ function claimDockLiveSurface(surfaceId: number): boolean {
   // Docking re-adds the view on TOP regardless of its surfaceId — the one path
   // that breaks the ascending-id stack. Re-normalize so z-order stays stable.
   restackLiveSurfaces();
-  if (popout) {
-    // Drop the entry BEFORE closing so the 'closed' handler won't destroy the view.
-    surfacePopouts.delete(surfaceId);
-    if (!popout.isDestroyed()) popout.close();
-  }
+  if (popout && !popout.isDestroyed()) popout.close();
   return true;
 }
 
@@ -2491,7 +2529,7 @@ function registerIpcHandlers(): void {
     if (!view) return;
     liveSurfaces.delete(surfaceId);
     if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
-    if (!view.webContents.isDestroyed()) view.webContents.close();
+    closeLiveViewContents(surfaceId, view);
   });
   // Open the native view in its own free, frameless OS window that owns it
   // directly (header + content glued, movable anywhere off-app). Live session
