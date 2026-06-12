@@ -262,8 +262,8 @@ and must not change — it is the plugin's identity everywhere.
 
 ## Load it into a server
 
-The easiest path is **Install into server** in the UnCorded desktop app's
-Plugin Dev panel. Manually:
+The easiest path is the UnCorded desktop app: Server settings → Plugins →
+Add Plugin → Develop → **Install**. Manually:
 
 1. Copy this folder to \`<server-data>/plugins/${input.slug}/\`.
 2. Add \`"${input.slug}"\` to \`installed_plugins\` in the server's \`server.json\`.
@@ -303,9 +303,9 @@ the starter "visits" feature with the real plugin described in \`PROMPT.md\`.
   and ship the folder with \`node_modules\` present. (\`@uncorded/plugin-sdk\`
   may not be on npm yet; when installed through the UnCorded desktop app, the
   runtime provides the SDK, so a missing local install of the SDK alone is OK.)
-- **Test by deploying**: use "Install into server" in the desktop app's
-  Plugin Dev panel. Deploying restarts the server container — that is normal;
-  plugins load only at boot.
+- **Test by deploying**: in the UnCorded desktop app, open Server settings →
+  Plugins → Add Plugin → Develop and click Install on this plugin. Deploying
+  restarts the server container — that is normal; plugins load only at boot.
 
 The complete official documentation follows.
 

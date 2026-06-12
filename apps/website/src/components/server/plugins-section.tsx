@@ -31,6 +31,8 @@ import {
   type AdminPluginRow,
 } from "@/lib/admin-plugins";
 import { PluginSettingsPanel } from "./plugin-settings-panel";
+import { AddPluginChooser } from "@/components/plugin-dev/add-plugin-chooser";
+import { PluginDevSheet } from "@/components/plugin-dev/plugin-dev-sheet";
 
 type IconComponent = (props: LucideProps) => ReturnType<Component>;
 
@@ -107,6 +109,8 @@ const PluginList: Component<PluginListProps> = (props) => {
 
   const [toggleError, setToggleError] = createSignal<string | null>(null);
   const [restartHint, setRestartHint] = createSignal<string | null>(null);
+  const [chooserOpen, setChooserOpen] = createSignal(false);
+  const [devSheetOpen, setDevSheetOpen] = createSignal(false);
 
   async function handleToggle(slug: string, next: boolean): Promise<void> {
     setToggleError(null);
@@ -126,12 +130,7 @@ const PluginList: Component<PluginListProps> = (props) => {
     <div class="flex flex-col">
       <div class="flex items-center justify-between border-b border-border px-4 py-3">
         <span class="text-sm font-semibold">Installed plugins</span>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled
-          data-tooltip="Plugin marketplace coming in a later update"
-        >
+        <Button size="sm" variant="outline" onClick={() => setChooserOpen(true)}>
           <Plus class="size-4" />
           Add Plugin
         </Button>
@@ -180,6 +179,22 @@ const PluginList: Component<PluginListProps> = (props) => {
           </div>
         </Show>
       </Show>
+
+      <AddPluginChooser
+        open={chooserOpen()}
+        onOpenChange={setChooserOpen}
+        onDevelop={() => setDevSheetOpen(true)}
+      />
+      <PluginDevSheet
+        open={devSheetOpen()}
+        serverId={props.serverId}
+        onOpenChange={(open) => {
+          setDevSheetOpen(open);
+          // An install in the dev flow restarts the server and changes the
+          // installed set — refresh the list when the workspace closes.
+          if (!open) void refetch();
+        }}
+      />
     </div>
   );
 };

@@ -265,7 +265,7 @@ export function NewPluginDialog(props: {
                 <DialogDescription>
                   <Show
                     when={c().promptCopied}
-                    fallback={"A working starter plugin is ready. Use Copy prompt in the Plugin Dev panel to grab the agent prompt."}
+                    fallback={"A working starter plugin is ready. Use Copy prompt on its row to grab the agent prompt."}
                   >
                     <span class="inline-flex items-center gap-1.5">
                       <ClipboardCheck class="size-3.5" />

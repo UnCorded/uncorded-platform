@@ -71,8 +71,9 @@ and the plugin lifecycle. Everything you need is in that one file.
 
 - Do not rename this folder — its name is the plugin's identity.
 - Keep \`manifest.json\` "name" equal to the folder name (${input.slug}).
-- The author tests by clicking "Install into server" in the UnCorded desktop
-  app, which restarts the server container — plugins load only at boot.
+- The author tests by installing the plugin from the UnCorded desktop app
+  (Server settings → Plugins → Add Plugin → Develop → Install), which
+  restarts the server container — plugins load only at boot.
 
 Start by reading AGENTS.md, then plan, then implement.
 `;

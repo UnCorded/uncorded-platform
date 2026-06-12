@@ -32,10 +32,12 @@ import { NewPluginDialog } from "./new-plugin-dialog";
 import { InstallPluginDialog } from "./install-plugin-dialog";
 
 // Plugin Development Workspace sheet — the management surface for dev plugin
-// folders under ~/.uncorded/plugin-dev/. Machine-global (not per-server),
-// desktop-only; the sidebar only offers the entry point under isElectron().
-// Explicitly NOT an IDE: list, create, hand off to an agent, deploy. The
-// folder on disk is the source of truth — every open re-scans.
+// folders under ~/.uncorded/plugin-dev/. The workspace itself is
+// machine-global, but the ONLY entry point is Server settings → Plugins →
+// Add Plugin → Develop, so the sheet always carries the server whose
+// settings opened it — "Install" targets that server with no picker.
+// Desktop-only; explicitly NOT an IDE: list, create, hand off to an agent,
+// deploy. The folder on disk is the source of truth — every open re-scans.
 
 function manifestBadge(plugin: DevPlugin) {
   switch (plugin.manifestStatus) {
@@ -129,11 +131,11 @@ function DevPluginRow(props: { plugin: DevPlugin; onInstall: (plugin: DevPlugin)
           data-tooltip={
             props.plugin.manifestStatus !== "ok"
               ? "Fix manifest.json first"
-              : "Copy into a server and restart it"
+              : "Copy into this server and restart it"
           }
           onClick={() => props.onInstall(props.plugin)}
         >
-          Install into server
+          Install
         </button>
 
         <div class="ml-auto">
@@ -183,6 +185,8 @@ function DevPluginRow(props: { plugin: DevPlugin; onInstall: (plugin: DevPlugin)
 export function PluginDevSheet(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The server whose settings panel opened this sheet — install target. */
+  serverId: string;
 }) {
   const [newPluginOpen, setNewPluginOpen] = createSignal(false);
   const [installTarget, setInstallTarget] = createSignal<DevPlugin | null>(null);
@@ -261,6 +265,7 @@ export function PluginDevSheet(props: {
       <NewPluginDialog open={newPluginOpen()} onOpenChange={setNewPluginOpen} />
       <InstallPluginDialog
         plugin={installTarget()}
+        serverId={props.serverId}
         onOpenChange={(open) => {
           if (!open) setInstallTarget(null);
         }}
