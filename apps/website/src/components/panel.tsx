@@ -25,6 +25,7 @@ import {
   type DropZone,
 } from "@/lib/drag-state";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { requestSync } from "@/lib/live-surface-host";
 
 const ICON_MAP: Record<string, Component<LucideProps>> = {
   hash: Hash,
@@ -695,6 +696,12 @@ function PanelSplit(props: SharedProps & { node: SplitNode }) {
         if (pendingRatio !== null) {
           props.onUpdateRatio(nodeId, pendingRatio);
           pendingRatio = null;
+          // Solid flushed the flex styles synchronously above, so a forced
+          // rect read now reports native-surface bounds to main in the SAME
+          // frame, before paint — the view stays locked to the panel instead
+          // of trailing the drag. Also the only signal for panels that only
+          // MOVED (ResizeObserver fires for size changes, never position).
+          requestSync();
         }
       });
     };

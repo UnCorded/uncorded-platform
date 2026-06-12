@@ -14,6 +14,19 @@
 //   getBoundingClientRect() to main on change. Main drives the matching
 //   `WebContentsView.setBounds()`.
 //
+// Latency budget (why reports are synchronous and the IPC is send, not invoke):
+//   a native view is moved by the MAIN process, so every frame of lag between
+//   the DOM laying out and main calling setBounds is visible as the view
+//   trailing its panel during drags. Three rules keep it locked:
+//     - ResizeObserver callbacks run post-layout/pre-paint → report the new
+//       rect synchronously in the callback (don't defer to the next rAF).
+//     - The panel splitter calls requestSync() right after committing a ratio
+//       (Solid flushes the style synchronously), so the report races the
+//       renderer's own paint. This also covers position-only moves, which
+//       ResizeObserver never fires for.
+//     - liveSurface.setBounds is a fire-and-forget ipcRenderer.send (ordered,
+//       no round-trip) — the rAF poll below is only the settle-watcher.
+//
 // Visibility:
 //   A native view paints above all renderer DOM, so it MUST be hidden whenever
 //   its placeholder isn't a live, on-screen rectangle:
@@ -81,7 +94,7 @@ export function track(surfaceId: number, placeholder: HTMLElement): void {
     if (existing.placeholder !== placeholder) {
       existing.resizeObserver.disconnect();
       existing.placeholder = placeholder;
-      existing.resizeObserver = new ResizeObserver(() => startPoll());
+      existing.resizeObserver = makeRectObserver(surfaceId);
       existing.resizeObserver.observe(placeholder);
       existing.lastBounds = null;
       existing.lastVisible = null;
@@ -91,7 +104,7 @@ export function track(surfaceId: number, placeholder: HTMLElement): void {
     return;
   }
 
-  const ro = new ResizeObserver(() => startPoll());
+  const ro = makeRectObserver(surfaceId);
   ro.observe(placeholder);
   const entry: Surface = {
     surfaceId,
@@ -103,6 +116,18 @@ export function track(surfaceId: number, placeholder: HTMLElement): void {
   surfaces.set(surfaceId, entry);
   syncSurface(entry);
   startPoll();
+}
+
+// RO callbacks run post-layout/pre-paint, so reporting synchronously here gets
+// the new rect to main a full frame earlier than deferring to the next rAF
+// tick (which is kept, via startPoll, purely as the settle-watcher). Looked up
+// by id so a re-pointed/untracked entry never syncs through a stale closure.
+function makeRectObserver(surfaceId: number): ResizeObserver {
+  return new ResizeObserver(() => {
+    const entry = surfaces.get(surfaceId);
+    if (entry) syncSurface(entry);
+    startPoll();
+  });
 }
 
 /**
@@ -198,7 +223,9 @@ function boundsEqual(a: Bounds | null, b: Bounds): boolean {
 
 function reportBounds(surfaceId: number, bounds: Bounds, visible: boolean): void {
   if (!isElectron()) return;
-  void getElectron().liveSurface.setBounds(surfaceId, bounds, visible);
+  // Fire-and-forget send (no invoke round-trip) — this fires per animation
+  // frame during panel drags, and ordering is guaranteed by the channel.
+  getElectron().liveSurface.setBounds(surfaceId, bounds, visible);
 }
 
 /** Returns true if it emitted an IPC update (i.e. something changed). */
@@ -251,14 +278,21 @@ function pollTick(): void {
 }
 
 /**
- * Force a re-sync (and restart the poll). Used when a placeholder transitions
- * from no-box to has-box (tab activation) — ResizeObserver doesn't reliably
- * fire across that transition.
+ * Force a synchronous re-sync (and restart the poll). Two callers:
+ *   - tab activation: a placeholder transitions from no-box to has-box, which
+ *     ResizeObserver doesn't reliably fire across (pass the surfaceId);
+ *   - the panel splitter's drag loop, right after committing a ratio (no
+ *     argument → every surface): Solid has already flushed the style, so the
+ *     forced rect read reports the new bounds in the same frame, before paint.
+ *     This is also the only signal for position-only moves (a panel whose
+ *     siblings resized around it) — ResizeObserver never fires for those.
  */
 export function requestSync(surfaceId?: number): void {
   if (surfaceId !== undefined) {
     const entry = surfaces.get(surfaceId);
     if (entry) syncSurface(entry);
+  } else {
+    syncAll();
   }
   startPoll();
 }

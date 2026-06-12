@@ -448,8 +448,11 @@ contextBridge.exposeInMainWorld("electron", {
       surfaceId: number,
       bounds: { x: number; y: number; width: number; height: number },
       visible: boolean,
-    ): Promise<void> {
-      return ipcInvoke<void>(IPC.LIVE_SURFACE_SET_BOUNDS, surfaceId, bounds, visible);
+    ): void {
+      // Hot path: fires per animation frame while a panel is dragged/resized.
+      // Fire-and-forget send (ordered, no invoke round-trip) — every frame of
+      // IPC latency shows up as the native view trailing its panel.
+      ipcRenderer.send(IPC.LIVE_SURFACE_SET_BOUNDS, surfaceId, bounds, visible);
     },
     release(surfaceId: number): Promise<void> {
       return ipcInvoke<void>(IPC.LIVE_SURFACE_RELEASE, surfaceId);

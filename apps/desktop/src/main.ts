@@ -337,6 +337,35 @@ function handleIpc<T extends unknown[]>(
   });
 }
 
+// Fire-and-forget variant of handleIpc for high-frequency renderer→main
+// messages sent with `ipcRenderer.send` (no reply channel). Same sender-origin
+// guard; handler throws are logged and the message dropped — there is nowhere
+// to surface an error, and a malformed frame must not take main down.
+function onIpc<T extends unknown[]>(
+  channel: string,
+  handler: (_event: Electron.IpcMainEvent, ...args: T) => void,
+): void {
+  ipcMain.on(channel, (event, ...args) => {
+    const senderUrl = event.senderFrame?.url;
+    if (!isAllowedIpcSender(senderUrl)) {
+      log.warn("ipc rejected — sender origin not allowed", {
+        channel,
+        senderUrl: senderUrl ?? null,
+      });
+      return;
+    }
+    try {
+      handler(event, ...(args as T));
+    } catch (err) {
+      log.error("ipc handler failed", {
+        channel,
+        err: errorMessage(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+    }
+  });
+}
+
 // Build the CSP we layer onto the shell's top-level response. NOTE: this
 // overlays whatever CSP `uncorded.app` itself serves — we are not reading
 // the upstream policy and merging, we are replacing the header for the
@@ -2446,7 +2475,10 @@ function registerIpcHandlers(): void {
   // DIPs at zoom 1; the shell fills the content area whose origin is 0,0 under the
   // hidden title bar). visible:false hides it without destroying it (off-screen
   // host placeholder, or a blocking modal that would otherwise be painted over).
-  handleIpc(
+  // Fire-and-forget (onIpc, ipcRenderer.send): this is the per-frame hot path
+  // while a panel is dragged — an invoke round-trip is visible as the view
+  // trailing its panel. Validation throws are logged + dropped by onIpc.
+  onIpc(
     IPC.LIVE_SURFACE_SET_BOUNDS,
     (_event, surfaceId: unknown, bounds: unknown, visible: unknown) => {
       if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {

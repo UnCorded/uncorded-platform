@@ -552,12 +552,17 @@ export interface ElectronBridge {
      * destroying it — used when the host placeholder is off-screen (inactive
      * tab, focus-collapse) or a blocking modal is open (the view would otherwise
      * paint over it). Used only while the view is DOCKED in the main window.
+     *
+     * Fire-and-forget (`ipcRenderer.send`, not invoke): this fires per
+     * animation frame during panel drags, and any round-trip latency shows up
+     * as the view trailing its panel. Ordering is guaranteed by the channel;
+     * invalid payloads are logged and dropped main-side.
      */
     setBounds(
       surfaceId: number,
       bounds: { x: number; y: number; width: number; height: number },
       visible: boolean,
-    ): Promise<void>;
+    ): void;
     /**
      * Destroy the native view and its webContents. Called when the host panel
      * closes / the Web App is removed. The renderer then falls back to a fresh
