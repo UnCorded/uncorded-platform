@@ -131,6 +131,9 @@ export const IPC = {
   PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent",
   PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent",
   PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server",
+  PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets",
+  PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy",
+  PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress",
 
   // In-app native popup views (WebContentsView). INTERCEPTED is a main→renderer
   // push: main captured a Browser Panel guest's window.open into a native view

@@ -312,11 +312,74 @@ export type LaunchAgentResult =
       message: string;
     };
 
-/** Seam for "Install into server" — deploy mechanics land in a later phase;
- *  until then the handler answers NOT_IMPLEMENTED. */
+// "Install into server" — copies a dev plugin into a locally-hosted server's
+// volume and restarts the server (the runtime loads plugins only at boot).
+// These unions are the single source for the desktop deploy module
+// (apps/desktop/plugin-dev-deploy) and the renderer's progress UI.
+
+export type DevPluginDeployStep =
+  | "validate"
+  | "stop-container"
+  | "copy-files"
+  | "write-config"
+  | "start-container"
+  | "wait-health"
+  | "verify-plugin"
+  | "done";
+
+export type DevPluginDeployErrorCode =
+  | "WORKSPACE_NOT_FOUND"
+  | "MANIFEST_INVALID"
+  | "SLUG_MISMATCH"
+  | "SLUG_RESERVED"
+  | "SERVER_NOT_FOUND"
+  | "DOCKER_NOT_RUNNING"
+  | "RUNTIME_TOO_OLD"
+  | "API_VERSION_INCOMPATIBLE"
+  | "CONSENT_REQUIRED"
+  | "SLUG_CONFLICT_EXISTING"
+  | "CONFIG_READ_FAILED"
+  | "CONFIG_WRITE_FAILED"
+  | "COPY_FAILED"
+  | "CONTAINER_START_FAILED"
+  | "HEALTH_TIMEOUT"
+  | "PLUGIN_FAILED_TO_LOAD"
+  | "DEPLOY_IN_PROGRESS";
+
+export interface DevPluginDeployProgress {
+  slug: string;
+  serverId: string;
+  step: DevPluginDeployStep;
+  status: "running" | "completed" | "warning";
+  message: string;
+  detail?: string;
+}
+
+export interface InstallDevPluginOptions {
+  /** User accepted enabling unsigned local plugins on this server. */
+  consentUnsigned?: boolean;
+  /** Replace a /plugins/<slug> folder this flow doesn't own. */
+  overwriteExisting?: boolean;
+}
+
 export type InstallDevPluginResult =
-  | { ok: true; serverId: string }
-  | { ok: false; code: "NOT_IMPLEMENTED" | (string & {}); message: string };
+  | { ok: true; containerId: string; pluginStatus: "ready" | "starting" | "unknown" }
+  | { ok: false; code: DevPluginDeployErrorCode | "INSTALL_FAILED" | "NOT_IMPLEMENTED"; message: string };
+
+export type UninstallDevPluginResult =
+  | { ok: true }
+  | { ok: false; code: DevPluginDeployErrorCode | "UNINSTALL_FAILED"; message: string };
+
+/** A locally-hosted server a dev plugin could be installed into, with the
+ *  facts the picker needs up front (consent + already-installed). Names come
+ *  from the renderer's servers store — main only knows ids. */
+export interface DevPluginInstallTarget {
+  serverId: string;
+  /** This slug is already in the server's installed_plugins (redeploy). */
+  deployed: boolean;
+  /** server.json already allows unsigned plugins (no consent step needed). */
+  allowUnsigned: boolean;
+}
 
 export interface ElectronBridge {
   central: {
@@ -620,8 +683,28 @@ export interface ElectronBridge {
     /** Copy the prompt, then open a terminal in the plugin folder running
      *  the agent. Failure modes degrade to "prompt is on your clipboard". */
     launchAgent(slug: string): Promise<LaunchAgentResult>;
-    /** Deploy seam — answers NOT_IMPLEMENTED until the deploy phase lands. */
-    installIntoServer(slug: string, serverId: string): Promise<InstallDevPluginResult>;
+    /** Locally-hosted servers this plugin could be installed into. */
+    listInstallTargets(slug: string): Promise<DevPluginInstallTarget[]>;
+    /**
+     * Copy the dev plugin into the server's volume and restart the server.
+     * CONSENT_REQUIRED / SLUG_CONFLICT_EXISTING results prompt the UI to ask
+     * and retry with the matching option set. Progress streams on
+     * onDeployProgress for the duration of the call.
+     */
+    installIntoServer(
+      slug: string,
+      serverId: string,
+      options?: InstallDevPluginOptions,
+    ): Promise<InstallDevPluginResult>;
+    /** Remove the plugin from a server (files + registration + restart).
+     *  Its /data stays unless deleteData — redeploys keep their state. */
+    uninstallFromServer(
+      slug: string,
+      serverId: string,
+      deleteData: boolean,
+    ): Promise<UninstallDevPluginResult>;
+    /** Deploy/undeploy step stream (main → renderer push). */
+    onDeployProgress(handler: (event: DevPluginDeployProgress) => void): CleanupFn;
   };
   // In-app native popup views. When a Browser Panel guest calls `window.open`,
   // main captures it (via `setWindowOpenHandler`'s `createWindow`) into a fresh
@@ -826,6 +909,9 @@ export interface IpcChannelMap {
   readonly PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent";
   readonly PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent";
   readonly PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server";
+  readonly PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets";
+  readonly PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy";
+  readonly PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress";
 
   // In-app native popup views (WebContentsView). A Browser Panel guest's
   // window.open is captured into a native view hosted in a free OS popout window

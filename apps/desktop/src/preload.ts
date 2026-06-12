@@ -7,9 +7,13 @@ import type {
   CreateDevPluginInput,
   CreateDevPluginResult,
   DevPlugin,
+  DevPluginDeployProgress,
+  DevPluginInstallTarget,
+  InstallDevPluginOptions,
   InstallDevPluginResult,
   IpcChannelMap,
   LaunchAgentResult,
+  UninstallDevPluginResult,
   ProvisionDoneEvent,
   ProvisionProgressEvent,
   RuntimeCheckOutcome,
@@ -127,6 +131,9 @@ const IPC = {
   PLUGIN_DEV_DETECT_AGENT: "desktop:plugin-dev:detect-agent",
   PLUGIN_DEV_LAUNCH_AGENT: "desktop:plugin-dev:launch-agent",
   PLUGIN_DEV_INSTALL_INTO_SERVER: "desktop:plugin-dev:install-into-server",
+  PLUGIN_DEV_LIST_TARGETS: "desktop:plugin-dev:list-targets",
+  PLUGIN_DEV_UNDEPLOY: "desktop:plugin-dev:undeploy",
+  PLUGIN_DEV_DEPLOY_PROGRESS: "desktop:plugin-dev:deploy-progress",
   LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted",
   LIVE_SURFACE_CREATE: "desktop:live-surface:create",
   LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds",
@@ -479,8 +486,33 @@ contextBridge.exposeInMainWorld("electron", {
     launchAgent(slug: string): Promise<LaunchAgentResult> {
       return ipcInvoke<LaunchAgentResult>(IPC.PLUGIN_DEV_LAUNCH_AGENT, slug);
     },
-    installIntoServer(slug: string, serverId: string): Promise<InstallDevPluginResult> {
-      return ipcInvoke<InstallDevPluginResult>(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, slug, serverId);
+    listInstallTargets(slug: string): Promise<DevPluginInstallTarget[]> {
+      return ipcInvoke<DevPluginInstallTarget[]>(IPC.PLUGIN_DEV_LIST_TARGETS, slug);
+    },
+    installIntoServer(
+      slug: string,
+      serverId: string,
+      options?: InstallDevPluginOptions,
+    ): Promise<InstallDevPluginResult> {
+      return ipcInvoke<InstallDevPluginResult>(
+        IPC.PLUGIN_DEV_INSTALL_INTO_SERVER,
+        slug,
+        serverId,
+        options ?? {},
+      );
+    },
+    uninstallFromServer(
+      slug: string,
+      serverId: string,
+      deleteData: boolean,
+    ): Promise<UninstallDevPluginResult> {
+      return ipcInvoke<UninstallDevPluginResult>(IPC.PLUGIN_DEV_UNDEPLOY, slug, serverId, deleteData);
+    },
+    onDeployProgress(handler: (event: DevPluginDeployProgress) => void): CleanupFn {
+      const listener = (_event: Electron.IpcRendererEvent, payload: DevPluginDeployProgress) =>
+        handler(payload);
+      ipcRenderer.on(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, listener);
+      return () => ipcRenderer.removeListener(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, listener);
     },
   },
 

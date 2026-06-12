@@ -38,6 +38,12 @@ import {
 } from "./plugin-dev-store";
 import { detectAgent, launchAgentTerminal } from "./plugin-dev-agent";
 import {
+  deployDevPlugin,
+  readInstallTargetInfo,
+  undeployDevPlugin,
+  type DeployDeps,
+} from "./plugin-dev-deploy";
+import {
   PLUGIN_DEV_SLUG_MAX,
   validateDevPluginSlug,
 } from "./plugin-dev-templates";
@@ -2744,19 +2750,93 @@ function registerIpcHandlers(): void {
     }
     return launchAgentTerminal(dir);
   });
-  handleIpc(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, (_event, slug: unknown, serverId: unknown) => {
-    requireDevPluginSlug(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, slug);
+  // Restart a registry server with its current persisted settings — the same
+  // docker-run recreate sequence as VOICE_SET_HOSTNAME (the tunnel token is
+  // piped at create time, so a bare `docker start` is never correct). Reads
+  // the record fresh so a containerId persisted mid-flow isn't clobbered.
+  const startServerFromRegistry = async (serverId: string): Promise<string> => {
+    const record = getServerRecord(serverId);
+    if (!record) throw new Error(`unknown server ${serverId}`);
+    const tunnelToken = getSecret(tunnelSecretKey(serverId)) ?? undefined;
+    let runtimeEncryptionSecret = getSecret(encryptionSecretKey(serverId));
+    if (!runtimeEncryptionSecret) {
+      runtimeEncryptionSecret = randomBytes(32).toString("hex");
+      setSecret(encryptionSecretKey(serverId), runtimeEncryptionSecret);
+    }
+    const newContainerId = await runServerContainer({
+      volumePath: record.volumePath,
+      hostPort: record.hostPort,
+      tunnelToken,
+      runtimeEncryptionSecret,
+      ...(record.tunnelPublicHostname ? { tunnelPublicHostname: record.tunnelPublicHostname } : {}),
+      ...(record.voicePublicHostname ? { voicePublicHostname: record.voicePublicHostname } : {}),
+      ...(record.imageSignature ? { imageSignature: record.imageSignature } : {}),
+      devPluginFrontendMounts: devPluginFrontendMounts(),
+    });
+    registerServer(serverId, { ...record, containerId: newContainerId });
+    return newContainerId;
+  };
+
+  const pluginDevDeployDeps = (slug: string, serverId: string): DeployDeps => ({
+    resolveDevPluginPath: devPluginPath,
+    getServerRecord: (id) => {
+      const record = getServerRecord(id);
+      return record
+        ? { containerId: record.containerId, volumePath: record.volumePath, hostPort: record.hostPort }
+        : null;
+    },
+    getDockerStatus: () => docker.getDockerStatus(),
+    removeContainer: (containerId) => removeIfExists(containerId),
+    startServerContainer: startServerFromRegistry,
+    getAdminToken: async (id) => {
+      try {
+        const { token } = await central.getServerToken(id);
+        return token;
+      } catch {
+        return null; // Central unreachable — verify degrades, deploy stands
+      }
+    },
+    onProgress: (event) => {
+      sendToWindow(IPC.PLUGIN_DEV_DEPLOY_PROGRESS, { slug, serverId, ...event });
+    },
+  });
+
+  handleIpc(IPC.PLUGIN_DEV_LIST_TARGETS, (_event, slug: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_LIST_TARGETS, slug);
+    return listServerRecords().flatMap(({ serverId, record }) => {
+      const info = readInstallTargetInfo(record.volumePath, valid);
+      // Unreadable server.json → not a valid target; the deploy preflight
+      // would fail closed on it anyway.
+      return info ? [{ serverId, ...info }] : [];
+    });
+  });
+  handleIpc(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, (_event, slug: unknown, serverId: unknown, options: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, slug);
     if (typeof serverId !== "string" || serverId.length === 0) {
       throw ipcError(IPC.PLUGIN_DEV_INSTALL_INTO_SERVER, new Error("serverId must be a non-empty string"));
     }
-    // Deploy mechanics land in a later phase (requires a runtime release that
-    // makes the SDK resolvable from /plugins). The seam is wired now so the
-    // bridge surface is stable.
-    return {
-      ok: false,
-      code: "NOT_IMPLEMENTED",
-      message: "Installing dev plugins into a server is coming soon.",
-    };
+    const o = (options && typeof options === "object" ? options : {}) as Record<string, unknown>;
+    return deployDevPlugin(
+      valid,
+      serverId,
+      {
+        consentUnsigned: o["consentUnsigned"] === true,
+        overwriteExisting: o["overwriteExisting"] === true,
+      },
+      pluginDevDeployDeps(valid, serverId),
+    );
+  });
+  handleIpc(IPC.PLUGIN_DEV_UNDEPLOY, (_event, slug: unknown, serverId: unknown, deleteData: unknown) => {
+    const valid = requireDevPluginSlug(IPC.PLUGIN_DEV_UNDEPLOY, slug);
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.PLUGIN_DEV_UNDEPLOY, new Error("serverId must be a non-empty string"));
+    }
+    return undeployDevPlugin(
+      valid,
+      serverId,
+      { deleteData: deleteData === true },
+      pluginDevDeployDeps(valid, serverId),
+    );
   });
   // Position an in-app native popup view over a renderer-reported rect (CSS px ==
   // DIPs at zoom 1; the shell fills the content area whose origin is 0,0 under the

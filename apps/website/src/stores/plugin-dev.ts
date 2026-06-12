@@ -4,8 +4,12 @@ import type {
   CreateDevPluginInput,
   CreateDevPluginResult,
   DevPlugin,
+  DevPluginDeployProgress,
+  DevPluginInstallTarget,
+  InstallDevPluginOptions,
   InstallDevPluginResult,
   LaunchAgentResult,
+  UninstallDevPluginResult,
 } from "@uncorded/electron-bridge";
 import { isElectron, getElectron } from "@/lib/electron";
 import { showToast } from "@/lib/feedback";
@@ -136,19 +140,57 @@ export async function launchDevPluginAgent(slug: string): Promise<LaunchAgentRes
   }
 }
 
-/** Deploy seam — NOT_IMPLEMENTED until the deploy phase lands. */
+/** Locally-hosted servers this plugin could be installed into. */
+export async function listInstallTargets(slug: string): Promise<DevPluginInstallTarget[]> {
+  if (!isElectron()) return [];
+  try {
+    return await getElectron().pluginDev.listInstallTargets(slug);
+  } catch (err) {
+    console.error("[plugin-dev] list-targets failed", { slug, err });
+    return [];
+  }
+}
+
+/** Install (or redeploy) into a server. Restarts that server. */
 export async function installDevPluginIntoServer(
   slug: string,
   serverId: string,
+  options?: InstallDevPluginOptions,
 ): Promise<InstallDevPluginResult> {
   if (!isElectron()) {
     return { ok: false, code: "NOT_IMPLEMENTED", message: "Requires the desktop app." };
   }
   try {
-    return await getElectron().pluginDev.installIntoServer(slug, serverId);
+    return await getElectron().pluginDev.installIntoServer(slug, serverId, options);
   } catch (err) {
     console.error("[plugin-dev] install failed", { slug, serverId, err });
     const message = err instanceof Error ? err.message : "Install failed.";
     return { ok: false, code: "INSTALL_FAILED", message };
   }
+}
+
+/** Remove the plugin from a server (its data stays unless deleteData). */
+export async function uninstallDevPluginFromServer(
+  slug: string,
+  serverId: string,
+  deleteData: boolean,
+): Promise<UninstallDevPluginResult> {
+  if (!isElectron()) {
+    return { ok: false, code: "UNINSTALL_FAILED", message: "Requires the desktop app." };
+  }
+  try {
+    return await getElectron().pluginDev.uninstallFromServer(slug, serverId, deleteData);
+  } catch (err) {
+    console.error("[plugin-dev] uninstall failed", { slug, serverId, err });
+    const message = err instanceof Error ? err.message : "Uninstall failed.";
+    return { ok: false, code: "UNINSTALL_FAILED", message };
+  }
+}
+
+/** Subscribe to deploy/undeploy step events. Returns an unsubscribe fn. */
+export function onDevPluginDeployProgress(
+  cb: (event: DevPluginDeployProgress) => void,
+): () => void {
+  if (!isElectron()) return () => {};
+  return getElectron().pluginDev.onDeployProgress(cb);
 }

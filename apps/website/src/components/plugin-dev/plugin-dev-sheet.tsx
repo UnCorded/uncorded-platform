@@ -29,6 +29,7 @@ import {
   removeDevPlugin,
 } from "@/stores/plugin-dev";
 import { NewPluginDialog } from "./new-plugin-dialog";
+import { InstallPluginDialog } from "./install-plugin-dialog";
 
 // Plugin Development Workspace sheet — the management surface for dev plugin
 // folders under ~/.uncorded/plugin-dev/. Machine-global (not per-server),
@@ -55,7 +56,7 @@ function manifestBadge(plugin: DevPlugin) {
   }
 }
 
-function DevPluginRow(props: { plugin: DevPlugin }) {
+function DevPluginRow(props: { plugin: DevPlugin; onInstall: (plugin: DevPlugin) => void }) {
   const [confirmingDelete, setConfirmingDelete] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
 
@@ -121,15 +122,18 @@ function DevPluginRow(props: { plugin: DevPlugin }) {
           <FolderOpen class="size-3.5" />
         </button>
 
-        {/* Deploy seam — enabled when the deploy phase lands. */}
         <button
           type="button"
-          aria-disabled="true"
-          data-tooltip="Install into server — coming soon"
-          class="ml-1 inline-flex h-7 cursor-not-allowed items-center gap-1 rounded-md border border-border px-2 text-xs text-muted-foreground/50"
+          class="ml-1 inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+          disabled={busy() || props.plugin.manifestStatus !== "ok"}
+          data-tooltip={
+            props.plugin.manifestStatus !== "ok"
+              ? "Fix manifest.json first"
+              : "Copy into a server and restart it"
+          }
+          onClick={() => props.onInstall(props.plugin)}
         >
           Install into server
-          <span class="text-[9px] uppercase tracking-wider text-muted-foreground/40">Soon</span>
         </button>
 
         <div class="ml-auto">
@@ -181,6 +185,7 @@ export function PluginDevSheet(props: {
   onOpenChange: (open: boolean) => void;
 }) {
   const [newPluginOpen, setNewPluginOpen] = createSignal(false);
+  const [installTarget, setInstallTarget] = createSignal<DevPlugin | null>(null);
 
   // Re-scan + re-probe on every open: the disk is the source of truth and an
   // agent may have renamed/added folders since the last look.
@@ -237,7 +242,9 @@ export function PluginDevSheet(props: {
               }
             >
               <div class="flex flex-col gap-2">
-                <For each={devPlugins()}>{(plugin) => <DevPluginRow plugin={plugin} />}</For>
+                <For each={devPlugins()}>
+                  {(plugin) => <DevPluginRow plugin={plugin} onInstall={setInstallTarget} />}
+                </For>
               </div>
             </Show>
           </div>
@@ -252,6 +259,12 @@ export function PluginDevSheet(props: {
       </Sheet>
 
       <NewPluginDialog open={newPluginOpen()} onOpenChange={setNewPluginOpen} />
+      <InstallPluginDialog
+        plugin={installTarget()}
+        onOpenChange={(open) => {
+          if (!open) setInstallTarget(null);
+        }}
+      />
     </>
   );
 }

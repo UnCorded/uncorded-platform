@@ -19,22 +19,20 @@
 
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { DockerStatus } from "@uncorded/electron-bridge";
+import type {
+  DevPluginDeployErrorCode,
+  DevPluginDeployStep,
+  DockerStatus,
+} from "@uncorded/electron-bridge";
 import { RESERVED_PLUGIN_SLUGS } from "./plugin-dev-templates";
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — step/error unions live in @uncorded/electron-bridge (the renderer
+// renders them); aliased here for readability.
 // ---------------------------------------------------------------------------
 
-export type DeployStep =
-  | "validate"
-  | "stop-container"
-  | "copy-files"
-  | "write-config"
-  | "start-container"
-  | "wait-health"
-  | "verify-plugin"
-  | "done";
+export type DeployStep = DevPluginDeployStep;
+export type DeployErrorCode = DevPluginDeployErrorCode;
 
 export interface DeployProgressEvent {
   step: DeployStep;
@@ -42,25 +40,6 @@ export interface DeployProgressEvent {
   message: string;
   detail?: string;
 }
-
-export type DeployErrorCode =
-  | "WORKSPACE_NOT_FOUND"
-  | "MANIFEST_INVALID"
-  | "SLUG_MISMATCH"
-  | "SLUG_RESERVED"
-  | "SERVER_NOT_FOUND"
-  | "DOCKER_NOT_RUNNING"
-  | "RUNTIME_TOO_OLD"
-  | "API_VERSION_INCOMPATIBLE"
-  | "CONSENT_REQUIRED"
-  | "SLUG_CONFLICT_EXISTING"
-  | "CONFIG_READ_FAILED"
-  | "CONFIG_WRITE_FAILED"
-  | "COPY_FAILED"
-  | "CONTAINER_START_FAILED"
-  | "HEALTH_TIMEOUT"
-  | "PLUGIN_FAILED_TO_LOAD"
-  | "DEPLOY_IN_PROGRESS";
 
 export type DeployOutcome =
   | { ok: true; containerId: string; pluginStatus: "ready" | "starting" | "unknown" }
@@ -260,6 +239,23 @@ function copyPluginToStaging(sourceDir: string, pluginsDir: string, slug: string
 interface AdminPluginRow {
   slug?: string;
   statusLabel?: string;
+}
+
+/**
+ * The picker facts for one local server: is this slug already installed, and
+ * does server.json already allow unsigned plugins (no consent step needed).
+ * Null when server.json can't be read — the picker shows the row disabled.
+ */
+export function readInstallTargetInfo(
+  volumePath: string,
+  slug: string,
+): { deployed: boolean; allowUnsigned: boolean } | null {
+  const config = readServerJson(volumePath);
+  if (!config.ok) return null;
+  return {
+    deployed: config.file.installedPlugins.includes(slug),
+    allowUnsigned: config.file.allowUnsigned,
+  };
 }
 
 // ---------------------------------------------------------------------------
