@@ -19,7 +19,14 @@ export interface Server {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
+  /** Resolved client-side from the token mint (Central's list/get responses
+   *  no longer carry the URL — it is a membership capability bundled with the
+   *  join token). null until the first token for this server is minted. */
   tunnel_url: string | null;
+  /** Membership role from /v1/me/servers — absent on directory rows. */
+  role?: "owner" | "member";
+  /** Membership joined_at from /v1/me/servers — absent on directory rows. */
+  joined_at?: string;
   /**
    * Tunnel lifecycle reported by the runtime heartbeat: "demo" (ephemeral quick
    * tunnel), "named" (stable authenticated tunnel), "local" (no public tunnel),

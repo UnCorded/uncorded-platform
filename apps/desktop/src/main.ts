@@ -1437,10 +1437,25 @@ async function restoreServerContainers(): Promise<void> {
 // without pulling in Electron / docker / secret-store dependencies.
 function runReconcileRegistryWithCentral(): Promise<void> {
   return reconcileRegistryWithCentral({
+    // Memberships, not the online-only directory: an offline server is still
+    // ours and must NOT be treated as an orphan (the old directory-backed
+    // list purged local data for any server that was merely inactive).
     listRemoteServers: () => central.listServers(),
     listLocalRecords: () => listServerRecords(),
     wasQuarantinedThisSession: () => registryWasQuarantinedThisSession(),
-    purgeLocalServer,
+    purgeLocalServer: async (serverId: string) => {
+      await purgeLocalServer(serverId);
+      // An orphan purged here may be a server deleted from another client,
+      // sitting in Central's 'deleting' state waiting for OUR purge-confirm
+      // (this desktop holds the data). Fire it best-effort: 404 means it
+      // settled already, 409 means it wasn't a delete (we left / were
+      // kicked) — both fine to swallow; the reaper backstops a lost confirm.
+      try {
+        await central.confirmServerPurge(serverId);
+      } catch {
+        // Best-effort by design.
+      }
+    },
     log,
   });
 }
@@ -2158,7 +2173,11 @@ function registerIpcHandlers(): void {
   handleIpc(IPC.CENTRAL_GET_AVATAR_UPLOAD_URL, (_event, contentType: string) =>
     central.getAvatarUploadUrl(contentType),
   );
+  // central:list-servers serves the sidebar — the user's memberships
+  // (/v1/me/servers), liveness-independent so inactive servers never vanish.
+  // central:list-public-servers is the online-only Explore directory.
   handleIpc(IPC.CENTRAL_LIST_SERVERS, () => central.listServers());
+  handleIpc(IPC.CENTRAL_LIST_PUBLIC_SERVERS, () => central.listPublicServers());
   handleIpc(
     IPC.CENTRAL_CREATE_SERVER,
     (_event, payload: {
@@ -2187,6 +2206,22 @@ function registerIpcHandlers(): void {
     }
 
     await purgeLocalServer(serverId);
+
+    // Phase 2 of the two-phase delete: confirm the local purge so Central
+    // hard-deletes the row and frees the owned-quota slot. Best-effort — a
+    // 404 means it already settled, anything else is reaped server-side
+    // after the abandoned-delete window.
+    try {
+      await central.confirmServerPurge(serverId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/404|not found/i.test(msg)) {
+        log.warn("purge-confirm failed — Central reaper will free the slot", {
+          serverId,
+          err: msg,
+        });
+      }
+    }
   });
 
   handleIpc(IPC.SERVER_PROVISION_START, (_event, payload: {

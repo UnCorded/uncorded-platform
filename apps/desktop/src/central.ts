@@ -13,7 +13,7 @@ interface ApiErrorBody {
 }
 
 type JsonBody = Record<string, unknown> | undefined;
-type ServerTokenResponse = { token: string; expires_at: number };
+type ServerTokenResponse = { token: string; expires_at: number; tunnel_url: string | null };
 type CreatedServerResponse = { server_id: string; server_secret: string };
 type ServerRecord = {
   id: string;
@@ -21,7 +21,10 @@ type ServerRecord = {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
-  tunnel_url: string | null;
+  // tunnel_url is deliberately absent — Central returns it only from the
+  // token endpoint (capability, not metadata). tunnel_state still rides on
+  // reads so callers can tell when a public tunnel is up.
+  tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
   plugin_count: number;
@@ -297,7 +300,15 @@ export async function getAvatarUploadUrl(
   );
 }
 
+// Sidebar source: every server the user owns or belongs to, regardless of
+// liveness — an inactive server stays listed and startable. The public
+// directory (listPublicServers) is a separate, online-only surface.
 export async function listServers(): Promise<unknown> {
+  const res = await request<{ servers: unknown[] }>("/v1/me/servers");
+  return res.servers;
+}
+
+export async function listPublicServers(): Promise<unknown> {
   const res = await request<{
     servers: unknown[];
     total: number;
@@ -329,7 +340,15 @@ export async function getServer(serverId: string): Promise<ServerRecord> {
 }
 
 export async function deleteServer(serverId: string): Promise<void> {
-  return request<void>(`/v1/servers/${serverId}`, { method: "DELETE" });
+  await request<unknown>(`/v1/servers/${serverId}`, { method: "DELETE" });
+}
+
+// Phase 2 of the two-phase delete: tell Central the local container/volume
+// teardown finished so it can hard-delete the row and free the owned-quota
+// slot. 404 = already purged (success); anything else is the caller's to log
+// — the abandoned-delete reaper backstops a lost confirm.
+export async function confirmServerPurge(serverId: string): Promise<void> {
+  return request<void>(`/v1/servers/${serverId}/purge-confirm`, { method: "POST" });
 }
 
 function decodeJwtExpiration(token: string): number {
@@ -351,7 +370,7 @@ function decodeJwtExpiration(token: string): number {
 }
 
 export async function getServerToken(server_id: string): Promise<ServerTokenResponse> {
-  const res = await request<{ token: string }>(
+  const res = await request<{ token: string; tunnel_url?: string | null }>(
     "/v1/auth/token/server",
     { method: "POST" },
     { server_id },
@@ -360,5 +379,14 @@ export async function getServerToken(server_id: string): Promise<ServerTokenResp
   return {
     token: res.token,
     expires_at: decodeJwtExpiration(res.token),
+    tunnel_url: res.tunnel_url ?? null,
   };
+}
+
+// The only place Central reveals where a server lives. Owners use this during
+// provisioning to learn the cloudflared URL the runtime reported via
+// heartbeat (the desktop can't know a quick-tunnel URL any other way).
+export async function fetchTunnelUrl(serverId: string): Promise<string | null> {
+  const res = await getServerToken(serverId);
+  return res.tunnel_url;
 }

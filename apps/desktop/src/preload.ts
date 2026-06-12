@@ -41,6 +41,7 @@ const IPC = {
   CENTRAL_PATCH_PROFILE: "central:patch-profile",
   CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url",
   CENTRAL_LIST_SERVERS: "central:list-servers",
+  CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers",
   CENTRAL_CREATE_SERVER: "central:create-server",
   CENTRAL_GET_SERVER_TOKEN: "central:get-server-token",
   CENTRAL_DELETE_SERVER: "central:delete-server",
@@ -177,6 +178,9 @@ contextBridge.exposeInMainWorld("electron", {
     listServers(): Promise<Server[]> {
       return ipcInvoke<Server[]>(IPC.CENTRAL_LIST_SERVERS);
     },
+    listPublicServers(): Promise<Server[]> {
+      return ipcInvoke<Server[]>(IPC.CENTRAL_LIST_PUBLIC_SERVERS);
+    },
     createServer(
       name: string,
       description: string | null,
@@ -188,8 +192,8 @@ contextBridge.exposeInMainWorld("electron", {
         visibility,
       });
     },
-    getServerToken(serverId: string): Promise<{ token: string; expires_at: number }> {
-      return ipcInvoke<{ token: string; expires_at: number }>(IPC.CENTRAL_GET_SERVER_TOKEN, serverId);
+    getServerToken(serverId: string): Promise<{ token: string; expires_at: number; tunnel_url: string | null }> {
+      return ipcInvoke<{ token: string; expires_at: number; tunnel_url: string | null }>(IPC.CENTRAL_GET_SERVER_TOKEN, serverId);
     },
     deleteServer(serverId: string): Promise<void> {
       return ipcInvoke<void>(IPC.CENTRAL_DELETE_SERVER, serverId);

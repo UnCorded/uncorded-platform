@@ -107,8 +107,18 @@ export async function loadServers(): Promise<void> {
   setServersLoading(true);
   const prev = servers();
   try {
-    const list = await central.listServers();
-    setServers(list);
+    const list = await central.listMyServers();
+    // The membership payload carries no tunnel_url (it travels only with the
+    // join token — see getServerToken, which hydrates it via patchServer).
+    // Preserve any URL we already resolved so a 60s poll doesn't blank the
+    // field panels resolve through serverById().
+    const prevUrlById = new Map(prev.map((s) => [s.id, s.tunnel_url] as const));
+    setServers(
+      list.map((s) => ({
+        ...s,
+        tunnel_url: s.tunnel_url ?? prevUrlById.get(s.id) ?? null,
+      })),
+    );
     setServersError(null);
     startPolling();
 

@@ -15,6 +15,7 @@ export const IPC = {
   CENTRAL_PATCH_PROFILE: "central:patch-profile",
   CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url",
   CENTRAL_LIST_SERVERS: "central:list-servers",
+  CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers",
   CENTRAL_CREATE_SERVER: "central:create-server",
   CENTRAL_GET_SERVER_TOKEN: "central:get-server-token",
   CENTRAL_DELETE_SERVER: "central:delete-server",

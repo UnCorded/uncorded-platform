@@ -56,7 +56,14 @@ export interface Server {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
+  /** Resolved client-side from the token mint (Central's list/get responses
+   *  no longer carry the URL — it is a membership capability bundled with the
+   *  join token). null until the first token for this server is minted. */
   tunnel_url: string | null;
+  /** Membership role from /v1/me/servers — absent on directory rows. */
+  role?: "owner" | "member";
+  /** Membership joined_at from /v1/me/servers — absent on directory rows. */
+  joined_at?: string;
   /** Tunnel lifecycle reported by the runtime heartbeat: "demo" | "named" |
    *  "local" | "expired", or null until the first heartbeat carries it.
    *  Mirrors the website `Server` type so the bridge array stays assignable. */
@@ -274,13 +281,17 @@ export interface ElectronBridge {
       new_password?: string;
     }): Promise<Account>;
     getAvatarUploadUrl(contentType: string): Promise<AvatarUploadUrl>;
+    /** Sidebar source: the user's memberships (/v1/me/servers) — includes
+     *  offline servers so an inactive server never vanishes. */
     listServers(): Promise<Server[]>;
+    /** Online-only public directory (/v1/servers) — the Explore surface. */
+    listPublicServers(): Promise<Server[]>;
     createServer(
       name: string,
       description: string | null,
       visibility: "public" | "private",
     ): Promise<{ id: string; server_secret: string }>;
-    getServerToken(serverId: string): Promise<{ token: string; expires_at: number }>;
+    getServerToken(serverId: string): Promise<{ token: string; expires_at: number; tunnel_url: string | null }>;
     deleteServer(serverId: string): Promise<void>;
   };
   docker: {
@@ -651,6 +662,7 @@ export interface IpcChannelMap {
   readonly CENTRAL_PATCH_PROFILE: "central:patch-profile";
   readonly CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url";
   readonly CENTRAL_LIST_SERVERS: "central:list-servers";
+  readonly CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers";
   readonly CENTRAL_CREATE_SERVER: "central:create-server";
   readonly CENTRAL_GET_SERVER_TOKEN: "central:get-server-token";
   readonly CENTRAL_DELETE_SERVER: "central:delete-server";

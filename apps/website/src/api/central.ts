@@ -153,10 +153,25 @@ export async function unlinkProvider(provider: "google" | "discord" | "github"):
   await request<void>(`/v1/auth/providers/${provider}`, { method: "DELETE" });
 }
 
-export async function listServers(): Promise<Server[]> {
+// Sidebar source: the user's memberships (/v1/me/servers). Includes offline
+// servers — membership is orthogonal to liveness, so an inactive server stays
+// listed and one provisioning click from coming back. tunnel_url is absent in
+// the payload (it travels only with the join token); the store preserves any
+// already-hydrated URL across reloads.
+export async function listMyServers(): Promise<Server[]> {
   const desktop = desktopCentral();
   if (desktop) {
     return desktop.listServers();
+  }
+  const res = await request<{ servers: Server[] }>("/v1/me/servers");
+  return res.servers;
+}
+
+// Online-only public directory — the Explore surface.
+export async function listPublicServers(): Promise<Server[]> {
+  const desktop = desktopCentral();
+  if (desktop) {
+    return desktop.listPublicServers();
   }
   const res = await request<{
     servers: Server[];
@@ -189,11 +204,11 @@ export async function createServer(
 // RATE_SERVER_TOKEN bucket (30/min) and the bucket drains quickly enough on
 // retry storms that the user sees "Too many requests" before the runtime even
 // finishes warming up.
-const inFlightServerTokens = new Map<string, Promise<{ token: string; expires_at: number }>>();
+const inFlightServerTokens = new Map<string, Promise<{ token: string; expires_at: number; tunnel_url: string | null }>>();
 
 export async function getServerToken(
   server_id: string,
-): Promise<{ token: string; expires_at: number }> {
+): Promise<{ token: string; expires_at: number; tunnel_url: string | null }> {
   const existing = inFlightServerTokens.get(server_id);
   if (existing) return existing;
 
@@ -202,11 +217,11 @@ export async function getServerToken(
     if (desktop) {
       return desktop.getServerToken(server_id);
     }
-    const res = await request<{ token: string; expires_at: number }>("/v1/auth/token/server", {
+    const res = await request<{ token: string; expires_at: number; tunnel_url?: string | null }>("/v1/auth/token/server", {
       method: "POST",
       body: JSON.stringify({ server_id }),
     });
-    return { token: res.token, expires_at: res.expires_at };
+    return { token: res.token, expires_at: res.expires_at, tunnel_url: res.tunnel_url ?? null };
   })().finally(() => {
     if (inFlightServerTokens.get(server_id) === promise) {
       inFlightServerTokens.delete(server_id);
