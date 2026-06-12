@@ -11,6 +11,8 @@
 import os from "node:os";
 import path from "node:path";
 
+import { app } from "electron";
+
 import * as docker from "./docker";
 
 export const SERVER_IMAGE = "uncorded-runtime:latest";
@@ -180,6 +182,13 @@ export async function runServerContainer(args: RunServerArgs): Promise<string> {
       // symmetric NAT). UDP 3478 is the IANA-registered STUN/TURN port.
       { host: 3478, container: 3478, protocol: "udp" },
     ],
+    // Dev only: map host.docker.internal → the host gateway so the bridged
+    // container can reach a Central running on the developer's host loopback
+    // (getContainerCentralUrl rewrites localhost → host.docker.internal in dev).
+    // Docker Desktop resolves this alias automatically; native-Linux Docker
+    // needs the explicit mapping. Packaged builds heartbeat to prod and never
+    // need it.
+    ...(app.isPackaged ? {} : { addHosts: ["host.docker.internal:host-gateway"] }),
     // Electron owns the lifecycle (see main.ts startup / shutdown). Docker's
     // auto-restart path can never re-pipe stdin, so authenticated tunnels
     // would silently degrade to demo mode after a reboot. We rebuild the

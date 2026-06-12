@@ -2228,14 +2228,15 @@ function registerIpcHandlers(): void {
         sessionId,
         ...eventPayload,
       });
-    }, { devPluginFrontendMounts: devPluginFrontendMounts() }).then((result) => {
-      registerServer(result.serverId, {
-        containerId: result.containerId,
-        volumePath: result.volumePath,
-        hostPort: result.hostPort,
-        ...(result.tunnelPublicHostname ? { tunnelPublicHostname: result.tunnelPublicHostname } : {}),
-        ...(result.imageSignature ? { imageSignature: result.imageSignature } : {}),
-      });
+    }, {
+      devPluginFrontendMounts: devPluginFrontendMounts(),
+      // Persist to the local registry the instant the container is confirmed
+      // healthy — BEFORE provisioning's best-effort heartbeat / public-tunnel
+      // waits — so a server that's up but whose Central round-trip times out
+      // still survives a restart. restoreServerContainers reads this registry
+      // on every launch; without an entry here the server can never auto-boot.
+      persistServerRecord: (serverId, record) => { registerServer(serverId, record); },
+    }).then((result) => {
       sendToWindow(IPC.SERVER_PROVISION_DONE, { sessionId, ...result });
     }).catch((err) => {
       sendToWindow(IPC.SERVER_PROVISION_ERROR, {

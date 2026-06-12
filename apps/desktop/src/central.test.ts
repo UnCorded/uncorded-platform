@@ -39,6 +39,43 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+describe("getContainerCentralUrl", () => {
+  const ORIGINAL_OVERRIDE = process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+  afterEach(() => {
+    if (ORIGINAL_OVERRIDE === undefined) delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+    else process.env["UNCORDED_CONTAINER_CENTRAL_URL"] = ORIGINAL_OVERRIDE;
+  });
+
+  test("explicit UNCORDED_CONTAINER_CENTRAL_URL override wins verbatim", () => {
+    process.env["UNCORDED_CONTAINER_CENTRAL_URL"] = "https://my-tunnel.example.com";
+    expect(centralModule.getContainerCentralUrl()).toBe("https://my-tunnel.example.com");
+  });
+
+  test("dev: rewrites a localhost base to host.docker.internal so the bridged container can reach it", () => {
+    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+    process.env["VITE_CENTRAL_URL"] = "http://localhost:4000";
+    expect(centralModule.getContainerCentralUrl()).toBe("http://host.docker.internal:4000");
+  });
+
+  test("dev: rewrites 127.0.0.1 the same way", () => {
+    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+    process.env["VITE_CENTRAL_URL"] = "http://127.0.0.1:4000";
+    expect(centralModule.getContainerCentralUrl()).toBe("http://host.docker.internal:4000");
+  });
+
+  test("dev: passes a routable base through untouched (e.g. web pointed at prod)", () => {
+    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+    process.env["VITE_CENTRAL_URL"] = "https://central.uncorded.app";
+    expect(centralModule.getContainerCentralUrl()).toBe("https://central.uncorded.app");
+  });
+
+  test("dev: falls back to prod Central when the base URL is unparseable", () => {
+    delete process.env["UNCORDED_CONTAINER_CENTRAL_URL"];
+    process.env["VITE_CENTRAL_URL"] = "not a url";
+    expect(centralModule.getContainerCentralUrl()).toBe("https://central.uncorded.app");
+  });
+});
+
 describe("desktop central network errors", () => {
   test("request surfaces explicit network failure message", async () => {
     globalThis.fetch = mock(async () => {
