@@ -239,12 +239,16 @@ function frontendHtml(input: ScaffoldInput): string {
 }
 
 function packageJson(input: ScaffoldInput): string {
+  // Deliberately NO @uncorded/plugin-sdk dependency: the SDK is runtime-owned
+  // (resolved in-container via the /plugins tsconfig shim) and is not on npm —
+  // listing it would make `bun install` fail outright, blocking the install
+  // of legitimate third-party deps. package.json exists for those real deps.
   return (
     JSON.stringify(
       {
         name: input.slug,
         private: true,
-        dependencies: { "@uncorded/plugin-sdk": "0.0.1" },
+        dependencies: {},
       },
       null,
       2,
@@ -298,11 +302,13 @@ the starter "visits" feature with the real plugin described in \`PROMPT.md\`.
 - **The frontend is a sandboxed iframe with no build step.** Load
   \`/sdk/plugin-frontend.js\` from the runtime (never bundle it); inline your
   CSS/JS or ship pre-built assets next to \`index.html\`.
-- **Dependencies are not installed by the runtime.** Any backend import must
-  resolve from this folder's own \`node_modules\` — run \`bun install\` here
-  and ship the folder with \`node_modules\` present. (\`@uncorded/plugin-sdk\`
-  may not be on npm yet; when installed through the UnCorded desktop app, the
-  runtime provides the SDK, so a missing local install of the SDK alone is OK.)
+- **The SDK is provided by the runtime — never add \`@uncorded/plugin-sdk\`
+  to package.json.** It is not on npm; listing it makes \`bun install\` fail
+  and blocks your real dependencies. Import it freely in code — the runtime
+  resolves it at load time.
+- **Third-party dependencies are not installed by the runtime.** Anything
+  else you import must resolve from this folder's own \`node_modules\` —
+  \`bun add <pkg>\` here and ship the folder with \`node_modules\` present.
 - **Do not add a tsconfig.json to this folder.** The runtime provides SDK
   resolution for installed plugins through a tsconfig path-alias shim one
   directory above the plugin; a tsconfig inside the plugin shadows it (nearest

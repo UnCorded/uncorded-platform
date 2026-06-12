@@ -64,8 +64,10 @@ and the plugin lifecycle. Everything you need is in that one file.
   frontend SDK from \`/sdk/plugin-frontend.js\` (never bundle that).
 - \`migrations/001_init.sql\` — schema, applied once at load. Schema changes
   go in NEW numbered files; never edit or renumber applied migrations.
-- \`package.json\` — backend deps must live in this folder's node_modules
-  (run \`bun install\` here); the runtime does not install them.
+- \`package.json\` — for THIRD-PARTY backend deps only, which must live in
+  this folder's node_modules (\`bun add <pkg>\` here; the runtime does not
+  install them). \`@uncorded/plugin-sdk\` is provided by the runtime — import
+  it freely, never add it to package.json (it is not on npm).
 
 ## Hard rules
 
