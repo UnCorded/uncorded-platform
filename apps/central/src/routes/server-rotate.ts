@@ -21,7 +21,7 @@ export async function handleRotateSecret(
   if (!allowed) return rateLimited(retryAfter);
 
   const rows = await ctx.sql`
-    SELECT id, owner_id FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   if (rows.length === 0) return notFound("Server not found");
   if (rows[0]!.owner_id !== account.id) return forbidden("Not the server owner");

@@ -4,6 +4,10 @@ import type {
   Plugin,
   PluginDetail,
   AvatarUploadUrl,
+  MyInvite,
+  ServerInvite,
+  JoinRequest,
+  ServerMember,
 } from "./types";
 import { ApiError } from "./types";
 import { getElectron, isElectron } from "../lib/electron";
@@ -20,6 +24,27 @@ async function request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  // Inside Electron the session lives in the OS keychain, not a cookie jar —
+  // a plain renderer fetch is unauthenticated. Route through the main-process
+  // passthrough, which attaches the session and returns raw status+body so
+  // ApiError keeps its status (withAuthGate and the join surfaces branch on
+  // it). Feature-checked: an older packaged preload won't expose request().
+  const desktop = desktopCentral();
+  if (desktop?.request) {
+    const method = (init.method ?? "GET").toUpperCase();
+    const bodyJson = typeof init.body === "string" ? init.body : undefined;
+    const res = await desktop.request(method, path, bodyJson);
+    if (res.status < 200 || res.status >= 300) {
+      const errBody = res.body as { error?: { code?: string; message?: string } } | null;
+      throw new ApiError(
+        errBody?.error?.code ?? "UNKNOWN",
+        errBody?.error?.message ?? `Request failed with status ${res.status}`,
+        res.status,
+      );
+    }
+    return res.body as T;
+  }
+
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
@@ -153,10 +178,27 @@ export async function unlinkProvider(provider: "google" | "discord" | "github"):
   await request<void>(`/v1/auth/providers/${provider}`, { method: "DELETE" });
 }
 
-export async function listServers(): Promise<Server[]> {
+// Sidebar source: the user's memberships (/v1/me/servers). Includes offline
+// servers — membership is orthogonal to liveness, so an inactive server stays
+// listed and one provisioning click from coming back. tunnel_url is absent in
+// the payload (it travels only with the join token); the store preserves any
+// already-hydrated URL across reloads.
+export async function listMyServers(): Promise<Server[]> {
   const desktop = desktopCentral();
   if (desktop) {
     return desktop.listServers();
+  }
+  const res = await request<{ servers: Server[] }>("/v1/me/servers");
+  // Central omits tunnel_url entirely; pin it to null so the Server contract
+  // (string | null) holds at every call site instead of leaking undefined.
+  return res.servers.map((s) => ({ ...s, tunnel_url: s.tunnel_url ?? null }));
+}
+
+// Online-only public directory — the Explore surface.
+export async function listPublicServers(): Promise<Server[]> {
+  const desktop = desktopCentral();
+  if (desktop) {
+    return desktop.listPublicServers();
   }
   const res = await request<{
     servers: Server[];
@@ -164,7 +206,7 @@ export async function listServers(): Promise<Server[]> {
     page: number;
     per_page: number;
   }>("/v1/servers");
-  return res.servers;
+  return res.servers.map((s) => ({ ...s, tunnel_url: s.tunnel_url ?? null }));
 }
 
 export async function createServer(
@@ -189,11 +231,11 @@ export async function createServer(
 // RATE_SERVER_TOKEN bucket (30/min) and the bucket drains quickly enough on
 // retry storms that the user sees "Too many requests" before the runtime even
 // finishes warming up.
-const inFlightServerTokens = new Map<string, Promise<{ token: string; expires_at: number }>>();
+const inFlightServerTokens = new Map<string, Promise<{ token: string; expires_at: number; tunnel_url: string | null }>>();
 
 export async function getServerToken(
   server_id: string,
-): Promise<{ token: string; expires_at: number }> {
+): Promise<{ token: string; expires_at: number; tunnel_url: string | null }> {
   const existing = inFlightServerTokens.get(server_id);
   if (existing) return existing;
 
@@ -202,11 +244,11 @@ export async function getServerToken(
     if (desktop) {
       return desktop.getServerToken(server_id);
     }
-    const res = await request<{ token: string; expires_at: number }>("/v1/auth/token/server", {
+    const res = await request<{ token: string; expires_at: number; tunnel_url?: string | null }>("/v1/auth/token/server", {
       method: "POST",
       body: JSON.stringify({ server_id }),
     });
-    return { token: res.token, expires_at: res.expires_at };
+    return { token: res.token, expires_at: res.expires_at, tunnel_url: res.tunnel_url ?? null };
   })().finally(() => {
     if (inFlightServerTokens.get(server_id) === promise) {
       inFlightServerTokens.delete(server_id);
@@ -248,6 +290,89 @@ export async function patchServer(
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// --- Membership: invites, join requests, access list ---
+// Plain request() like patchServer — these are session-cookie endpoints with
+// no desktop-IPC indirection needed.
+
+export async function listMyInvites(): Promise<MyInvite[]> {
+  const res = await request<{ invites: MyInvite[] }>("/v1/me/invites");
+  return res.invites;
+}
+
+export async function acceptInvite(inviteId: string): Promise<{ server_id: string }> {
+  return request<{ server_id: string; status: string }>(`/v1/me/invites/${inviteId}/accept`, {
+    method: "POST",
+  });
+}
+
+export async function declineInvite(inviteId: string): Promise<void> {
+  await request<void>(`/v1/me/invites/${inviteId}/decline`, { method: "POST" });
+}
+
+export async function leaveServer(serverId: string): Promise<void> {
+  await request<void>(`/v1/me/servers/${serverId}`, { method: "DELETE" });
+}
+
+export async function createInvite(
+  serverId: string,
+  username: string,
+): Promise<{ invite_id: string; expires_at: string }> {
+  return request<{ invite_id: string; expires_at: string; status: string }>(
+    `/v1/servers/${serverId}/invites`,
+    { method: "POST", body: JSON.stringify({ username }) },
+  );
+}
+
+export async function listServerInvites(serverId: string): Promise<ServerInvite[]> {
+  const res = await request<{ invites: ServerInvite[] }>(`/v1/servers/${serverId}/invites`);
+  return res.invites;
+}
+
+export async function revokeInvite(serverId: string, inviteId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/invites/${inviteId}`, { method: "DELETE" });
+}
+
+export async function createJoinRequest(serverId: string): Promise<{ request_id: string }> {
+  return request<{ request_id: string; status: string }>(
+    `/v1/servers/${serverId}/join-requests`,
+    { method: "POST" },
+  );
+}
+
+export async function listJoinRequests(serverId: string): Promise<JoinRequest[]> {
+  const res = await request<{ requests: JoinRequest[] }>(`/v1/servers/${serverId}/join-requests`);
+  return res.requests;
+}
+
+export async function acceptJoinRequest(serverId: string, requestId: string): Promise<void> {
+  await request<unknown>(`/v1/servers/${serverId}/join-requests/${requestId}/accept`, {
+    method: "POST",
+  });
+}
+
+export async function declineJoinRequest(serverId: string, requestId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/join-requests/${requestId}/decline`, {
+    method: "POST",
+  });
+}
+
+export async function listServerMembers(serverId: string): Promise<ServerMember[]> {
+  const res = await request<{ members: ServerMember[] }>(`/v1/servers/${serverId}/members`);
+  return res.members;
+}
+
+export async function kickMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}`, { method: "DELETE" });
+}
+
+export async function banMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}/ban`, { method: "POST" });
+}
+
+export async function unbanMember(serverId: string, accountId: string): Promise<void> {
+  await request<void>(`/v1/servers/${serverId}/members/${accountId}/ban`, { method: "DELETE" });
 }
 
 export async function deleteServer(serverId: string): Promise<void> {

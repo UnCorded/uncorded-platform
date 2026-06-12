@@ -56,7 +56,7 @@ export async function handleHeartbeat(
 
   // Look up server
   const serverRows = await ctx.sql`
-    SELECT id, server_secret_hash FROM servers WHERE id = ${serverId}
+    SELECT id, server_secret_hash FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   const server = serverRows[0];
   if (!server) return notFound("Server not found");

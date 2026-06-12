@@ -1,7 +1,8 @@
 import type { RouteContext } from "../routes";
 import { authenticate, RATE_DIRECTORY_BROWSE, type RateLimitConfig } from "../middleware";
-import { badRequest, forbidden, notFound, rateLimited } from "../errors";
+import { badRequest, conflict, errorResponse, forbidden, notFound, rateLimited } from "../errors";
 import { generateServerSecret, hashToken } from "../crypto";
+import { MAX_OWNED_SERVERS } from "../membership";
 
 const RATE_SERVER_CREATE: RateLimitConfig = { maxTokens: 10, refillRate: 10 / 60 };
 const RATE_SERVER_GET: RateLimitConfig = { maxTokens: 60, refillRate: 1 };
@@ -18,17 +19,16 @@ const RATE_SERVER_DELETE: RateLimitConfig = { maxTokens: 10, refillRate: 10 / 60
 // the single source — the directory filter, the derived flag, and
 // sweepStaleServers all reference it so they can't drift apart. Passed as a
 // parameter cast to interval (`${SERVER_STALE_INTERVAL}::interval`).
-const SERVER_STALE_INTERVAL = "30 minutes";
+export const SERVER_STALE_INTERVAL = "30 minutes";
 
 // --- Helpers ---
 
-interface ServerRow {
+export interface ServerRow {
   id: string;
   name: string;
   description: string | null;
   visibility: string;
   owner_id: string;
-  tunnel_url: string | null;
   tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
@@ -39,14 +39,17 @@ interface ServerRow {
   updated_at: string;
 }
 
-function serverJson(row: ServerRow) {
+// tunnel_url is deliberately absent: the join endpoint is a capability, not
+// directory metadata. It is returned only by POST /v1/auth/token/server,
+// bundled with the token, after the membership check passes — so knowing a
+// server exists never reveals where it lives.
+export function serverJson(row: ServerRow) {
   return {
     id: row.id,
     name: row.name,
     description: row.description ?? null,
     visibility: row.visibility,
     owner_id: row.owner_id,
-    tunnel_url: row.tunnel_url ?? null,
     tunnel_state: row.tunnel_state ?? null,
     runtime_version: row.runtime_version ?? null,
     connected_users: row.connected_users,
@@ -131,6 +134,17 @@ export async function handleCreateServer(
   const secretHash = await hashToken(secret);
 
   const rows = await ctx.sql.begin(async (tx) => {
+    // Serialize creates per account so two concurrent requests can't both
+    // pass the quota count. The account row is the natural lock target.
+    await tx`SELECT id FROM accounts WHERE id = ${account.id} FOR UPDATE`;
+
+    const owned = await tx`
+      SELECT count(*)::int AS total FROM servers WHERE owner_id = ${account.id}
+    `;
+    if ((owned[0]!.total as number) >= MAX_OWNED_SERVERS) {
+      return null;
+    }
+
     const inserted = await tx`
       INSERT INTO servers (name, description, visibility, owner_id, server_secret_hash)
       VALUES (${name}, ${description}, ${visibility}, ${account.id}, ${secretHash})
@@ -143,8 +157,23 @@ export async function handleCreateServer(
       VALUES (${serverId}, 1)
     `;
 
+    // Mirror ownership into server_members so "servers I belong to" is one
+    // query. servers.owner_id stays the source of truth (see schema.sql).
+    await tx`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${serverId}, ${account.id}, 'owner', 'active')
+    `;
+
     return inserted;
   });
+
+  if (rows === null) {
+    return errorResponse(
+      403,
+      "QUOTA_EXCEEDED",
+      `You can own at most ${MAX_OWNED_SERVERS} servers`,
+    );
+  }
 
   return new Response(
     JSON.stringify({
@@ -194,12 +223,13 @@ export async function handleListServers(
   if (search) {
     const pattern = `%${search}%`;
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+      SELECT id, name, description, visibility, owner_id, tunnel_state,
              runtime_version, connected_users, plugin_count,
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -209,7 +239,8 @@ export async function handleListServers(
     `;
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -217,12 +248,13 @@ export async function handleListServers(
     `;
   } else {
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+      SELECT id, name, description, visibility, owner_id, tunnel_state,
              runtime_version, connected_users, plugin_count,
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -231,7 +263,8 @@ export async function handleListServers(
     `;
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -265,15 +298,27 @@ export async function handleGetServer(
   // once heartbeats stop past the liveness window), derived the same way as the
   // directory so a stale server can't show a green dot.
   const rows = await ctx.sql`
-    SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+    SELECT id, name, description, visibility, owner_id, tunnel_state,
            runtime_version, connected_users, plugin_count,
            (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
            last_heartbeat_at, created_at, updated_at
-    FROM servers WHERE id = ${serverId}
+    FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
 
   const row = rows[0];
   if (!row) return notFound("Server not found");
+
+  // Private servers are invisible to non-members: 404, not 403, so probing an
+  // id can't confirm the server exists. Banned members get the same 404 — a
+  // ban removes the server from their world entirely.
+  if ((row.visibility as string) === "private" && row.owner_id !== account.id) {
+    const member = await ctx.sql`
+      SELECT 1 FROM server_members
+      WHERE server_id = ${serverId} AND account_id = ${account.id}
+        AND status = 'active'
+    `;
+    if (member.length === 0) return notFound("Server not found");
+  }
 
   return Response.json(serverJson(row as unknown as ServerRow));
 }
@@ -299,7 +344,7 @@ export async function handleUpdateServer(
   if (!updateAllowed) return rateLimited(updateRetryAfter);
 
   const existing = await ctx.sql`
-    SELECT id, owner_id FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   if (existing.length === 0) return notFound("Server not found");
   if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
@@ -351,24 +396,35 @@ export async function handleUpdateServer(
     "description" in updates ? updates["description"] : undefined;
   const visibility = updates["visibility"] ?? undefined;
 
+  // deleted_at IS NULL repeats here (not just in the pre-check) so a DELETE
+  // landing between the check and this UPDATE can't mutate a deleting server
+  // — the race loser gets the same 404 every other read path gives.
   const rows = await ctx.sql`
     UPDATE servers SET
       name = COALESCE(${name ?? null}, name),
       description = ${description !== undefined ? description : ctx.sql`description`},
       visibility = COALESCE(${visibility ?? null}, visibility),
       updated_at = now()
-    WHERE id = ${serverId}
-    RETURNING id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+    WHERE id = ${serverId} AND deleted_at IS NULL
+    RETURNING id, name, description, visibility, owner_id, tunnel_state,
               runtime_version, connected_users, plugin_count,
               (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
               last_heartbeat_at, created_at, updated_at
   `;
+  if (rows.length === 0) return notFound("Server not found");
 
   return Response.json(serverJson(rows[0] as unknown as ServerRow));
 }
 
 // --- DELETE /v1/servers/:id ---
 
+// Phase 1 of the two-phase delete: mark the server deleting and cascade the
+// social rows. Every read path treats a deleting server as gone immediately
+// (member rows dropped — freeing the members' joined slots — invites revoked,
+// requests declined), but the servers row itself survives so the owner's
+// quota slot stays held until the desktop confirms the local data purge via
+// POST /:id/purge-confirm, or the abandoned-delete reaper times out the
+// handshake. Idempotent: re-deleting a deleting server is another 202.
 export async function handleDeleteServer(
   request: Request,
   ctx: RouteContext,
@@ -382,12 +438,79 @@ export async function handleDeleteServer(
   if (!deleteAllowed) return rateLimited(deleteRetryAfter);
 
   const existing = await ctx.sql`
-    SELECT id, owner_id FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id, deleted_at FROM servers WHERE id = ${serverId}
   `;
   if (existing.length === 0) return notFound("Server not found");
   if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
 
-  await ctx.sql`DELETE FROM servers WHERE id = ${serverId}`;
+  if (existing[0]!.deleted_at === null) {
+    await ctx.sql.begin(async (tx) => {
+      await tx`
+        UPDATE servers SET deleted_at = now(), updated_at = now()
+        WHERE id = ${serverId} AND deleted_at IS NULL
+      `;
+      await tx`
+        DELETE FROM server_members
+        WHERE server_id = ${serverId} AND role = 'member'
+      `;
+      await tx`
+        UPDATE server_invitations SET status = 'revoked'
+        WHERE server_id = ${serverId} AND status = 'pending'
+      `;
+      await tx`
+        UPDATE server_join_requests SET status = 'declined', resolved_at = now()
+        WHERE server_id = ${serverId} AND status = 'pending'
+      `;
+    });
+  }
 
+  return Response.json({ status: "deleting" }, { status: 202 });
+}
+
+// --- POST /v1/servers/:id/purge-confirm ---
+//
+// Phase 2: the desktop calls this after it has torn down the container and
+// archived/purged the local volume. Hard-deletes the row (FK cascades clean
+// the rest) and frees the owner's quota slot. A 404 after a retry means the
+// purge already landed — callers should treat it as success.
+export async function handlePurgeConfirm(
+  request: Request,
+  ctx: RouteContext,
+  serverId: string,
+): Promise<Response> {
+  const account = await authenticate(request, ctx.sql);
+  if (account instanceof Response) return account;
+
+  const { allowed, retryAfter } =
+    ctx.rateLimiter.consume(`server-delete:${account.id}`, RATE_SERVER_DELETE);
+  if (!allowed) return rateLimited(retryAfter);
+
+  const existing = await ctx.sql`
+    SELECT id, owner_id, deleted_at FROM servers WHERE id = ${serverId}
+  `;
+  if (existing.length === 0) return notFound("Server not found");
+  if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
+  if (existing[0]!.deleted_at === null) {
+    return conflict("Server is not being deleted — call DELETE /v1/servers/:id first");
+  }
+
+  await ctx.sql`DELETE FROM servers WHERE id = ${serverId}`;
   return new Response(null, { status: 204 });
+}
+
+// Reaper for abandoned deletes: if the purge-confirm handshake never arrives
+// (desktop uninstalled, machine gone), the held quota slot must not leak
+// forever. After this window the local-purge guarantee is moot anyway — we
+// hard-delete and free the slot. Runs hourly (see index.ts).
+const ABANDONED_DELETE_WINDOW = "7 days";
+
+export async function sweepAbandonedDeletes(
+  sql: RouteContext["sql"],
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM servers
+    WHERE deleted_at IS NOT NULL
+      AND deleted_at < now() - ${ABANDONED_DELETE_WINDOW}::interval
+  `;
+  return result.count;
 }

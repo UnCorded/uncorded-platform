@@ -56,7 +56,15 @@ export interface Server {
   description: string | null;
   visibility: "public" | "private";
   owner_id: string;
+  /** Membership capability: carried by /v1/me/servers (every row there is a
+   *  server you belong to) and by the token mint, but stripped from the
+   *  public directory and GET /:id. null until the first tunneled
+   *  heartbeat. */
   tunnel_url: string | null;
+  /** Membership role from /v1/me/servers — absent on directory rows. */
+  role?: "owner" | "member";
+  /** Membership joined_at from /v1/me/servers — absent on directory rows. */
+  joined_at?: string;
   /** Tunnel lifecycle reported by the runtime heartbeat: "demo" | "named" |
    *  "local" | "expired", or null until the first heartbeat carries it.
    *  Mirrors the website `Server` type so the bridge array stays assignable. */
@@ -274,13 +282,26 @@ export interface ElectronBridge {
       new_password?: string;
     }): Promise<Account>;
     getAvatarUploadUrl(contentType: string): Promise<AvatarUploadUrl>;
+    /** Generic authed /v1 passthrough — the renderer's own fetch carries no
+     *  session inside Electron, so plain Central calls proxy through main
+     *  with the keychain session attached. Optional: older packaged preloads
+     *  (auto-update lag) won't expose it; callers must feature-check. */
+    request?(
+      method: string,
+      path: string,
+      bodyJson?: string,
+    ): Promise<{ status: number; body: unknown }>;
+    /** Sidebar source: the user's memberships (/v1/me/servers) — includes
+     *  offline servers so an inactive server never vanishes. */
     listServers(): Promise<Server[]>;
+    /** Online-only public directory (/v1/servers) — the Explore surface. */
+    listPublicServers(): Promise<Server[]>;
     createServer(
       name: string,
       description: string | null,
       visibility: "public" | "private",
     ): Promise<{ id: string; server_secret: string }>;
-    getServerToken(serverId: string): Promise<{ token: string; expires_at: number }>;
+    getServerToken(serverId: string): Promise<{ token: string; expires_at: number; tunnel_url: string | null }>;
     deleteServer(serverId: string): Promise<void>;
   };
   docker: {
@@ -650,7 +671,9 @@ export interface IpcChannelMap {
   readonly CENTRAL_GET_PROFILE: "central:get-profile";
   readonly CENTRAL_PATCH_PROFILE: "central:patch-profile";
   readonly CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url";
+  readonly CENTRAL_REQUEST: "central:request";
   readonly CENTRAL_LIST_SERVERS: "central:list-servers";
+  readonly CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers";
   readonly CENTRAL_CREATE_SERVER: "central:create-server";
   readonly CENTRAL_GET_SERVER_TOKEN: "central:get-server-token";
   readonly CENTRAL_DELETE_SERVER: "central:delete-server";

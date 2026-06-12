@@ -8,8 +8,13 @@ import { ApiError } from "../api/types";
 // typed-error branches in openConnection so a refactor can't silently
 // remove them.
 
-const getServerToken = mock<(id: string) => Promise<{ token: string; expires_at: number }>>();
+const getServerToken =
+  mock<(id: string) => Promise<{ token: string; expires_at: number; tunnel_url: string | null }>>();
 const purgeServer = mock<(id: string, reason: string) => Promise<void>>();
+// Hoisted token-cache spies so tests can assert on them (the reconnect-healing
+// regression below checks clearToken fires on a never-opened close).
+const storeToken = mock();
+const clearToken = mock();
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -69,8 +74,8 @@ beforeAll(async () => {
   await mock.module("./server-purge", () => ({ ...realPurge, purgeServer }));
   await mock.module("@/lib/tokens", () => ({
     ...realTokens,
-    storeToken: mock(),
-    clearToken: mock(),
+    storeToken,
+    clearToken,
   }));
   // Swap the global WebSocket so openConnection doesn't try to dial a real host.
   (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
@@ -91,6 +96,8 @@ beforeEach(() => {
   );
   FakeWebSocket.instances = [];
   FakeWebSocket.autoOpen = false;
+  storeToken.mockReset();
+  clearToken.mockReset();
 });
 
 afterAll(() => {
@@ -212,6 +219,7 @@ describe("expired-tunnel gate (WS4)", () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     const server = { ...makeServer("srv-demo"), tunnel_state: "demo" as const };
@@ -222,16 +230,27 @@ describe("expired-tunnel gate (WS4)", () => {
 });
 
 describe("forceReconnect (PR-TR5)", () => {
-  test("no-op when the server has no tunnel_url", async () => {
+  test("no tunnel_url anywhere → no dial, cached token dropped for a fresh re-mint", async () => {
+    // The URL is a capability resolved by the token mint now, so a missing
+    // tunnel_url no longer early-returns — it mints, and only bails (clearing
+    // the cache so the NEXT attempt re-mints and re-resolves) when the mint
+    // comes back URL-less too.
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
+    });
     const server = { ...makeServer("srv-no-tunnel"), tunnel_url: null };
     await wsModule.forceReconnect(server);
     expect(FakeWebSocket.instances.length).toBe(0);
+    expect(clearToken).toHaveBeenCalledWith("srv-no-tunnel");
   });
 
   test("opens a fresh connection when none exists", async () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     const server = makeServer("srv-force-open");
@@ -244,6 +263,7 @@ describe("forceReconnect (PR-TR5)", () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     const server = makeServer("srv-already-open");
@@ -266,6 +286,7 @@ describe("forceReconnect (PR-TR5)", () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     await wsModule.forceReconnect(server);
@@ -279,6 +300,7 @@ describe("WS close-code branches", () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     const server = makeServer(serverId);
@@ -338,6 +360,7 @@ describe("co-view.render-tree.projected routing (CV-FOUND-6)", () => {
     getServerToken.mockResolvedValueOnce({
       token: "fake-token",
       expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
     });
     FakeWebSocket.autoOpen = true;
     await wsModule.connect(makeServer(serverId));
@@ -407,5 +430,66 @@ describe("co-view.render-tree.projected routing (CV-FOUND-6)", () => {
     unsubSession();
     unsubProj();
     wsModule.disconnect("srv-cvlegacy");
+  });
+});
+
+// Reconnect healing (membership branch): tunnel_url rides only with the token
+// mint, so (a) a mint that returns a URL must be the one dialed — even when
+// the caller's snapshot is stale — and (b) a socket that dies without ever
+// opening must drop the cached token so the next attempt re-mints and
+// re-resolves the URL instead of redialing a dead address until expiry.
+describe("reconnect healing — mint-resolved URLs", () => {
+  test("dials the minted tunnel_url, not the caller's stale snapshot", async () => {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: "https://fresh.example",
+    });
+    FakeWebSocket.autoOpen = true;
+    const server = { ...makeServer("srv-heal-mint"), tunnel_url: "https://stale.example" };
+    await wsModule.connect(server);
+    const ws = FakeWebSocket.instances.at(-1);
+    expect(ws?.url).toBe("wss://fresh.example/ws");
+    wsModule.disconnect("srv-heal-mint");
+  });
+
+  test("never-opened close clears the cached token and schedules a reconnect", async () => {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: "https://dead.example",
+    });
+    FakeWebSocket.autoOpen = false; // dial never reaches open
+    const server = makeServer("srv-heal-close");
+    const connecting = wsModule.connect(server);
+    // connect() awaits the open promise, which also resolves on close.
+    await Promise.resolve();
+    const ws = FakeWebSocket.instances.at(-1);
+    expect(ws).toBeDefined();
+    clearToken.mockClear();
+    ws!.fireClose(1006);
+    await connecting;
+    // The token cache must be dropped so the next attempt re-mints (and with
+    // it re-resolves the tunnel URL from Central).
+    expect(clearToken).toHaveBeenCalledWith("srv-heal-close");
+    wsModule.abortReconnect("srv-heal-close");
+  });
+
+  test("a close AFTER a successful open does not take the never-opened branch", async () => {
+    getServerToken.mockResolvedValueOnce({
+      token: "fake-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      tunnel_url: null,
+    });
+    FakeWebSocket.autoOpen = true;
+    const server = makeServer("srv-heal-opened");
+    await wsModule.connect(server);
+    const ws = FakeWebSocket.instances.at(-1);
+    clearToken.mockClear();
+    // Pre-auth close on an OPENED socket (e.g. network reset mid-handshake):
+    // the cache survives so a transient blip doesn't burn a mint.
+    ws!.fireClose(1006);
+    expect(clearToken).not.toHaveBeenCalled();
+    wsModule.abortReconnect("srv-heal-opened");
   });
 });

@@ -5,20 +5,26 @@ import {
   registerAndLogin,
   type TestServer,
 } from "../test-helpers";
-import { sweepStaleServers } from "./servers";
+import { sweepStaleServers, sweepAbandonedDeletes } from "./servers";
 
 let ts: TestServer;
 let ownerToken: string;
-let ownerAccountId: string;
 let otherToken: string;
+// Second creator account for the detail/patch/delete describes — the owned
+// quota (MAX_OWNED_SERVERS) caps creates per account, so this file spreads
+// its fixture servers across accounts instead of piling them on one.
+let crudToken: string;
+let crudAccountId: string;
 
 beforeAll(async () => {
   ts = await startTestServer();
   const owner = await registerAndLogin(ts, "owner");
   ownerToken = owner.token;
-  ownerAccountId = owner.accountId;
   const other = await registerAndLogin(ts, "other");
   otherToken = other.token;
+  const crud = await registerAndLogin(ts, "crudowner");
+  crudToken = crud.token;
+  crudAccountId = crud.accountId;
 });
 
 afterAll(async () => {
@@ -140,6 +146,9 @@ describe("GET /v1/servers", () => {
 describe("GET /v1/servers — directory hygiene", () => {
   // Helper: create a public server and force its liveness/tunnel columns to an
   // arbitrary state, bypassing the heartbeat path so each case is isolated.
+  // Each server gets its own throwaway creator account so this describe can
+  // grow without bumping into the per-account owned quota.
+  let hygieneSeq = 0;
   async function makeServer(
     name: string,
     cols: {
@@ -149,9 +158,10 @@ describe("GET /v1/servers — directory hygiene", () => {
       tunnel_state: string | null;
     },
   ): Promise<string> {
+    const creator = await registerAndLogin(ts, `hygiene${hygieneSeq++}`);
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(creator.token) },
       body: JSON.stringify({ name, visibility: "public" }),
     });
     const id = (await res.json()).server_id as string;
@@ -262,7 +272,7 @@ describe("GET /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Detail Server" }),
     });
     const body = await res.json();
@@ -271,13 +281,13 @@ describe("GET /v1/servers/:id", () => {
 
   test("returns server details", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.id).toBe(serverId);
     expect(body.name).toBe("Detail Server");
-    expect(body.owner_id).toBe(ownerAccountId);
+    expect(body.owner_id).toBe(crudAccountId);
     // Must not include server_secret_hash
     expect(body.server_secret_hash).toBeUndefined();
   });
@@ -285,7 +295,7 @@ describe("GET /v1/servers/:id", () => {
   test("returns 404 for non-existent server", async () => {
     const res = await fetch(
       `${ts.url}/v1/servers/00000000-0000-0000-0000-000000000000`,
-      { headers: authHeaders(ownerToken) },
+      { headers: authHeaders(crudToken) },
     );
     expect(res.status).toBe(404);
   });
@@ -297,7 +307,7 @@ describe("PATCH /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Patchable" }),
     });
     const body = await res.json();
@@ -307,7 +317,7 @@ describe("PATCH /v1/servers/:id", () => {
   test("owner can update name and visibility", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Renamed", visibility: "public" }),
     });
     expect(res.status).toBe(200);
@@ -328,7 +338,7 @@ describe("PATCH /v1/servers/:id", () => {
   test("returns 400 for empty update", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
@@ -341,7 +351,7 @@ describe("DELETE /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Deletable" }),
     });
     const body = await res.json();
@@ -356,16 +366,217 @@ describe("DELETE /v1/servers/:id", () => {
     expect(res.status).toBe(403);
   });
 
-  test("owner can delete, subsequent GET returns 404", async () => {
+  test("owner delete marks deleting (202); server reads as gone everywhere", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "DELETE",
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(202);
+    expect((await res.json()).status).toBe("deleting");
+
+    // The row survives (quota slot held) but every read path answers 404.
+    const dbRow = await ts.sql`
+      SELECT deleted_at FROM servers WHERE id = ${serverId}
+    `;
+    expect(dbRow.length).toBe(1);
+    expect(dbRow[0]!.deleted_at).not.toBeNull();
 
     const getRes = await fetch(`${ts.url}/v1/servers/${serverId}`, {
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
     expect(getRes.status).toBe(404);
+
+    const tokenRes = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ server_id: serverId }),
+    });
+    expect(tokenRes.status).toBe(404);
+
+    // Re-deleting is idempotent.
+    const again = await fetch(`${ts.url}/v1/servers/${serverId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    expect(again.status).toBe(202);
+  });
+
+  test("purge-confirm hard-deletes the row; repeat answers 404", async () => {
+    const confirm = await fetch(`${ts.url}/v1/servers/${serverId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(confirm.status).toBe(204);
+
+    const dbRow = await ts.sql`SELECT 1 FROM servers WHERE id = ${serverId}`;
+    expect(dbRow.length).toBe(0);
+
+    const again = await fetch(`${ts.url}/v1/servers/${serverId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(again.status).toBe(404);
+  });
+
+  test("purge-confirm on a live server is 409; non-owner is 403", async () => {
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ name: "Still Alive" }),
+    });
+    const liveId = (await res.json()).server_id as string;
+
+    const live = await fetch(`${ts.url}/v1/servers/${liveId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(live.status).toBe(409);
+
+    await fetch(`${ts.url}/v1/servers/${liveId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    const nonOwner = await fetch(`${ts.url}/v1/servers/${liveId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(otherToken),
+    });
+    expect(nonOwner.status).toBe(403);
+  });
+
+  test("abandoned-delete reaper frees rows past the handshake window", async () => {
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ name: "Abandoned" }),
+    });
+    const abandonedId = (await res.json()).server_id as string;
+    await fetch(`${ts.url}/v1/servers/${abandonedId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    await ts.sql`
+      UPDATE servers SET deleted_at = now() - interval '8 days'
+      WHERE id = ${abandonedId}
+    `;
+
+    const reaped = await sweepAbandonedDeletes(ts.sql);
+    expect(reaped).toBeGreaterThanOrEqual(1);
+    const gone = await ts.sql`SELECT 1 FROM servers WHERE id = ${abandonedId}`;
+    expect(gone.length).toBe(0);
+  });
+});
+
+describe("capability hardening — tunnel_url never leaves the directory", () => {
+  let hardOwnerToken: string;
+  let hardServerId: string;
+
+  beforeAll(async () => {
+    const owner = await registerAndLogin(ts, "hardowner");
+    hardOwnerToken = owner.token;
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(hardOwnerToken) },
+      body: JSON.stringify({ name: "Capability Server", visibility: "public" }),
+    });
+    hardServerId = (await res.json()).server_id;
+    await ts.sql`
+      UPDATE servers
+      SET is_online = true,
+          last_heartbeat_at = now(),
+          tunnel_url = 'https://secret-endpoint.trycloudflare.com',
+          tunnel_state = 'named'
+      WHERE id = ${hardServerId}
+    `;
+  });
+
+  test("GET /v1/servers responses carry no tunnel_url (regression: URL leak)", async () => {
+    const res = await fetch(`${ts.url}/v1/servers?per_page=100`, {
+      headers: authHeaders(hardOwnerToken),
+    });
+    const body = await res.json();
+    const row = body.servers.find(
+      (s: { name: string }) => s.name === "Capability Server",
+    );
+    expect(row).toBeDefined();
+    expect("tunnel_url" in row).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("secret-endpoint");
+  });
+
+  test("GET /v1/servers/:id carries no tunnel_url, even for the owner", async () => {
+    const res = await fetch(`${ts.url}/v1/servers/${hardServerId}`, {
+      headers: authHeaders(hardOwnerToken),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect("tunnel_url" in body).toBe(false);
+    // Status fields the owner needs are still present.
+    expect(body.tunnel_state).toBe("named");
+    expect(body.is_online).toBe(true);
+  });
+
+  test("PATCH /v1/servers/:id response carries no tunnel_url", async () => {
+    const res = await fetch(`${ts.url}/v1/servers/${hardServerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders(hardOwnerToken) },
+      body: JSON.stringify({ description: "patched" }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect("tunnel_url" in body).toBe(false);
+  });
+});
+
+describe("GET /v1/servers/:id — private servers are invisible to non-members", () => {
+  let privOwnerToken: string;
+  let privServerId: string;
+
+  beforeAll(async () => {
+    const owner = await registerAndLogin(ts, "privowner");
+    privOwnerToken = owner.token;
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(privOwnerToken) },
+      body: JSON.stringify({ name: "Invisible Server", visibility: "private" }),
+    });
+    privServerId = (await res.json()).server_id;
+  });
+
+  test("non-member gets 404, not 403 (regression: existence leak)", async () => {
+    const stranger = await registerAndLogin(ts, "privstranger");
+    const res = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(stranger.token),
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error.code).toBe("NOT_FOUND");
+  });
+
+  test("banned member gets 404 too", async () => {
+    const banned = await registerAndLogin(ts, "privbanned");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${privServerId}, ${banned.accountId}, 'member', 'banned')
+    `;
+    const res = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(banned.token),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("active member and owner still see it", async () => {
+    const member = await registerAndLogin(ts, "privmember");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${privServerId}, ${member.accountId}, 'member', 'active')
+    `;
+    const memberRes = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(member.token),
+    });
+    expect(memberRes.status).toBe(200);
+
+    const ownerRes = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(privOwnerToken),
+    });
+    expect(ownerRes.status).toBe(200);
   });
 });

@@ -14,6 +14,10 @@
     "migrate:004:vault": "bun run scripts/dev-secrets.ts bun run migrations/004-voice-reachability.ts",
     "migrate:005": "bun run migrations/005-tunnel-state.ts",
     "migrate:005:vault": "bun run scripts/dev-secrets.ts bun run migrations/005-tunnel-state.ts",
+    "migrate:006": "bun run migrations/006-membership.ts",
+    "migrate:006:vault": "bun run scripts/dev-secrets.ts bun run migrations/006-membership.ts",
+    "migrate:007": "bun run migrations/007-two-phase-delete.ts",
+    "migrate:007:vault": "bun run scripts/dev-secrets.ts bun run migrations/007-two-phase-delete.ts",
     "nudge-runtimes:vault": "bun run scripts/dev-secrets.ts bun run scripts/nudge-runtimes-after-key-rotation.ts",
     "restore-db-password": "bun run scripts/restore-db-password.ts"
   },

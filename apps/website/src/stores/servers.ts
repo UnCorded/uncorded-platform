@@ -89,11 +89,53 @@ export function adjustConnectedUsers(id: string, delta: number): void {
 }
 
 let _pollHandle: ReturnType<typeof setInterval> | null = null;
+let _fastPollUntil = 0;
+let _lastLoadStartedAt = 0;
+let _focusRefreshHooked = false;
 
-/** Start a 60s background poll of the server list. Safe to call multiple times. */
+const POLL_INTERVAL_MS = 60_000;
+const FAST_POLL_INTERVAL_MS = 10_000;
+// Half a tick of slack so a load isn't skipped because the timer fired a few
+// ms before the nominal interval elapsed.
+const POLL_SLACK_MS = FAST_POLL_INTERVAL_MS / 2;
+
+/**
+ * Start the background server-list poll. Safe to call multiple times.
+ *
+ * The timer ticks at the fast cadence and decides per-tick whether a load is
+ * due: every 60s normally, every 10s while a fast-poll window is open (see
+ * fastPollServers — used after sending a join request, so an owner's accept
+ * shows up in seconds instead of "refresh the page"). Central has no push
+ * channel to clients; polling is the only way membership changes arrive.
+ */
 function startPolling(): void {
+  if (typeof window !== "undefined" && !_focusRefreshHooked) {
+    _focusRefreshHooked = true;
+    // Refresh when the user comes back to the app — the classic "I got
+    // accepted while tabbed away" moment. Throttled so focus-churn (alt-tab
+    // spam, devtools) can't hammer Central.
+    window.addEventListener("focus", () => {
+      if (Date.now() - _lastLoadStartedAt > 5_000) void loadServers();
+    });
+  }
   if (_pollHandle !== null) return;
-  _pollHandle = setInterval(() => void loadServers(), 60_000);
+  _pollHandle = setInterval(() => {
+    const interval =
+      Date.now() < _fastPollUntil ? FAST_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+    if (Date.now() - _lastLoadStartedAt >= interval - POLL_SLACK_MS) {
+      void loadServers();
+    }
+  }, FAST_POLL_INTERVAL_MS);
+}
+
+/**
+ * Open a fast-poll window: the background poll runs at 10s instead of 60s
+ * until it expires. Called after actions whose outcome lands out-of-band on
+ * another account's screen (request-to-join → owner accepts).
+ */
+export function fastPollServers(durationMs = 5 * 60_000): void {
+  _fastPollUntil = Date.now() + durationMs;
+  startPolling();
 }
 
 /** Stop the background server-list poll. Tests use this to avoid leaks. */
@@ -104,11 +146,22 @@ export function stopPolling(): void {
 }
 
 export async function loadServers(): Promise<void> {
+  _lastLoadStartedAt = Date.now();
   setServersLoading(true);
   const prev = servers();
   try {
-    const list = await central.listServers();
-    setServers(list);
+    const list = await central.listMyServers();
+    // The membership payload carries tunnel_url (member-scoped). When a row
+    // arrives without one (never-tunneled, or a stale Central row), preserve
+    // any URL the token mint already hydrated so a poll doesn't blank the
+    // field panels resolve through serverById().
+    const prevUrlById = new Map(prev.map((s) => [s.id, s.tunnel_url] as const));
+    setServers(
+      list.map((s) => ({
+        ...s,
+        tunnel_url: s.tunnel_url ?? prevUrlById.get(s.id) ?? null,
+      })),
+    );
     setServersError(null);
     startPolling();
 

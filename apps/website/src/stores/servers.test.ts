@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { ApiError } from "../api/types";
 import type { Server } from "../api/types";
 
-// loadServers talks to central.listServers and — on missing ids — dynamically
+// loadServers talks to central.listMyServers and — on missing ids — dynamically
 // imports server-purge to call purgeServer. Stub both so the test asserts
 // the diff logic without exercising real fetch or the WS/disconnect plumbing.
 
-const listServers = mock<() => Promise<Server[]>>();
+const listMyServers = mock<() => Promise<Server[]>>();
 const purgeServer = mock<(id: string, reason: string) => Promise<void>>();
 const consoleWarn = mock<(...args: unknown[]) => void>();
 
@@ -32,7 +33,7 @@ let storeModule: typeof import("./servers");
 let originalWarn: typeof console.warn;
 
 beforeAll(async () => {
-  await mock.module("../api/central", () => ({ listServers }));
+  await mock.module("../api/central", () => ({ listMyServers }));
   await mock.module("../lib/server-purge", () => ({ purgeServer }));
   storeModule = await import("./servers");
   originalWarn = console.warn;
@@ -44,21 +45,21 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  listServers.mockReset();
+  listMyServers.mockReset();
   purgeServer.mockReset();
   consoleWarn.mockReset();
   // Reset the store between tests. There's no exported reset helper, so clear
-  // by letting a mocked listServers return empty, then calling loadServers —
+  // by letting a mocked listMyServers return empty, then calling loadServers —
   // but that itself would trip purge logic from the previous test's leftover
   // state. Instead, drain via a first-load (prev empty) cycle.
-  listServers.mockResolvedValueOnce([]);
+  listMyServers.mockResolvedValueOnce([]);
   return storeModule.loadServers().then(() => {
     storeModule.stopPolling();
     // After the above, servers() is []. If the previous test left purgeServer
     // with call records, wipe them again so the assertion target is clean.
     purgeServer.mockReset();
     consoleWarn.mockReset();
-    listServers.mockReset();
+    listMyServers.mockReset();
   });
 });
 
@@ -66,7 +67,7 @@ async function seedServers(list: Server[]): Promise<void> {
   // Seed by calling loadServers twice: first populates prev=[], second lets
   // the diff logic run against the desired prev. That's heavier than needed
   // for seeding, so we pin prev=[] here by resetting post-call.
-  listServers.mockResolvedValueOnce(list);
+  listMyServers.mockResolvedValueOnce(list);
   await storeModule.loadServers();
   storeModule.stopPolling();
   purgeServer.mockReset();
@@ -76,7 +77,7 @@ async function seedServers(list: Server[]): Promise<void> {
 describe("loadServers reconcile", () => {
   test("first load (prev empty) → no purges regardless of response", async () => {
     const { loadServers, stopPolling } = storeModule;
-    listServers.mockResolvedValueOnce([]);
+    listMyServers.mockResolvedValueOnce([]);
     await loadServers();
     stopPolling();
     expect(purgeServer).not.toHaveBeenCalled();
@@ -84,7 +85,7 @@ describe("loadServers reconcile", () => {
 
   test("second load with identical list → no purges", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B")]);
-    listServers.mockResolvedValueOnce([makeServer("a", "A"), makeServer("b", "B")]);
+    listMyServers.mockResolvedValueOnce([makeServer("a", "A"), makeServer("b", "B")]);
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).not.toHaveBeenCalled();
@@ -92,7 +93,7 @@ describe("loadServers reconcile", () => {
 
   test("second load with exactly one missing id → one purge, no backlog warning", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B")]);
-    listServers.mockResolvedValueOnce([makeServer("a", "A")]);
+    listMyServers.mockResolvedValueOnce([makeServer("a", "A")]);
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).toHaveBeenCalledTimes(1);
@@ -105,7 +106,7 @@ describe("loadServers reconcile", () => {
 
   test("second load with two missing ids → one purge, backlog warning carries {id,name}", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B"), makeServer("c", "C")]);
-    listServers.mockResolvedValueOnce([makeServer("a", "A")]);
+    listMyServers.mockResolvedValueOnce([makeServer("a", "A")]);
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).toHaveBeenCalledTimes(1);
@@ -126,7 +127,7 @@ describe("loadServers reconcile", () => {
   test("subsequent poll drains the deferred id", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B"), makeServer("c", "C")]);
     // First poll — two missing: b is purged, c is deferred.
-    listServers.mockResolvedValueOnce([makeServer("a", "A")]);
+    listMyServers.mockResolvedValueOnce([makeServer("a", "A")]);
     await storeModule.loadServers();
     storeModule.stopPolling();
     purgeServer.mockReset();
@@ -150,7 +151,7 @@ describe("loadServers reconcile", () => {
     // the fact that after poll 1, servers() already reflects [a] — c is
     // visually gone, but its container/ws/panels haven't been torn down.
     // The next poll with the same [a] response has no diff work to do.
-    listServers.mockResolvedValueOnce([makeServer("a", "A")]);
+    listMyServers.mockResolvedValueOnce([makeServer("a", "A")]);
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).not.toHaveBeenCalled();
@@ -158,7 +159,9 @@ describe("loadServers reconcile", () => {
 
   test("central error → servers preserved, error signal set, no purges", async () => {
     await seedServers([makeServer("a", "A"), makeServer("b", "B")]);
-    listServers.mockRejectedValueOnce(new Error("network down"));
+    listMyServers.mockRejectedValueOnce(
+      new ApiError("NETWORK_ERROR", "network down", 0),
+    );
     await storeModule.loadServers();
     storeModule.stopPolling();
     expect(purgeServer).not.toHaveBeenCalled();
@@ -185,7 +188,7 @@ describe("serverById (live resolution)", () => {
 
     const rotated = makeServer("a", "A");
     rotated.tunnel_url = "https://rotated.trycloudflare.com";
-    listServers.mockResolvedValueOnce([rotated]);
+    listMyServers.mockResolvedValueOnce([rotated]);
     await storeModule.loadServers();
     storeModule.stopPolling();
 
