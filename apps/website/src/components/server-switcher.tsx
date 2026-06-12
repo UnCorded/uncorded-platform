@@ -33,6 +33,15 @@ import { ApiError, type MyInvite } from "@/api/types";
 import { joinTarget } from "@/stores/auth-intent";
 import { ExploreServersDialog } from "@/components/server/explore-servers-dialog";
 
+// Explore-dialog open state lives at module scope so surfaces outside the
+// switcher (the sidebar's no-server view) can open the same single dialog
+// instance instead of mounting their own (two instances would double-react
+// to joinTarget replays).
+const [exploreOpen, setExploreOpen] = createSignal(false);
+export function openExploreServers(): void {
+  setExploreOpen(true);
+}
+
 export function ServerIcon(props: {
   serverId: string;
   name: string;
@@ -109,7 +118,6 @@ export function ServerSwitcher(props: {
   const [menuError, setMenuError] = createSignal<string | null>(null);
   // Two-click confirm latch for the per-row "Leave" affordance.
   const [leaveConfirmId, setLeaveConfirmId] = createSignal<string | null>(null);
-  const [exploreOpen, setExploreOpen] = createSignal(false);
 
   async function refreshInvites(): Promise<void> {
     // Skip while logged out — the call is a guaranteed 401 (the switcher

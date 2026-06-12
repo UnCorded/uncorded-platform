@@ -7,7 +7,7 @@ import type { WebApp } from "@uncorded/electron-bridge";
 import { NavSecondary } from "@/components/nav-secondary";
 import { NavUser } from "@/components/nav-user";
 import { VoiceIndicator } from "@/components/voice-indicator";
-import { ServerSwitcher } from "@/components/server-switcher";
+import { ServerSwitcher, openExploreServers } from "@/components/server-switcher";
 import {
   Sidebar,
   SidebarContent,
@@ -293,22 +293,15 @@ export function AppSidebar(props: {
                   <span>Create a server</span>
                   <span class="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/40">Advanced</span>
                 </button>
-                {/* TODO: wire to server directory once Central exposes it.
-                    Using aria-disabled (not the HTML disabled attribute) so
-                    hover styling still fires and the user gets feedback that
-                    the row is interactive-but-not-yet. */}
                 <button
                   type="button"
-                  aria-disabled="true"
-                  data-tooltip="Coming soon"
-                  data-tooltip-side="right"
-                  class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground/50 cursor-not-allowed transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  onClick={() => openExploreServers()}
                 >
                   <div class="flex size-5 items-center justify-center shrink-0">
                     <Compass class="size-4" />
                   </div>
                   <span>Explore servers</span>
-                  <span class="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground/40">Soon</span>
                 </button>
               </>
             }
