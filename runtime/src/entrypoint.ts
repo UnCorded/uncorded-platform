@@ -12,7 +12,7 @@
 // by warning and continuing. The seed server.json includes central_public_keys
 // so boot succeeds without Central.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 import { boot, BootError } from "./main";
@@ -233,36 +233,53 @@ chmodSync(VOICE_CONFIG_DIR, 0o700);
 // ---------------------------------------------------------------------------
 // SDK resolution for sideloaded plugins
 //
-// Plugin backends spawn with cwd = their own folder. Core plugins at
-// /app/core-plugins/<slug> resolve `@uncorded/plugin-sdk` by walking up to
-// /app/node_modules, but a sideloaded plugin at /plugins/<slug> walks
-// /plugins/<slug>/node_modules → /plugins/node_modules → /node_modules and
-// never reaches /app — so without this link, any dev/sideloaded plugin that
-// imports the SDK spawn-fails into quarantine. Linking /plugins/node_modules
-// to the image's own tree makes the SDK (at the exact version this runtime
-// speaks) resolvable as a fallback, while a plugin's own vendored
-// node_modules still wins the walk when present.
+// Core plugins at /app/core-plugins/<slug> resolve `@uncorded/plugin-sdk`
+// through the tsconfig path aliases in /app/tsconfig.json (Bun honors
+// `paths` at runtime; the workspace packages are NOT in /app/node_modules —
+// only external deps are). A sideloaded plugin at /plugins/<slug> never
+// walks up to /app, so its nearest tsconfig is the one we write here:
+// the same aliases, anchored at /app. Verified in-container: without this
+// file, `import "@uncorded/plugin-sdk"` fails from /plugins/<slug>; with
+// it, the import resolves to the image's own SDK (the exact version this
+// runtime speaks).
 //
-// Recreated each boot if absent (/plugins is a host bind mount — the host
-// side may prune it). A real directory or operator-placed link is left alone.
+// Rewritten unconditionally each boot — /plugins is a host bind mount and
+// this file is runtime-owned config, so authoritative-overwrite beats
+// stale-content drift. Caveat (documented in the scaffolder's AGENTS.md): a
+// plugin that ships its OWN tsconfig.json shadows this one (nearest wins)
+// and must either replicate these aliases or vendor node_modules.
 // ---------------------------------------------------------------------------
 try {
   mkdirSync(USER_PLUGINS_DIR, { recursive: true });
-  const linkPath = `${USER_PLUGINS_DIR}/node_modules`;
-  let present = true;
+  // Drop the dangling node_modules symlink a 0.1.0-test.5 boot may have left
+  // (that approach pointed at /app/node_modules, which never contained the
+  // workspace packages). Only our own link is removed; a real directory or
+  // operator-placed link to anywhere else is left alone.
+  const staleLink = `${USER_PLUGINS_DIR}/node_modules`;
   try {
-    lstatSync(linkPath);
+    if (lstatSync(staleLink).isSymbolicLink() && readlinkSync(staleLink) === "/app/node_modules") {
+      rmSync(staleLink);
+      log.info("removed stale /plugins/node_modules link from a previous runtime version");
+    }
   } catch {
-    present = false;
+    // absent or unreadable — nothing to clean
   }
-  if (!present) {
-    symlinkSync("/app/node_modules", linkPath, "dir");
-    log.info("linked /plugins/node_modules -> /app/node_modules for sideloaded plugin SDK resolution");
-  }
+  const shim = {
+    compilerOptions: {
+      baseUrl: "/app",
+      paths: {
+        "@uncorded/plugin-sdk": ["packages/plugin-sdk/src/index.ts"],
+        "@uncorded/protocol": ["packages/protocol/src/index.ts"],
+        "@uncorded/protocol-schemas": ["packages/protocol-schemas/src/index.ts"],
+        "@uncorded/shared": ["packages/shared/src/index.ts"],
+      },
+    },
+  };
+  writeFileSync(`${USER_PLUGINS_DIR}/tsconfig.json`, JSON.stringify(shim, null, 2) + "\n");
 } catch (err) {
   // Non-fatal: core plugins are unaffected; sideloaded plugins that vendor
   // their own node_modules still load.
-  log.warn("could not prepare /plugins/node_modules SDK link", { err: String(err) });
+  log.warn("could not write /plugins/tsconfig.json SDK resolution shim", { err: String(err) });
 }
 
 // ---------------------------------------------------------------------------

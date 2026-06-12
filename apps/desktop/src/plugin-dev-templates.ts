@@ -303,6 +303,11 @@ the starter "visits" feature with the real plugin described in \`PROMPT.md\`.
   and ship the folder with \`node_modules\` present. (\`@uncorded/plugin-sdk\`
   may not be on npm yet; when installed through the UnCorded desktop app, the
   runtime provides the SDK, so a missing local install of the SDK alone is OK.)
+- **Do not add a tsconfig.json to this folder.** The runtime provides SDK
+  resolution for installed plugins through a tsconfig path-alias shim one
+  directory above the plugin; a tsconfig inside the plugin shadows it (nearest
+  wins) and breaks \`@uncorded/plugin-sdk\` imports. If you truly need one,
+  vendor your node_modules instead.
 - **Test by deploying**: in the UnCorded desktop app, open Server settings →
   Plugins → Add Plugin → Develop and click Install on this plugin. Deploying
   restarts the server container — that is normal; plugins load only at boot.

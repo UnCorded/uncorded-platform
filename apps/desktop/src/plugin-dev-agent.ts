@@ -10,6 +10,7 @@
 // real shell.
 
 import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { LaunchAgentResult } from "@uncorded/electron-bridge";
 import { AGENT_POINTER_PROMPT } from "./plugin-dev-prompt";
 
@@ -89,9 +90,40 @@ export async function detectCommandPath(
   });
 }
 
-export async function detectAgent(deps: DetectDeps = {}): Promise<{ found: boolean; path?: string }> {
+/**
+ * Well-known install locations checked when PATH lookup fails — the desktop
+ * process can inherit a PATH that predates the claude install (launched from
+ * a stale shell, an OS launcher, or the auto-updater), while the CLI is
+ * sitting in its standard per-user location the whole time.
+ */
+function wellKnownAgentPaths(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
+  if (platform === "win32") {
+    const home = env["USERPROFILE"];
+    const appData = env["APPDATA"];
+    return [
+      ...(home ? [`${home}\\.local\\bin\\claude.exe`] : []),
+      ...(appData ? [`${appData}\\npm\\claude.cmd`] : []),
+    ];
+  }
+  const home = env["HOME"];
+  return [
+    ...(home ? [`${home}/.local/bin/claude`] : []),
+    "/usr/local/bin/claude",
+    "/opt/homebrew/bin/claude",
+  ];
+}
+
+export async function detectAgent(
+  deps: DetectDeps & { existsFn?: (path: string) => boolean } = {},
+): Promise<{ found: boolean; path?: string }> {
   const path = await detectCommandPath("claude", deps);
-  return path === null ? { found: false } : { found: true, path };
+  if (path !== null) return { found: true, path };
+  const platform = deps.platform ?? process.platform;
+  const existsFn = deps.existsFn ?? existsSync;
+  for (const candidate of wellKnownAgentPaths(platform, process.env)) {
+    if (existsFn(candidate)) return { found: true, path: candidate };
+  }
+  return { found: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -143,16 +175,31 @@ export function buildAgentLaunchCommand(
   platform: NodeJS.Platform,
   pluginDir: string,
   terminals: TerminalAvailability,
+  /** Resolved claude executable. Defaults to bare "claude" (PATH lookup in
+   *  the spawned terminal), but the launcher passes the detected absolute
+   *  path — the desktop process can find claude via a well-known location
+   *  while its own inherited PATH (which the terminal inherits in turn)
+   *  doesn't carry it. */
+  agentCommand = "claude",
 ): BuildLaunchResult {
   const pointer = AGENT_POINTER_PROMPT;
 
   if (platform === "win32") {
+    // What follows `cmd /k` is re-parsed by cmd with its leading-quote strip
+    // rule: a tail that STARTS with a quote and contains more than one quote
+    // pair loses its first and last quote characters. So: leave a space-free
+    // executable unquoted (tail starts unquoted → no stripping); wrap a
+    // spaced path in an OUTER quote pair that cmd strips back off, leaving a
+    // correctly quoted command line.
+    const cmdTail = agentCommand.includes(" ")
+      ? [`""${agentCommand}" "${pointer}""`]
+      : [agentCommand, `"${pointer}"`];
     if (terminals.windowsTerminal) {
-      // wt -d <dir> cmd /k claude "<pointer>" — cmd /k keeps the window open
-      // after claude exits so the user sees what happened.
+      // wt -d <dir> cmd /k <claude> "<pointer>" — cmd /k keeps the window
+      // open after claude exits so the user sees what happened.
       return {
         file: "wt.exe",
-        args: ["-d", `"${pluginDir}"`, "cmd", "/k", "claude", `"${pointer}"`],
+        args: ["-d", `"${pluginDir}"`, "cmd", "/k", ...cmdTail],
         windowsVerbatim: true,
       };
     }
@@ -169,15 +216,14 @@ export function buildAgentLaunchCommand(
         `"${pluginDir}"`,
         "cmd",
         "/k",
-        "claude",
-        `"${pointer}"`,
+        ...cmdTail,
       ],
       windowsVerbatim: true,
     };
   }
 
   if (platform === "darwin") {
-    const shellLine = `cd ${posixQuote(pluginDir)} && claude ${posixQuote(pointer)}`;
+    const shellLine = `cd ${posixQuote(pluginDir)} && ${posixQuote(agentCommand)} ${posixQuote(pointer)}`;
     return {
       file: "osascript",
       args: [
@@ -195,13 +241,13 @@ export function buildAgentLaunchCommand(
     case "gnome-terminal":
       return {
         file: "gnome-terminal",
-        args: ["--working-directory", pluginDir, "--", "claude", pointer],
+        args: ["--working-directory", pluginDir, "--", agentCommand, pointer],
         windowsVerbatim: false,
       };
     case "konsole":
       return {
         file: "konsole",
-        args: ["--workdir", pluginDir, "-e", "claude", pointer],
+        args: ["--workdir", pluginDir, "-e", agentCommand, pointer],
         windowsVerbatim: false,
       };
     case "x-terminal-emulator":
@@ -209,7 +255,7 @@ export function buildAgentLaunchCommand(
       // route through sh so cwd and argument quoting behave uniformly.
       return {
         file: "x-terminal-emulator",
-        args: ["-e", `sh -c ${posixQuote(`cd ${posixQuote(pluginDir)} && claude ${posixQuote(pointer)}`)}`],
+        args: ["-e", `sh -c ${posixQuote(`cd ${posixQuote(pluginDir)} && ${posixQuote(agentCommand)} ${posixQuote(pointer)}`)}`],
         windowsVerbatim: false,
       };
     case null:
@@ -238,6 +284,7 @@ export interface LaunchDeps {
   platform?: NodeJS.Platform;
   execFileFn?: ExecFileFn;
   spawnFn?: SpawnFn;
+  existsFn?: (path: string) => boolean;
 }
 
 /**
@@ -253,7 +300,10 @@ export async function launchAgentTerminal(
   const platform = deps.platform ?? process.platform;
   const detect: DetectDeps = { platform, ...(deps.execFileFn ? { execFileFn: deps.execFileFn } : {}) };
 
-  const agent = await detectAgent(detect);
+  const agent = await detectAgent({
+    ...detect,
+    ...(deps.existsFn ? { existsFn: deps.existsFn } : {}),
+  });
   if (!agent.found) {
     return {
       ok: false,
@@ -274,7 +324,7 @@ export async function launchAgentTerminal(
     }
   }
 
-  const command = buildAgentLaunchCommand(platform, pluginDir, terminals);
+  const command = buildAgentLaunchCommand(platform, pluginDir, terminals, agent.path ?? "claude");
   if ("unsupported" in command) {
     return {
       ok: false,

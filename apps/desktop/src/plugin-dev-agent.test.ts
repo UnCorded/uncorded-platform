@@ -36,6 +36,34 @@ describe("buildAgentLaunchCommand", () => {
     });
   });
 
+  test("win32 uses the resolved executable; space-free path stays unquoted (cmd strip rule)", () => {
+    const cmd = buildAgentLaunchCommand(
+      "win32",
+      WIN_DIR,
+      { windowsTerminal: true, linuxTerminal: null },
+      "C:\\Users\\x\\.local\\bin\\claude.exe",
+    );
+    if ("unsupported" in cmd) throw new Error("expected a command");
+    // Tail must NOT start with a quote — cmd would strip first+last quotes.
+    expect(cmd.args.slice(-2)).toEqual([
+      "C:\\Users\\x\\.local\\bin\\claude.exe",
+      `"${AGENT_POINTER_PROMPT}"`,
+    ]);
+  });
+
+  test("win32 wraps a spaced executable path in an outer strip-pair", () => {
+    const cmd = buildAgentLaunchCommand(
+      "win32",
+      WIN_DIR,
+      { windowsTerminal: false, linuxTerminal: null },
+      "C:\\Users\\some one\\.local\\bin\\claude.exe",
+    );
+    if ("unsupported" in cmd) throw new Error("expected a command");
+    expect(cmd.args.at(-1)).toBe(
+      `""C:\\Users\\some one\\.local\\bin\\claude.exe" "${AGENT_POINTER_PROMPT}""`,
+    );
+  });
+
   test("win32 fallback uses cmd start with a quoted title guarding /D", () => {
     const cmd = buildAgentLaunchCommand("win32", WIN_DIR, {
       windowsTerminal: false,
@@ -51,6 +79,26 @@ describe("buildAgentLaunchCommand", () => {
     expect(dirFlagIdx).toBeGreaterThan(titleIdx);
     expect(cmd.args[dirFlagIdx + 1]).toBe(`"${WIN_DIR}"`);
     expect(cmd.args.slice(-2)).toEqual(["claude", `"${AGENT_POINTER_PROMPT}"`]);
+  });
+
+  test("posix builders carry the resolved executable", () => {
+    const mac = buildAgentLaunchCommand(
+      "darwin",
+      POSIX_DIR,
+      { windowsTerminal: false, linuxTerminal: null },
+      "/usr/local/bin/claude",
+    );
+    if ("unsupported" in mac) throw new Error("expected a command");
+    expect(mac.args[1]).toContain("'/usr/local/bin/claude'");
+
+    const gnome = buildAgentLaunchCommand(
+      "linux",
+      POSIX_DIR,
+      { windowsTerminal: false, linuxTerminal: "gnome-terminal" },
+      "/usr/local/bin/claude",
+    );
+    if ("unsupported" in gnome) throw new Error("expected a command");
+    expect(gnome.args).toContain("/usr/local/bin/claude");
   });
 
   test("darwin builds osascript Terminal commands with quoted path", () => {
@@ -121,9 +169,26 @@ describe("detectCommandPath / detectAgent", () => {
     expect(
       await detectCommandPath("claude", { platform: "linux", execFileFn: fakeExec({}) }),
     ).toBeNull();
-    expect(await detectAgent({ platform: "win32", execFileFn: fakeExec({}) })).toEqual({
-      found: false,
+    expect(
+      await detectAgent({ platform: "win32", execFileFn: fakeExec({}), existsFn: () => false }),
+    ).toEqual({ found: false });
+  });
+
+  test("falls back to well-known install locations when PATH lookup fails", async () => {
+    // The desktop process can inherit a PATH that predates the claude
+    // install; the standard per-user location must still be found.
+    const checked: string[] = [];
+    const result = await detectAgent({
+      platform: "win32",
+      execFileFn: fakeExec({}),
+      existsFn: (p) => {
+        checked.push(p);
+        return p.endsWith("\\.local\\bin\\claude.exe");
+      },
     });
+    expect(result.found).toBe(true);
+    expect(result.path).toMatch(/\.local\\bin\\claude\.exe$/);
+    expect(checked.length).toBeGreaterThan(0);
   });
 
   test("detectAgent carries the resolved path", async () => {
@@ -146,6 +211,9 @@ describe("launchAgentTerminal", () => {
       platform: "win32",
       execFileFn: fakeExec({}),
       spawnFn: fakeSpawn({ calls: [] }),
+      // Without this the test would find the REAL claude install on the dev
+      // machine through the well-known-path fallback.
+      existsFn: () => false,
     });
     expect(result).toMatchObject({ ok: false, code: "AGENT_NOT_FOUND" });
   });
