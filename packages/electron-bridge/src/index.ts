@@ -231,6 +231,26 @@ export type ScreenSharePermissionStatus =
   | "restricted"
   | "unknown";
 
+// A browser-pane URL the user promoted to a persistent, login-sticky webview
+// panel. PER-SERVER scoped (each server has its own set, keyed serverId-side in
+// the desktop store) but desktop-owned — the runtime/Central never see these.
+// Shared here because the renderer (which can't import desktop-app modules)
+// needs the shape, and the desktop store imports this same type so there's one
+// source of truth. See memory `desktop-owned-web-apps-sidebar`.
+export interface WebApp {
+  id: string;
+  url: string;
+  title: string;
+  faviconUrl?: string;
+  /** Epoch ms the entry was added; used for stable sidebar ordering. */
+  addedAt: number;
+}
+
+/** A saved per-URL preference for where a page opens: docked into the current
+ *  workspace as a panel, or in its own frameless live popout window. Legacy
+ *  values "panel"/"popout" are migrated on read (apps/desktop/web-apps-store). */
+export type WebAppPref = "dock" | "window";
+
 export interface ElectronBridge {
   central: {
     register(
@@ -488,6 +508,115 @@ export interface ElectronBridge {
      */
     requestPermission(): Promise<{ status: "ok" | "unsupported" }>;
   };
+  // Desktop-owned, PER-SERVER "Web Apps" — browser-pane URLs promoted to
+  // persistent login-sticky webview panels. Storage is local to the desktop
+  // (~/.uncorded/web-apps.json), never synced to the runtime/Central. The
+  // renderer gates this whole surface on isElectron() — website/mobile can't
+  // host <webview> so they never call it. The renderer owns serverId (main is
+  // server-agnostic), so list/add/remove take it explicitly.
+  webApps: {
+    list(serverId: string): Promise<WebApp[]>;
+    add(
+      serverId: string,
+      input: { url: string; title?: string; faviconUrl?: string },
+    ): Promise<WebApp>;
+    remove(serverId: string, id: string): Promise<void>;
+    /**
+     * The dock overlay's "save preference for this URL" — keyed by the EXACT
+     * URL (not host), global (the choice is about the URL, not the server).
+     * `getPref` returns null until the user has saved a choice for this URL.
+     */
+    getPref(url: string): Promise<WebAppPref | null>;
+    setPref(url: string, action: WebAppPref): Promise<void>;
+  };
+  // In-app native popup views. When a Browser Panel guest calls `window.open`,
+  // main captures it (via `setWindowOpenHandler`'s `createWindow`) into a fresh
+  // `WebContentsView` instead of an OS window — preserving the popup's live
+  // session (cookies + sessionStorage + opener). The view is either hosted in a
+  // free, frameless OS popout window (where it OWNS the view directly) or docked
+  // into the main window and positioned by the renderer reporting an on-screen
+  // rect over IPC (anchored to a panel body).
+  liveSurface: {
+    /**
+     * Create a fresh live native view loading `url` (http(s) only), parked hidden
+     * until the renderer reports a host rect. Returns the `surfaceId` to bind to
+     * a Web App panel's instanceId. The view shares the `persist:browser`
+     * partition, so prior logins (cookies/localStorage) carry over; no in-memory
+     * session is preserved (it's a fresh load). Drives the always-live mount path.
+     */
+    create(url: string): Promise<number>;
+    /**
+     * Position the native view (identified by the `surfaceId` from
+     * `onIntercepted`) over a rect in the window's content area (CSS px == DIPs
+     * at zoom 1, content origin at 0,0). `visible:false` hides it without
+     * destroying it — used when the host placeholder is off-screen (inactive
+     * tab, focus-collapse) or a blocking modal is open (the view would otherwise
+     * paint over it). Used only while the view is DOCKED in the main window.
+     *
+     * Fire-and-forget (`ipcRenderer.send`, not invoke): this fires per
+     * animation frame during panel drags, and any round-trip latency shows up
+     * as the view trailing its panel. Ordering is guaranteed by the channel;
+     * invalid payloads are logged and dropped main-side.
+     */
+    setBounds(
+      surfaceId: number,
+      bounds: { x: number; y: number; width: number; height: number },
+      visible: boolean,
+    ): void;
+    /**
+     * Destroy the native view and its webContents. Called when the host panel
+     * closes / the Web App is removed. The renderer then falls back to a fresh
+     * `<webview>` if the same URL re-opens.
+     */
+    release(surfaceId: number): Promise<void>;
+    /**
+     * Open the native view in its own free, frameless OS window that owns the
+     * view directly (header + content glued, movable anywhere off-app). The live
+     * session is preserved (no reload). Where it docks is resolved at dock time
+     * (the renderer's then-active server) — no target is remembered here.
+     */
+    openWindow(surfaceId: number): Promise<void>;
+    /**
+     * Step 2 of the dock handshake: claim the view for docking. Main re-parents
+     * it into the main window (parked hidden), then closes its popout window if
+     * it had one. Returns whether the view is parked and ready to be tracked —
+     * on `false` (view destroyed, no main window) the caller must NOT open a
+     * panel; the popout, if any, stays open and the user loses nothing.
+     * Idempotent for a view already parked in the main window (the popup-pref
+     * auto-dock path).
+     */
+    claimDock(surfaceId: number): Promise<boolean>;
+    /**
+     * Fires when a Browser Panel guest opens a new window. Main has already
+     * created the native view (parked hidden) and loaded the URL into it;
+     * `webContentsId` identifies the guest (match `<webview>.getWebContentsId()`)
+     * so the owning panel can host it, and `surfaceId` keys all later
+     * setBounds/release/openWindow calls.
+     */
+    onIntercepted(
+      handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
+    ): CleanupFn;
+    /**
+     * Step 1 of the dock handshake: fires when the user clicks "Dock" in a
+     * popout window. The popout is still open and still owns the view — the
+     * renderer verifies it can host a panel (an active server; toast + stop if
+     * not), then commits via `claimDock(surfaceId)` and only on `true` opens a
+     * workspace panel at the live `url`. Claim-before-panel means no stale
+     * setBounds can race the move.
+     */
+    onDockRequested(
+      handler: (payload: { surfaceId: number; url: string; title: string }) => void,
+    ): CleanupFn;
+    /**
+     * Fires when a live view's document title changes (`page-title-updated`),
+     * so a docked panel's header can track the page like a browser tab does.
+     * Main also mirrors the title onto a popout's OS window title itself; this
+     * event is for renderer-owned chrome only.
+     */
+    onTitleChanged(
+      handler: (payload: { surfaceId: number; title: string }) => void,
+    ): CleanupFn;
+  };
 }
 
 // Canonical IPC channel contract for the desktop main <-> preload transport.
@@ -586,6 +715,30 @@ export interface IpcChannelMap {
 
   // Reverse-proxy <webview> guest registration
   readonly PROXY_GUEST_REGISTER: "proxy:guest-register";
+
+  // Desktop-owned per-server Web Apps
+  readonly WEB_APPS_LIST: "desktop:web-apps:list";
+  readonly WEB_APPS_ADD: "desktop:web-apps:add";
+  readonly WEB_APPS_REMOVE: "desktop:web-apps:remove";
+  readonly WEB_APPS_GET_PREF: "desktop:web-apps:get-pref";
+  readonly WEB_APPS_SET_PREF: "desktop:web-apps:set-pref";
+
+  // In-app native popup views (WebContentsView). A Browser Panel guest's
+  // window.open is captured into a native view hosted in a free OS popout window
+  // (which owns it directly) or docked into the main window and positioned via
+  // bounds-over-IPC — preserving the popup's live session either way.
+  readonly LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted";
+  readonly LIVE_SURFACE_CREATE: "desktop:live-surface:create";
+  readonly LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds";
+  readonly LIVE_SURFACE_RELEASE: "desktop:live-surface:release";
+  readonly LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window";
+  readonly LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock";
+  readonly LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested";
+  readonly LIVE_SURFACE_TITLE_CHANGED: "desktop:live-surface:title-changed";
+  // Sent by the popout window's own chrome (popout-preload) to main.
+  readonly LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock";
+  readonly LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close";
+  readonly LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external";
 }
 
 declare global {

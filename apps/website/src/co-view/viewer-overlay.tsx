@@ -533,6 +533,9 @@ function describeContent(content: PanelContent | undefined): {
     if (content.itemIcon !== undefined) out.icon = content.itemIcon;
     return out;
   }
+  if (content.type === "webapp") {
+    return { kind: "webapp", label: content.title, detail: content.url };
+  }
   const { label, detail } = describeBrowserContent(content);
   const out: { kind: string; label: string; icon?: string; detail?: string } = {
     kind: "browser",

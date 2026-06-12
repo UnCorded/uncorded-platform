@@ -1,6 +1,6 @@
 import { Match, Show, Switch, createSignal, onCleanup, type Component } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import { Check, Columns2, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
+import { Check, Columns2, ExternalLink, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Pencil, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { useCoarsePointer } from "@/lib/use-coarse-pointer";
 import {
@@ -13,6 +13,7 @@ import { type LeafNode, type PanelNode, type SplitNode, PREVIEW_LEAF_ID } from "
 import { type PanelContent } from "@uncorded/protocol";
 import { PluginFrame } from "@/components/channel-view";
 import { BrowserPanel } from "@/components/browser-panel";
+import { WebAppPanel } from "@/components/web-apps/web-app-panel";
 import { browserPanelLabel, createEmptyBrowserPanel } from "@/lib/browser-panel-state";
 import {
   dragContext,
@@ -24,11 +25,17 @@ import {
   type DropZone,
 } from "@/lib/drag-state";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { requestSync } from "@/lib/live-surface-host";
+import { requestSync as requestPortalSync } from "@/lib/portal-host";
+import { clearLiveSurface, peekLiveSurface } from "@/lib/live-surfaces";
+import { liveSurfaceOpenWindow } from "@/stores/web-apps";
+import { isElectron } from "@/lib/electron";
 
 const ICON_MAP: Record<string, Component<LucideProps>> = {
   hash: Hash,
   users: Users,
   volume2: Volume2,
+  globe: Globe,
 };
 
 type SharedProps = {
@@ -112,8 +119,10 @@ export function PanelLayout(props: SharedProps & { node: PanelNode }) {
 function PanelPreviewGhost() {
   const ghostDisplay = () => {
     const ctx = dragContext();
-    if (ctx === null || ctx.kind !== "sidebar-item") return null;
-    return { label: ctx.item.label, icon: ctx.item.icon ?? "hash" };
+    if (ctx === null) return null;
+    if (ctx.kind === "sidebar-item") return { label: ctx.item.label, icon: ctx.item.icon ?? "hash" };
+    if (ctx.kind === "web-app") return { label: ctx.app.title, icon: "globe" };
+    return null;
   };
   return (
     <div
@@ -175,23 +184,16 @@ function EmptyPanelZoneGuide(props: { leafId: string }) {
   );
 }
 
-// Placeholder shown when a panel body has nothing to render. Three modes:
+// Placeholder shown when a panel body has nothing to render. Two modes:
 //   - empty-workspace: the workspace has a single leaf and it's empty. Onboarding
 //     copy points the user at the sidebar.
 //   - empty-panel: this leaf is empty but lives alongside other panels. Copy
 //     points at in-panel actions (drop target, ⋯ menu) instead of the sidebar.
-//   - popout: the panel's content has been detached into its own window. Acts
-//     as a reattach affordance.
 //
-// `canClose` from PanelLeaf is the natural discriminator between the first two
-// (countLeaves > 1). Popout is wired through onReattach and will be triggered
-// by the future tear-off flow.
-type EmptyPanelMode = "empty-workspace" | "empty-panel" | "popout";
+// `canClose` from PanelLeaf is the natural discriminator (countLeaves > 1).
+type EmptyPanelMode = "empty-workspace" | "empty-panel";
 
-function EmptyPanelState(props: {
-  mode: EmptyPanelMode;
-  onReattach?: () => void;
-}) {
+function EmptyPanelState(props: { mode: EmptyPanelMode }) {
   return (
     <div class="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 text-center select-none">
       <Switch>
@@ -210,18 +212,6 @@ function EmptyPanelState(props: {
           <p class="text-xs text-muted-foreground/60 max-w-xs">
             Drop a sidebar item here, or use the ⋯ menu to open a browser
           </p>
-        </Match>
-        <Match when={props.mode === "popout"}>
-          <h3 class="text-sm font-medium text-muted-foreground">
-            Panel in popout mode
-          </h3>
-          <button
-            type="button"
-            class="text-xs text-muted-foreground/60 hover:text-foreground underline underline-offset-2 decoration-dotted transition-colors max-w-xs"
-            onClick={() => props.onReattach?.()}
-          >
-            Click to reattach to workspace
-          </button>
         </Match>
       </Switch>
     </div>
@@ -292,6 +282,82 @@ function PanelLeaf(props: {
     props.onClose();
   };
 
+  // Inline rename for Web App panels — hover the header → pencil → the title
+  // becomes an input (Enter saves, Esc/blur cancels). The new title is written
+  // straight into PanelContent via onUpdateContent; because surfaceKeyOf keys
+  // a webapp by its webAppId (not title), the rename does NOT reload the
+  // webview. Scoped to `webapp` content for v1 (plugin/browser titles are
+  // derived, not user-owned).
+  const renamableWebApp = (): (PanelContent & { type: "webapp" }) | null => {
+    const c = props.content;
+    return c !== undefined && c.type === "webapp" ? c : null;
+  };
+  const [renaming, setRenaming] = createSignal(false);
+  const [renameValue, setRenameValue] = createSignal("");
+  let renameInput: HTMLInputElement | undefined;
+
+  const startRename = () => {
+    const webapp = renamableWebApp();
+    if (webapp === null) return;
+    setRenameValue(webapp.title);
+    setRenaming(true);
+    requestAnimationFrame(() => {
+      renameInput?.focus();
+      renameInput?.select();
+    });
+  };
+  const cancelRename = () => {
+    setRenaming(false);
+    setRenameValue("");
+  };
+  const submitRename = () => {
+    const webapp = renamableWebApp();
+    if (webapp === null) {
+      cancelRename();
+      return;
+    }
+    // Clamp to the layout contract's 256-char title limit (a longer pasted
+    // name would make the runtime reject the whole workspace sync).
+    const next = renameValue().trim().slice(0, 256);
+    if (next.length === 0 || next === webapp.title) {
+      cancelRename();
+      return;
+    }
+    // `renamed` pins the user's label: live page-title sync skips renamed
+    // panels, so navigation can't clobber a deliberate name.
+    props.onUpdateContent({ ...webapp, title: next, renamed: true });
+    cancelRename();
+  };
+  const onRenameKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelRename();
+    }
+  };
+
+  // DOCKED → POPPED-OUT for a live Web App panel: move the EXISTING native
+  // view into a frameless popout window — the inverse of the popout's "Dock"
+  // button, with the live session preserved (no reload). Order matters:
+  // openWindow first, so main registers the surface in surfacePopouts and the
+  // ownership guards drop the closing panel's stale SET_BOUNDS/RELEASE; then
+  // clear the instance binding so App's reconciliation release never targets
+  // the moved view. Electron-only (native views don't exist on web), and a
+  // no-op while the surface is still being created (nothing live to move).
+  const popOutWebAppPanel = async (): Promise<void> => {
+    const c = props.content;
+    if (c === undefined || c.type !== "webapp") return;
+    const surfaceId = peekLiveSurface(c.instanceId);
+    if (surfaceId === null) return;
+    await liveSurfaceOpenWindow(surfaceId);
+    clearLiveSurface(c.instanceId);
+    props.onClose();
+  };
+  const canPopOut = () =>
+    isElectron() && props.content?.type === "webapp";
+
   // Empty-panel zone guide: during a sidebar-item drag, an empty leaf paints
   // a 5-box affordance (4 edges + center) so the user sees where they can aim.
   // Box geometry mirrors the EDGE_THRESHOLD hit-test in drag-state.
@@ -303,7 +369,10 @@ function PanelLeaf(props: {
   // 5-box guide visible during dwell stacks two indicators on top of each
   // other and reads as visual noise. Live hit-test (pre-dwell) keeps the
   // guide so the user still sees where the boxes are while aiming.
-  const isSidebarDragging = () => dragContext()?.kind === "sidebar-item";
+  const isSidebarDragging = () => {
+    const kind = dragContext()?.kind;
+    return kind === "sidebar-item" || kind === "web-app";
+  };
   const showZoneGuide = () => {
     if (props.content !== undefined) return false;
     if (!isSidebarDragging()) return false;
@@ -365,23 +434,55 @@ function PanelLeaf(props: {
         data-panel-header
         onPointerDown={onHeaderPointerDown}
       >
-        <div class="flex items-center gap-1.5 flex-1 min-w-0">
+        <div class="group/title flex items-center gap-1.5 flex-1 min-w-0">
           <Show when={props.content}>
             {(content) => <PanelHeaderIcon content={content()} />}
           </Show>
-          <span
-            class="text-sm truncate"
-            classList={{
-              "text-muted-foreground": !props.content,
-              "text-foreground font-medium": !!props.content,
-            }}
+          <Show
+            when={renaming()}
+            fallback={
+              <>
+                <span
+                  class="text-sm truncate"
+                  classList={{
+                    "text-muted-foreground": !props.content,
+                    "text-foreground font-medium": !!props.content,
+                  }}
+                >
+                  {props.content
+                    ? props.content.type === "browser"
+                      ? browserPanelLabel(props.content)
+                      : props.content.type === "webapp"
+                        ? props.content.title
+                        : props.content.itemLabel
+                    : "Empty Panel"}
+                </span>
+                <Show when={renamableWebApp()}>
+                  <button
+                    type="button"
+                    class="flex shrink-0 items-center justify-center rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity outline-none hover:text-foreground group-hover/title:opacity-100 focus-visible:opacity-100"
+                    aria-label="Rename panel"
+                    data-tooltip="Rename panel"
+                    onClick={startRename}
+                  >
+                    <Pencil class="size-3" />
+                  </button>
+                </Show>
+              </>
+            }
           >
-            {props.content
-              ? props.content.type === "browser"
-                ? browserPanelLabel(props.content)
-                : props.content.itemLabel
-              : "Empty Panel"}
-          </span>
+            <input
+              ref={renameInput}
+              type="text"
+              value={renameValue()}
+              onInput={(e) => setRenameValue(e.currentTarget.value)}
+              onKeyDown={onRenameKeyDown}
+              onBlur={submitRename}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              class="h-5 min-w-0 flex-1 rounded border border-ring/40 bg-muted px-1 text-sm text-foreground outline-none focus:border-ring"
+            />
+          </Show>
         </div>
 
         <div class="flex items-center gap-1 shrink-0" data-no-drag>
@@ -448,6 +549,12 @@ function PanelLeaf(props: {
                 <Globe class="size-4" />
                 <span>Open browser</span>
               </DropdownMenuItem>
+              <Show when={canPopOut()}>
+                <DropdownMenuItem onSelect={() => void popOutWebAppPanel()}>
+                  <ExternalLink class="size-4" />
+                  <span>Pop out</span>
+                </DropdownMenuItem>
+              </Show>
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -519,7 +626,7 @@ function PanelLeaf(props: {
 // ---------------------------------------------------------------------------
 
 function PanelHeaderIcon(props: { content: PanelContent }) {
-  if (props.content.type === "browser") {
+  if (props.content.type === "browser" || props.content.type === "webapp") {
     return <Globe class="size-3.5 text-muted-foreground shrink-0" />;
   }
   const plugin = props.content;
@@ -537,6 +644,7 @@ function PanelBody(props: {
   // type flips recreate the branch.
   type BrowserContent = Extract<PanelContent, { type: "browser" }>;
   type PluginContent = Extract<PanelContent, { type: "plugin" }>;
+  type WebAppContent = Extract<PanelContent, { type: "webapp" }>;
   return (
     <Switch>
       <Match when={props.content.type === "browser" ? (props.content as BrowserContent) : null}>
@@ -547,6 +655,9 @@ function PanelBody(props: {
             onChange={props.onUpdateContent}
           />
         )}
+      </Match>
+      <Match when={props.content.type === "webapp" ? (props.content as WebAppContent) : null}>
+        {(webapp) => <WebAppPanel content={webapp()} panelId={props.panelId} />}
       </Match>
       <Match when={props.content.type === "plugin" ? (props.content as PluginContent) : null}>
         {(plugin) => <PluginFrame content={plugin()} panelId={props.panelId} />}
@@ -603,6 +714,16 @@ function PanelSplit(props: SharedProps & { node: SplitNode }) {
         if (pendingRatio !== null) {
           props.onUpdateRatio(nodeId, pendingRatio);
           pendingRatio = null;
+          // Solid flushed the flex styles synchronously above, so a forced
+          // rect read now reports native-surface bounds to main in the SAME
+          // frame, before paint — the view stays locked to the panel instead
+          // of trailing the drag. Also the only signal for panels that only
+          // MOVED (ResizeObserver fires for size changes, never position).
+          // Order matters: live-surface sync first (pure reads — one forced
+          // layout after the flex write), then portal sync (reads the clean
+          // layout, then writes portal styles that settle before paint).
+          requestSync();
+          requestPortalSync();
         }
       });
     };

@@ -44,6 +44,20 @@ import { onPluginMessage, onReconnect } from "@/lib/ws";
 import { onServerPurged } from "@/lib/server-purge";
 import { onPluginPanelFocus, onPluginPanelOpen } from "@/lib/plugin-panel-events";
 import { browserContentEquals } from "@/lib/browser-panel-state";
+import type { WebApp } from "@uncorded/electron-bridge";
+import {
+  onOpenWebAppAsPanel,
+  onLiveSurfaceDockRequested,
+  onLiveSurfaceTitleChanged,
+  dockLiveSurface,
+  liveSurfaceRelease,
+} from "@/stores/web-apps";
+import {
+  allLiveInstanceIds,
+  clearLiveSurface,
+  instanceIdForSurface,
+  peekLiveSurface,
+} from "@/lib/live-surfaces";
 import { AuthPage } from "@/components/auth/auth-page";
 import type { SidebarItem } from "@/stores/sidebar";
 import { mountSidebarStore, sections } from "@/stores/sidebar";
@@ -64,6 +78,8 @@ import { ProxyMountOverlay } from "@/components/proxy-mount-overlay";
 import { ScreenSharePicker } from "@/components/voice/screen-share-picker";
 import { UserCardSheet } from "@/components/user-card-sheet";
 import { FilePreviewOverlay } from "@/components/file-preview-overlay";
+import { filePreview } from "@/stores/file-preview";
+import * as liveSurfaceHost from "@/lib/live-surface-host";
 import { MemberManageSheet } from "@/components/server/member-manage-sheet";
 import { CoViewSheet } from "@/co-view/co-view-sheet";
 import { HostShellRunner } from "@/co-view/host-shell-runner";
@@ -118,6 +134,12 @@ function shallowEqualPanel(a: PanelContent, b: PanelContent): boolean {
   if (a.type === "browser" && b.type === "browser") {
     return browserContentEquals(a, b);
   }
+  if (a.type === "webapp" && b.type === "webapp") {
+    return a.instanceId === b.instanceId
+      && a.webAppId === b.webAppId
+      && a.url === b.url
+      && a.title === b.title;
+  }
   return false;
 }
 
@@ -136,6 +158,28 @@ function reconcilePanels(
     merged[leafId] = prev !== undefined && shallowEqualPanel(prev, next) ? prev : next;
   }
   return merged;
+}
+
+// Legacy backfill: a `webapp` panel needs a non-empty `instanceId` (the per-panel
+// identity that keys its live surface and surfaceKey). Layouts saved before
+// instanceId existed — and the runtime validator tolerates that, treating it as
+// optional back-compat — arrive without one; mint a fresh id on ingest so the
+// surface-key never collapses to `webapp:undefined`. Returns the SAME object
+// when nothing was missing, preserving reference stability for reconcilePanels.
+function backfillWebAppInstanceIds(
+  panels: Record<string, PanelContent>,
+): Record<string, PanelContent> {
+  let mutated = false;
+  const out: Record<string, PanelContent> = {};
+  for (const [leafId, content] of Object.entries(panels)) {
+    if (content.type === "webapp" && (typeof content.instanceId !== "string" || content.instanceId.length === 0)) {
+      out[leafId] = { ...content, instanceId: crypto.randomUUID() };
+      mutated = true;
+    } else {
+      out[leafId] = content;
+    }
+  }
+  return mutated ? out : panels;
 }
 
 // Translate URL params left over from Central redirects (email verification,
@@ -338,7 +382,7 @@ function App() {
   ) => {
     setPanelContents((c) => {
       const prev = c[workspaceId] ?? {};
-      const next = updater(prev);
+      const next = backfillWebAppInstanceIds(updater(prev));
       if (prev === next) return c;
       const reconciled = reconcilePanels(prev, next);
       for (const [leafId, prevContent] of Object.entries(prev)) {
@@ -464,7 +508,7 @@ function App() {
     if (ctx.kind === "panel") {
       return movePanel(base, ctx.sourceLeafId, tgt.leafId, direction, position);
     }
-    if (ctx.kind === "sidebar-item") {
+    if (ctx.kind === "sidebar-item" || ctx.kind === "web-app") {
       return insertAtEdge(base, tgt.leafId, PREVIEW_LEAF_ID, direction, position);
     }
     return base;
@@ -661,7 +705,7 @@ function App() {
         saved.forEach((sw, i) => {
           const localId = newWorkspaces[i]!.id;
           newLayouts[localId] = sw.layout.root;
-          newPanelContents[localId] = sw.layout.panels;
+          newPanelContents[localId] = backfillWebAppInstanceIds(sw.layout.panels);
           newFocusedLeaves[localId] = sw.layout.focusedLeafId ?? null;
         });
 
@@ -714,7 +758,7 @@ function App() {
           saved.forEach((sw, i) => {
             const localId = newWorkspaces[i]!.id;
             newLayouts[localId] = sw.layout.root;
-            newPanelContents[localId] = sw.layout.panels;
+            newPanelContents[localId] = backfillWebAppInstanceIds(sw.layout.panels);
             newFocusedLeaves[localId] = sw.layout.focusedLeafId ?? null;
           });
           setWorkspaces(newWorkspaces);
@@ -803,7 +847,7 @@ function App() {
             const newId = uid();
             setWorkspaces((w) => [...w, { id: newId, name: updated.name ?? "Workspace", savedId: updated.id, syncState: "saved" as const }]);
             setLayouts((l) => ({ ...l, [newId]: updated.layout.root }));
-            setPanelContents((c) => ({ ...c, [newId]: updated.layout.panels }));
+            setPanelContents((c) => ({ ...c, [newId]: backfillWebAppInstanceIds(updated.layout.panels) }));
             setFocusedLeaves((f) => ({ ...f, [newId]: updated.layout.focusedLeafId ?? null }));
             return;
           }
@@ -1014,6 +1058,140 @@ function App() {
     };
     dropToPanel(activeFocusedLeafId() ?? firstLeafId(activeLayout()), content);
   };
+
+  // Open a desktop Web App as a bare-webview panel (warm, login-sticky). Same
+  // drop-target resolution as handleSidebarItemOpen; the webapp content renders
+  // a chromeless WebviewSurface on persist:browser (see WebAppPanel), keyed by
+  // webAppId so each app is its own warm surface.
+  const handleOpenWebApp = (app: WebApp) => {
+    const content: PanelContent = {
+      type: "webapp",
+      webAppId: app.id,
+      instanceId: crypto.randomUUID(),
+      url: app.url,
+      title: app.title,
+    };
+    dropToPanel(activeFocusedLeafId() ?? firstLeafId(activeLayout()), content);
+  };
+
+  // Dock a page as a NEW workspace panel (split), not by replacing the focused
+  // leaf — this is the path the popout window's "Dock" button drives, and the
+  // user wants docking to ADD a panel. Mirrors the sidebar-edge drop. Falls
+  // back to filling the leaf when the focused leaf is empty (don't split next to
+  // a blank panel). Distinct from handleOpenWebApp (sidebar click → replace),
+  // which stays as-is. No webAppId on the content: dock ≠ save — a docked panel
+  // is pure layout, not a bookmark ("Save as Web App" stays explicit).
+  const dockWebAppAsNewPanel = (app: { url: string; title: string }, instanceId: string) => {
+    let titleFallback = app.url;
+    try {
+      titleFallback = new URL(app.url).host;
+    } catch {
+      /* keep raw url */
+    }
+    const content: PanelContent = {
+      type: "webapp",
+      instanceId,
+      url: app.url,
+      title: app.title || titleFallback,
+    };
+    const targetLeafId = activeFocusedLeafId() ?? firstLeafId(activeLayout());
+    if (getContent(targetLeafId) === undefined) dropToPanel(targetLeafId, content);
+    else dropChannelToEdge(targetLeafId, content, "horizontal", "after");
+  };
+
+  // The dock flow (a "dock"-pref interception, or the popout window's "Dock"
+  // button) docks a live page by emitting here, so we don't drill a callback
+  // through the panel tree. Opens as a NEW panel (split).
+  createEffect(() => {
+    const unsubscribe = onOpenWebAppAsPanel((app, instanceId) => dockWebAppAsNewPanel(app, instanceId));
+    onCleanup(unsubscribe);
+  });
+
+  // Step 1 of the dock handshake: the popout window's "Dock" button. The popout
+  // is still open and still owns the view — dockLiveSurface verifies an active
+  // server (toast + stop if none; the popout survives), claims the view from
+  // main, and only then flows through the subscription above to open a panel.
+  // Top-level (not per-panel) so it survives the originating browser panel closing.
+  createEffect(() => {
+    const unsubscribe = onLiveSurfaceDockRequested(({ surfaceId, url, title }) => {
+      void dockLiveSurface(surfaceId, url, title);
+    });
+    onCleanup(unsubscribe);
+  });
+
+  // Live title sync: a docked panel's header tracks the page's document title
+  // like a browser tab (main mirrors `page-title-updated`). Skips panels the
+  // user has renamed (`renamed` pin — a deliberate label must never be
+  // clobbered by navigation) and empty titles. The title is clamped to the
+  // layout validator's 256-char cap so a hostile page's giant document.title
+  // can't poison the synced layout. Popped-out surfaces have no panel here —
+  // instanceIdForSurface misses and the event is a no-op (main updates the
+  // popout's OS title itself).
+  createEffect(() => {
+    const unsubscribe = onLiveSurfaceTitleChanged(({ surfaceId, title }) => {
+      const next = title.trim().slice(0, 256);
+      if (next.length === 0) return;
+      const instanceId = instanceIdForSurface(surfaceId);
+      if (instanceId === null) return;
+      for (const [workspaceId, ws] of Object.entries(panelContents())) {
+        for (const [leafId, content] of Object.entries(ws)) {
+          if (content.type !== "webapp" || content.instanceId !== instanceId) continue;
+          if (content.renamed === true || content.title === next) return;
+          mutatePanelContents(workspaceId, (prev) => {
+            const cur = prev[leafId];
+            if (cur === undefined || cur.type !== "webapp" || cur.instanceId !== instanceId) {
+              return prev;
+            }
+            return { ...prev, [leafId]: { ...cur, title: next } };
+          });
+          return;
+        }
+      }
+    });
+    onCleanup(unsubscribe);
+  });
+
+  // Native WebContentsViews (docked Web App panels) paint ABOVE all renderer DOM,
+  // so an overlay can't cover them by z-index — overlays only display above the
+  // panels if we HIDE the panels while an overlay is open. Suspend every native
+  // surface whenever any blocking overlay is open: every Kobalte Dialog/Sheet
+  // registers a blocker for its open lifetime (surfaceBlockersActive), plus the
+  // two non-Kobalte full-bleed overlays — the file-preview modal and the
+  // cinematic/update takeover. Restored when they all close.
+  createEffect(() => {
+    const overlayOpen =
+      liveSurfaceHost.surfaceBlockersActive() ||
+      filePreview() !== null ||
+      cinematicState() !== "idle";
+    liveSurfaceHost.setSuspended(overlayOpen);
+  });
+
+  // Release leaked live surfaces (B3). A Web App panel owns a live
+  // WebContentsView in main; closing the panel, replacing its leaf, or deleting
+  // its workspace must destroy that view or it leaks (holds a renderer + session,
+  // painting nowhere). The render path only ever CREATES, so this single
+  // reconciliation effect is the release chokepoint: diff the instanceIds present
+  // across EVERY workspace's panels against the registered live surfaces, and
+  // release any surface whose panel is gone. One effect covers close / replace /
+  // workspace-delete uniformly. Surfaces for inactive-workspace panels stay alive
+  // (their content is still present under that workspace id). A surface currently
+  // popped out into its own window is protected by main's LIVE_SURFACE_RELEASE
+  // no-op (surfacePopouts membership), so this won't yank a live popout.
+  createEffect(() => {
+    const present = new Set<string>();
+    for (const ws of Object.values(panelContents())) {
+      for (const content of Object.values(ws)) {
+        if (content.type === "webapp") present.add(content.instanceId);
+      }
+    }
+    const live = allLiveInstanceIds();
+    for (const instanceId of live) {
+      if (present.has(instanceId)) continue;
+      const sid = peekLiveSurface(instanceId);
+      if (sid !== null) void liveSurfaceRelease(sid);
+      clearLiveSurface(instanceId);
+    }
+  });
 
   // Plugin-driven browser opening is disabled until `client.browser` capability
   // enforcement is designed and implemented (see spec-20). The shell no longer
@@ -1291,6 +1469,45 @@ function App() {
     dropChannelToEdge(target.leafId, content, dir, pos);
   };
 
+  // Web App dropped from the sidebar into the workspace. Mirrors
+  // handleSidebarDrop but builds a `webapp` PanelContent (chromeless, warm).
+  // Mints a fresh per-panel instanceId — like handleOpenWebApp, each open of an
+  // app is its own live surface (so dragging the same app in twice yields two
+  // independent panels rather than two views fighting over one surface; B2).
+  const handleWebAppDrop = (app: WebApp, target: DropTarget) => {
+    // Commit-time sync rebase (see handleMovePanel for the full rationale).
+    const queued = pendingSync;
+    pendingSync = null;
+    if (queued !== null && queued.localWorkspaceId === activeId()) {
+      if (!getLeafIds(queued.root).includes(target.leafId)) {
+        showInlineStatus("Drop target was closed elsewhere.", "warning");
+        applySync(queued);
+        return;
+      }
+      // Drop target is still present remotely — accept the remote tree first,
+      // then apply the web-app drop on top. Keeps the user's action.
+      applySync(queued);
+    }
+
+    const content: PanelContent = {
+      type: "webapp",
+      webAppId: app.id,
+      instanceId: crypto.randomUUID(),
+      url: app.url,
+      title: app.title,
+    };
+    if (target.zone === "center") {
+      dropToPanel(target.leafId, content);
+      return;
+    }
+    clearFocusedLeaf(activeId());
+    const dir: "horizontal" | "vertical" =
+      target.zone === "left" || target.zone === "right" ? "horizontal" : "vertical";
+    const pos: "before" | "after" =
+      target.zone === "left" || target.zone === "top" ? "before" : "after";
+    dropChannelToEdge(target.leafId, content, dir, pos);
+  };
+
   return (
     <div class="flex h-full flex-col">
       {/* Custom titlebar — desktop-only (Titlebar returns null in browser).
@@ -1349,6 +1566,8 @@ function App() {
               onMovePanel={handleMovePanel}
               onItemSelect={handleSidebarItemOpen}
               onItemDrop={handleSidebarDrop}
+              onOpenWebApp={handleOpenWebApp}
+              onWebAppDrop={handleWebAppDrop}
             />
             {/* Single portal parent for all iframes/webviews — mounted once at App
                 root so panel re-parenting never reloads surfaces. Placed after the
@@ -1530,6 +1749,8 @@ type AppShellProps = {
   ) => void;
   onItemSelect: (item: SidebarItem) => void;
   onItemDrop: (item: SidebarItem, target: DropTarget) => void;
+  onOpenWebApp: (app: WebApp) => void;
+  onWebAppDrop: (app: WebApp, target: DropTarget) => void;
 };
 
 function NoServerWelcome() {
@@ -1553,7 +1774,12 @@ function AppShell(props: AppShellProps) {
 
   return (
     <SidebarProvider>
-      <AppSidebar onItemSelect={props.onItemSelect} onItemDrop={props.onItemDrop} />
+      <AppSidebar
+        onItemSelect={props.onItemSelect}
+        onItemDrop={props.onItemDrop}
+        onOpenWebApp={props.onOpenWebApp}
+        onWebAppDrop={props.onWebAppDrop}
+      />
       <SidebarInset>
         <ToastViewport />
         <TooltipHoverLayer />

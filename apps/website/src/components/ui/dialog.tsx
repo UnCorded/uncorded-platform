@@ -3,6 +3,7 @@ import { type ComponentProps, type JSX, splitProps } from "solid-js";
 import { X } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { CoViewModalMount } from "@/co-view/primitives";
+import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 const Dialog = KobalteDialog;
 const DialogTrigger = KobalteDialog.Trigger;
@@ -46,6 +47,15 @@ function DialogContent(props: DialogContentProps) {
         )}
         {...others}
       >
+        {/* Suspend native panel views (they paint above all DOM and would punch
+            through the scrim) for the dialog's OPEN lifetime. Must be a Content
+            child: this wrapper component's body runs eagerly when the Dialog
+            ROOT mounts (Solid components are plain functions; Kobalte's
+            conditional mounting starts at its Portal), so a blocker pushed in
+            the body above is pinned for every always-mounted <Dialog> — 9 of
+            them at app startup — and every live view reports visible:false
+            (blank docked panels). See surface-blocker.tsx. */}
+        <SuspendSurfacesWhileOpen />
         <CoViewModalMount
           getEl={() => contentEl}
           title={() => local.coViewTitle}

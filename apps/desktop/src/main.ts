@@ -13,6 +13,7 @@ import {
   systemPreferences,
   Tray,
   webContents,
+  WebContentsView,
   type WebContents,
 } from "electron";
 import path from "path";
@@ -25,6 +26,8 @@ import { getCloudflareConnectionState, signOutCloudflare } from "./cloudflare";
 import { provisionServer } from "./provision";
 import { deleteSecret, encryptionSecretKey, getSecret, getSecretStoreStatus, migrateSecrets, setSecret, tunnelSecretKey } from "./desktop-secrets";
 import { registerServer, getServerRecord, removeServerRecord, listServerRecords, registryWasQuarantinedThisSession, lastQuarantinePath } from "./server-registry";
+import { listWebApps, addWebApp, removeWebApp, getUrlPref, setUrlPref } from "./web-apps-store";
+import type { WebAppPref } from "./web-apps-store";
 import type {
   ScreenSharePermissionStatus,
   ScreenShareSelection,
@@ -98,6 +101,43 @@ const guardedProxyContents = new WeakSet<WebContents>();
 // Guest webContents whose host↔guest zoom reconcile is already wired, so we
 // bind the did-finish-load pin exactly once per guest.
 const zoomPinnedProxyContents = new WeakSet<WebContents>();
+
+// Browser Panel guest webContents whose popup guard is already attached. Kept
+// separate from guardedProxyContents because the two guests get different
+// treatment: proxy guests are navigation-pinned to their mount, while a Browser
+// Panel guest browses freely and has its window.open captured into an in-app
+// native view (see attachBrowserGuestPopupGuard). Without this guard, a site's
+// "detach" (window.open) silently dead-ends — the popup is blocked and the page
+// dereferences a null window handle.
+const guardedBrowserContents = new WeakSet<WebContents>();
+
+// In-app native popup views (WebContentsView), keyed by an integer surfaceId.
+// Each holds the LIVE webContents of a captured Browser Panel window.open, so
+// the popup keeps its opener + sessionStorage + persist:browser login. The
+// renderer positions them by reporting on-screen rects (LIVE_SURFACE_SET_BOUNDS)
+// and releases them (LIVE_SURFACE_RELEASE) when the host frame/panel closes.
+// Entries self-remove when the underlying webContents is destroyed.
+const liveSurfaces = new Map<number, WebContentsView>();
+let liveSurfaceSeq = 1;
+// SurfaceIds currently set visible. WebContentsView has no getVisible() in this
+// Electron, so we track the hidden→visible transition ourselves to fire a single
+// repaint kick on dock (see LIVE_SURFACE_SET_BOUNDS).
+const visibleLiveSurfaces = new Set<number>();
+// Surfaces that already used their one automatic crash recovery (see
+// attachLiveViewResilience). A second renderer crash stays dead rather than
+// spinning a reload loop; entries clear when the surface is destroyed.
+const crashReloadedSurfaces = new Set<number>();
+
+// Free, frameless OS windows that host a popped-out native view directly (the
+// view is a child of the popout's own contentView, so it moves with the window
+// and isn't clipped to the main app). Keyed by the same surfaceId. Dock target
+// is resolved at dock time by the renderer (whatever server/workspace is active
+// then), so no association is remembered here. Membership in this map is also
+// the trust boundary for the popout chrome's ipcMain.on messages.
+const surfacePopouts = new Map<number, BrowserWindow>();
+// Height (DIP) of the popout window's draggable chrome strip; the live view is
+// parked below it. Must match the .bar height in buildPopoutChromeHtml.
+const POPOUT_HEADER_H = 40;
 
 // Human-readable labels for the permissions a proxy guest may prompt for, used
 // in the native allow/deny dialog. Anything not promptable is denied without a
@@ -298,6 +338,35 @@ function handleIpc<T extends unknown[]>(
         stack: err instanceof Error ? err.stack : undefined,
       });
       throw ipcError(channel, err);
+    }
+  });
+}
+
+// Fire-and-forget variant of handleIpc for high-frequency renderer→main
+// messages sent with `ipcRenderer.send` (no reply channel). Same sender-origin
+// guard; handler throws are logged and the message dropped — there is nowhere
+// to surface an error, and a malformed frame must not take main down.
+function onIpc<T extends unknown[]>(
+  channel: string,
+  handler: (_event: Electron.IpcMainEvent, ...args: T) => void,
+): void {
+  ipcMain.on(channel, (event, ...args) => {
+    const senderUrl = event.senderFrame?.url;
+    if (!isAllowedIpcSender(senderUrl)) {
+      log.warn("ipc rejected — sender origin not allowed", {
+        channel,
+        senderUrl: senderUrl ?? null,
+      });
+      return;
+    }
+    try {
+      handler(event, ...(args as T));
+    } catch (err) {
+      log.error("ipc handler failed", {
+        channel,
+        err: errorMessage(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
     }
   });
 }
@@ -555,6 +624,264 @@ function attachProxyGuestNavGuards(contents: WebContents): void {
       });
     }
     return { action: "deny" };
+  });
+}
+
+// True when `contents` is the Browser Panel's webview guest — a webview bound to
+// the shared `persist:browser` partition. Distinct from isProxyGuestContents:
+// the browser pane is user-driven and not pinned to any mount, so it gets only
+// the popup guard below, never the proxy navigation pin.
+function isBrowserPanelGuest(contents: WebContents): boolean {
+  if (contents.getType() !== "webview") return false;
+  return contents.session === session.fromPartition("persist:browser");
+}
+
+// Live views whose popup guard is already attached (mirrors
+// guardedBrowserContents for WebContentsView-hosted pages).
+const guardedLiveViewContents = new WeakSet<WebContents>();
+
+// window.open from a LIVE view (a Web App panel's view, a docked captured
+// popup, or a popped-out window's content). Same http(s) validation and
+// createWindow adoption as attachBrowserGuestPopupGuard, but there is no
+// Browser Panel to route a floating frame to — the captured popup opens
+// directly as its own frameless live popout window (dockable later).
+// Recursive: the popup's view gets this same guard, so popups-from-popups
+// stay inside the capture model instead of leaking default Electron windows.
+// Idempotent per webContents.
+function attachLiveViewPopupGuard(view: WebContentsView): void {
+  const contents = view.webContents;
+  if (guardedLiveViewContents.has(contents)) return;
+  guardedLiveViewContents.add(contents);
+
+  contents.setWindowOpenHandler(({ url }) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      log.warn("blocked live-view window.open with malformed url", { url });
+      return { action: "deny" };
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      log.warn("blocked live-view window.open to non-http url", { url });
+      return { action: "deny" };
+    }
+    return {
+      action: "allow",
+      createWindow: (options) => {
+        // Adopt the pre-created WebContents (live session: cookies +
+        // sessionStorage + opener); only `background-tab` disposition leaves it
+        // undefined — there we build a fresh sandboxed view on the shared
+        // partition and load the URL ourselves. Same contract as
+        // attachBrowserGuestPopupGuard's createWindow.
+        const adopted = (options as { webContents?: WebContents }).webContents;
+        const popupView = adopted
+          ? new WebContentsView({ webContents: adopted })
+          : new WebContentsView({
+              webPreferences: {
+                partition: "persist:browser",
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true,
+              },
+            });
+        const surfaceId = liveSurfaceSeq++;
+        liveSurfaces.set(surfaceId, popupView);
+        if (!adopted) void popupView.webContents.loadURL(url);
+        popupView.webContents.on("destroyed", () => {
+          liveSurfaces.delete(surfaceId);
+          visibleLiveSurfaces.delete(surfaceId);
+          crashReloadedSurfaces.delete(surfaceId);
+        });
+        attachLiveViewResilience(surfaceId, popupView);
+        // Straight into its own popout window — never parked in main, so there
+        // is no renderer hand-off to leak if nothing claims it.
+        createLiveSurfacePopout(surfaceId, url);
+        return popupView.webContents;
+      },
+    };
+  });
+}
+
+// Every live-view creation chokepoint runs this: capture the view's window.open
+// into the popout model, and give a crashed renderer ONE automatic reload. A
+// second crash is a crash loop — leave it dead (the user can close the panel /
+// window; a full crashed-panel UI is deferred).
+function attachLiveViewResilience(surfaceId: number, view: WebContentsView): void {
+  attachLiveViewPopupGuard(view);
+  attachLiveViewTitleSync(surfaceId, view);
+  view.webContents.on("render-process-gone", (_event, details) => {
+    if (view.webContents.isDestroyed()) return;
+    if (crashReloadedSurfaces.has(surfaceId)) {
+      log.warn("live view crashed again after auto-reload; leaving it dead", {
+        surfaceId,
+        reason: details.reason,
+      });
+      return;
+    }
+    crashReloadedSurfaces.add(surfaceId);
+    log.warn("live view renderer gone; auto-reloading once", {
+      surfaceId,
+      reason: details.reason,
+      url: view.webContents.getURL(),
+    });
+    view.webContents.reload();
+  });
+}
+
+// Mirror a live view's document title everywhere it's shown, like a browser
+// tab: the popout's OS window/taskbar title and the renderer (which tracks the
+// docked panel header via LIVE_SURFACE_TITLE_CHANGED). The popout chrome
+// strip's label intentionally stays the HOST, not the title — it's the
+// provenance cue, and a page must not be able to restyle it via document.title;
+// did-navigate refreshes it only when the host actually changes.
+function attachLiveViewTitleSync(surfaceId: number, view: WebContentsView): void {
+  view.webContents.on("page-title-updated", (_event, title) => {
+    const popout = surfacePopouts.get(surfaceId);
+    if (popout && !popout.isDestroyed()) popout.setTitle(title);
+    sendToWindow(IPC.LIVE_SURFACE_TITLE_CHANGED, { surfaceId, title });
+  });
+  view.webContents.on("did-navigate", (_event, url) => {
+    const popout = surfacePopouts.get(surfaceId);
+    if (!popout || popout.isDestroyed()) return;
+    let host = url;
+    try {
+      host = new URL(url).host;
+    } catch {
+      /* keep raw string */
+    }
+    // The chrome strip is our own data: page — poke its DOM directly rather
+    // than growing the popout preload's IPC surface for one label.
+    void popout.webContents
+      .executeJavaScript(
+        `(el => { if (el) { el.textContent = ${JSON.stringify(host)}; el.title = ${JSON.stringify(host)}; } })(document.querySelector(".host"))`,
+        true,
+      )
+      .catch((err: unknown) => {
+        log.warn("popout host-label update failed", { surfaceId, err: errorMessage(err) });
+      });
+  });
+}
+
+// Tear down a live view's contents the way the PAGE would close itself.
+//
+// A direct webContents.close() destroys the contents, but for a CAPTURED
+// window.open popup the close is INVISIBLE to the web platform: the opener's
+// window proxy never flips `closed`, and the popup's unload handlers never
+// notify the opener. A site that tracks its popout (e.g. a roll20 character
+// sheet) therefore still believes the popup is open — clicking "pop out" again
+// does nothing (no window.open call ever reaches our capture handler) and the
+// site renders its in-page surrogate blank. Evidence: the popout→close→reopen
+// trace showed contents destroyed cleanly, then ZERO window.open activity on
+// the reopen attempt.
+//
+// Running window.close() INSIDE the page takes the full browser close path:
+// unload fires and the opener observes the close, so the site can re-open
+// later. Script may not be able to self-close (crashed renderer, never-loaded
+// view, non-script-opened page) — a short fallback hard-closes anything still
+// alive, restoring the old behavior at worst.
+function closeLiveViewContents(surfaceId: number, view: WebContentsView): void {
+  const contents = view.webContents;
+  if (contents.isDestroyed()) return;
+  contents.executeJavaScript("window.close()", true).catch(() => {
+    /* dead/never-loaded renderer — the fallback below hard-closes */
+  });
+  setTimeout(() => {
+    if (!contents.isDestroyed()) {
+      log.info("live view ignored window.close(); hard-closing contents", { surfaceId });
+      contents.close();
+    }
+  }, 1500);
+}
+
+// Handle a Browser Panel guest's window.open (a site's "detach"/"pop-out").
+// Instead of an OS window, we capture the popup into an in-app `WebContentsView`
+// via `createWindow`: it returns a WebContents we construct, and Electron
+// navigates the popup into THAT. Because the view is the genuine auxiliary
+// browsing context, the popup keeps its live `window.opener`, its copy of the
+// opener's sessionStorage, AND the shared `persist:browser` login — the exact
+// in-memory state that re-opening a bare URL in a fresh <webview> would drop
+// (the regression that left Roll20/OAuth popups logged-out or stuck loading).
+//
+// The view paints above renderer DOM, so the renderer positions it by reporting
+// on-screen rects (LIVE_SURFACE_SET_BOUNDS) — first inside a floating frame,
+// then anchored to a docked panel's body if the user docks it. We park it hidden
+// (0×0) and notify the renderer (LIVE_SURFACE_INTERCEPTED, matched to the
+// owning panel by webContentsId) to take over positioning. Non-http(s) schemes
+// are denied.
+//
+// CRITICAL: `createWindow` MUST adopt the WebContents Electron pre-created and
+// passed in `options.webContents` — that's the popup whose live session we want.
+// Constructing a fresh WebContents instead throws "Invalid webContents. Created
+// window should be connected to webContents passed with options object." The one
+// exception is `background-tab` disposition (middle/ctrl-click), where Electron
+// defers creation and `options.webContents` is undefined — there we make a fresh
+// view on `persist:browser` and load the URL ourselves (a new tab carries no
+// opener/sessionStorage to preserve anyway). Idempotent per guest.
+function attachBrowserGuestPopupGuard(contents: WebContents): void {
+  if (guardedBrowserContents.has(contents)) return;
+  guardedBrowserContents.add(contents);
+
+  contents.setWindowOpenHandler(({ url }) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      log.warn("blocked browser-panel window.open with malformed url", { url });
+      return { action: "deny" };
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      log.warn("blocked browser-panel window.open to non-http url", { url });
+      return { action: "deny" };
+    }
+    if (!win || win.isDestroyed()) {
+      log.warn("browser-panel window.open with no main window to host it", { url });
+      return { action: "deny" };
+    }
+    const hostWindow = win;
+    return {
+      action: "allow",
+      createWindow: (options) => {
+        // Adopt the popup's pre-created WebContents (Electron passes it in
+        // `options.webContents`) so it keeps its live session — cookies +
+        // sessionStorage + opener. It already inherits the opener guest's
+        // `persist:browser` partition and sandboxed prefs, so we don't (and
+        // mustn't) re-specify webPreferences when adopting. Only `background-tab`
+        // disposition leaves `webContents` undefined (deferred creation); there
+        // we build a fresh sandboxed view on the shared partition and load the
+        // URL ourselves.
+        const adopted = (options as { webContents?: WebContents }).webContents;
+        const view = adopted
+          ? new WebContentsView({ webContents: adopted })
+          : new WebContentsView({
+              webPreferences: {
+                partition: "persist:browser",
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true,
+              },
+            });
+        const surfaceId = liveSurfaceSeq++;
+        liveSurfaces.set(surfaceId, view);
+        hostWindow.contentView.addChildView(view);
+        // Parked hidden until the renderer reports a host rect for it.
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+        view.setVisible(false);
+        // Deferred background-tab popup: Electron didn't navigate it for us.
+        if (!adopted) void view.webContents.loadURL(url);
+        view.webContents.on("destroyed", () => {
+          liveSurfaces.delete(surfaceId);
+          visibleLiveSurfaces.delete(surfaceId);
+          crashReloadedSurfaces.delete(surfaceId);
+        });
+        attachLiveViewResilience(surfaceId, view);
+        sendToWindow(IPC.LIVE_SURFACE_INTERCEPTED, {
+          surfaceId,
+          url,
+          webContentsId: contents.id,
+        });
+        return view.webContents;
+      },
+    };
   });
 }
 
@@ -875,6 +1202,26 @@ function createWindow(): void {
       reason: details.reason,
       exitCode: details.exitCode,
     });
+  });
+
+  // A real shell navigation (F5/Ctrl+R reload, dev-server restart) tears down
+  // the renderer, and with it the session-only live-surfaces map — after the
+  // new document loads, NOTHING can reference the WebContentsViews parked or
+  // docked in this window, so they'd leak (each holds a renderer process)
+  // while painting stale pixels over the fresh shell. Destroy them up front.
+  // Popped-out views are exempt: their windows own their lifetime, and a
+  // post-reload renderer can still dock them (the dock flow re-sends
+  // surfaceId + url). The shell is an SPA, so main-frame non-same-document
+  // navigations only happen on reload; the initial load sweeps an empty map.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    for (const [surfaceId, view] of [...liveSurfaces]) {
+      if (surfacePopouts.has(surfaceId)) continue;
+      liveSurfaces.delete(surfaceId);
+      visibleLiveSurfaces.delete(surfaceId);
+      if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
+      closeLiveViewContents(surfaceId, view);
+    }
   });
 
   // F5 / Ctrl+R reload, Ctrl+Shift+R force-reload (cache bypass), F12 devtools.
@@ -1490,6 +1837,276 @@ function closeScreenSharePopout(trackSid: string): void {
   if (!win.isDestroyed()) win.close();
 }
 
+// ---------------------------------------------------------------------------
+// Native-surface popout windows
+// ---------------------------------------------------------------------------
+
+// The draggable chrome strip rendered as the popout window's own page. The live
+// WebContentsView is parked BELOW it (y = POPOUT_HEADER_H), so the buttons here
+// are never under the native view (which always paints above DOM) — fixing the
+// "header buttons don't work / content drifts" failure of the old in-app frame.
+// Buttons talk to main via the popoutChrome bridge (popout-preload.ts).
+function buildPopoutChromeHtml(opts: { host: string }): string {
+  const esc = (s: string): string =>
+    s.replace(/[&<>"']/g, (c) =>
+      c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;",
+    );
+  const host = esc(opts.host);
+  // Dock resolves its target at dock time (the renderer's active server), so the
+  // button is always offered; with no active server the renderer toasts and the
+  // window stays open (fail closed).
+  const dockBtn = `<button class="btn" onclick="window.popoutChrome.dock()">Dock</button>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${host}</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0b0b0e;color:#e7e7ea;
+    font:13px/1.2 system-ui,'Segoe UI',sans-serif;overflow:hidden;}
+  .bar{height:${POPOUT_HEADER_H}px;display:flex;align-items:center;gap:8px;
+    padding:0 8px;box-sizing:border-box;background:#15151a;
+    border-bottom:1px solid #26262e;-webkit-app-region:drag;user-select:none;}
+  .host{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;color:#b9b9c3;}
+  .btn{-webkit-app-region:no-drag;appearance:none;border:1px solid #2e2e38;
+    background:#1d1d24;color:#e7e7ea;height:26px;padding:0 10px;border-radius:6px;
+    font:inherit;cursor:pointer;outline:none;transition:background 150ms ease;}
+  .btn:hover{background:#272730;}
+  .btn:active{background:#32323c;}
+  .btn:focus-visible{outline:2px solid #6e6ef0;outline-offset:1px;}
+  .btn.close{padding:0 9px;font-size:12px;}
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="host" title="${host}">${host}</span>
+    ${dockBtn}
+    <button class="btn" onclick="window.popoutChrome.openExternal()">Open in browser</button>
+    <button class="btn close" onclick="window.popoutChrome.close()" aria-label="Close">&#10005;</button>
+  </div>
+</body>
+</html>`;
+}
+
+// Position the live view to fill the popout window below the chrome strip.
+function layoutSurfacePopout(popout: BrowserWindow, view: WebContentsView): void {
+  const [width = 0, height = 0] = popout.getContentSize();
+  view.setBounds({
+    x: 0,
+    y: POPOUT_HEADER_H,
+    width,
+    height: Math.max(0, height - POPOUT_HEADER_H),
+  });
+}
+
+// Resolve which popout (and its surfaceId) a chrome-button IPC came from. Only
+// our own popout windows are in surfacePopouts, so a match IS the authorization.
+function popoutFromSender(
+  sender: WebContents,
+): { surfaceId: number; window: BrowserWindow } | null {
+  for (const [surfaceId, window] of surfacePopouts) {
+    if (window.webContents.id === sender.id) {
+      return { surfaceId, window };
+    }
+  }
+  return null;
+}
+
+// Re-assert a deterministic z-order for the docked native views: ascending
+// surfaceId. A view's surfaceId is fixed for its whole life (unchanged by
+// pop-out / dock), so this order never depends on add/dock churn — the user
+// sees the same stacking every time. Electron moves an already-added child to
+// topmost on re-add, so iterating ascending leaves the highest surfaceId on top
+// and the lowest on the bottom. The renderer is the window's root webContents
+// (not a child view), so the only contentView children are these native views.
+function restackLiveSurfaces(): void {
+  if (!win || win.isDestroyed()) return;
+  const ids = [...liveSurfaces.keys()].sort((a, b) => a - b);
+  for (const id of ids) {
+    // A popped-out view lives in its popout window's contentView. addChildView
+    // on the MAIN window would silently re-parent it (Electron moves a view to
+    // the new parent), yanking the live view out of the window the user is
+    // looking at — the popout goes blank. POPPED-OUT means the popout owns the
+    // view exclusively (same invariant as the SET_BOUNDS / RELEASE guards).
+    if (surfacePopouts.has(id)) continue;
+    const view = liveSurfaces.get(id);
+    if (view && !view.webContents.isDestroyed()) win.contentView.addChildView(view);
+  }
+}
+
+// Create a fresh live native view for an arbitrary URL and park it hidden in the
+// main window until the renderer reports a host rect. Mirrors the deferred
+// `background-tab` branch of attachBrowserGuestPopupGuard (a brand-new view on
+// the shared persist:browser partition, sandboxed), but is driven directly by a
+// Web App panel's always-live mount path rather than a guest window.open. There
+// is no live session to preserve here — the view loads `url` fresh — but it
+// shares the partition, so cookies/localStorage from prior logins carry over.
+// Returns the surfaceId the renderer binds to the panel's instanceId.
+function createLiveSurface(url: string): number {
+  if (!win || win.isDestroyed()) {
+    throw new Error("no main window to host native surface");
+  }
+  const hostWindow = win;
+  const view = new WebContentsView({
+    webPreferences: {
+      partition: "persist:browser",
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  const surfaceId = liveSurfaceSeq++;
+  liveSurfaces.set(surfaceId, view);
+  hostWindow.contentView.addChildView(view);
+  view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  view.setVisible(false);
+  void view.webContents.loadURL(url);
+  view.webContents.on("destroyed", () => {
+    liveSurfaces.delete(surfaceId);
+    visibleLiveSurfaces.delete(surfaceId);
+    crashReloadedSurfaces.delete(surfaceId);
+  });
+  attachLiveViewResilience(surfaceId, view);
+  restackLiveSurfaces();
+  return surfaceId;
+}
+
+// Move a captured native view OUT of the main window and into its own free,
+// frameless OS window that owns it directly. The live session is preserved (no
+// reload) and the window can move anywhere, off-app / onto another monitor.
+function createLiveSurfacePopout(surfaceId: number, fallbackUrl = ""): void {
+  const view = liveSurfaces.get(surfaceId);
+  if (!view || view.webContents.isDestroyed()) return;
+  // Detach from the main window if it's currently parented there (docked/parked).
+  if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
+  // A DOCKED view arriving here (panel-header "Pop out") is in the visible set;
+  // POPPED-OUT means "not visible in the main window", so keep the invariant.
+  // The next dock then correctly reads as hidden→visible for the repaint kick.
+  visibleLiveSurfaces.delete(surfaceId);
+
+  // A view popped out the instant it was captured (live-view popup guard) hasn't
+  // committed its navigation yet, so getURL() is still "" — fall back to the
+  // window.open URL for the chrome strip's host label.
+  const currentUrl = view.webContents.getURL() || fallbackUrl;
+  let host = currentUrl;
+  try {
+    host = new URL(currentUrl).host;
+  } catch {
+    /* keep raw string */
+  }
+
+  const popout = new BrowserWindow({
+    width: 900,
+    height: 640,
+    minWidth: 480,
+    minHeight: 320,
+    // Taskbar label before the chrome page (whose <title> is also the host)
+    // finishes loading — never the bare app name.
+    title: host,
+    frame: false,
+    backgroundColor: "#0b0b0e",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, "popout-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  // Self-mirror filter must cover these too (a popped-out site could otherwise
+  // be re-shared into a channel as a window source).
+  tagAsUncordedWindow(popout.webContents);
+  popout.removeMenu();
+
+  popout.contentView.addChildView(view);
+  view.setVisible(true);
+  const relayout = (): void => layoutSurfacePopout(popout, view);
+  relayout();
+  popout.on("resize", relayout);
+  // Content size is only final once the chrome page has laid out.
+  popout.webContents.once("did-finish-load", () => {
+    relayout();
+    // An already-loaded view popping out (panel-header "Pop out") won't refire
+    // page-title-updated — push its current title now, after the chrome page's
+    // own <title> (the host fallback) has been applied so it can't overwrite.
+    if (!view.webContents.isDestroyed()) {
+      const title = view.webContents.getTitle();
+      if (title !== "" && !popout.isDestroyed()) popout.setTitle(title);
+    }
+  });
+
+  const dataUrl =
+    "data:text/html;charset=utf-8," + encodeURIComponent(buildPopoutChromeHtml({ host }));
+  void popout.loadURL(dataUrl).catch((err) => {
+    log.error("live-surface popout loadURL failed", { err: errorMessage(err) });
+  });
+
+  surfacePopouts.set(surfaceId, popout);
+  popout.on("closed", () => {
+    const entry = surfacePopouts.get(surfaceId);
+    // Still mapped → closed without docking: destroy the live view. (Dock claim
+    // deletes the entry first, so this won't fire for a docked view.)
+    if (entry === popout) {
+      surfacePopouts.delete(surfaceId);
+      liveSurfaces.delete(surfaceId);
+      closeLiveViewContents(surfaceId, view);
+    }
+  });
+}
+
+// Step 1 of the dock handshake: the popout chrome's Dock button asks the
+// renderer to dock this view. The popout is NOT touched — the renderer first
+// verifies it can host a panel (an active server) and then claims the view via
+// LIVE_SURFACE_CLAIM_DOCK. If anything renderer-side fails (no server, claim
+// races a teardown), the popout simply stays open and the user loses nothing.
+function requestDockFromPopout(found: { surfaceId: number; window: BrowserWindow }): void {
+  const { surfaceId, window: popout } = found;
+  const view = liveSurfaces.get(surfaceId);
+  if (!view || view.webContents.isDestroyed()) {
+    // Nothing left to dock — the popout is hosting a dead view; let its
+    // 'closed' handler clean up the map entry.
+    if (!popout.isDestroyed()) popout.close();
+    return;
+  }
+  sendToWindow(IPC.LIVE_SURFACE_DOCK_REQUESTED, {
+    surfaceId,
+    url: view.webContents.getURL(),
+    title: view.webContents.getTitle(),
+  });
+}
+
+// Step 2 of the dock handshake: the renderer commits. Re-parent the popped-out
+// view back into the main window (parked hidden) and close the popout. The
+// webContents persists across the move, so the live session is kept. Returns
+// whether the view is now parked in the main window — the renderer only opens
+// a panel on true. Idempotent for a view that's already in the main window
+// (the popup-pref auto-dock path claims a view that never popped out).
+function claimDockLiveSurface(surfaceId: number): boolean {
+  const view = liveSurfaces.get(surfaceId);
+  if (!view || view.webContents.isDestroyed()) return false;
+  if (!win || win.isDestroyed()) return false;
+  const popout = surfacePopouts.get(surfaceId);
+  // Drop the popout entry FIRST: (a) the popout's 'closed' handler must not
+  // destroy the view we're claiming, and (b) restackLiveSurfaces skips
+  // popped-out surfaces, so the entry must be gone before the re-normalize
+  // below or the claimed view would be left out of the stack.
+  surfacePopouts.delete(surfaceId);
+  if (popout && !popout.isDestroyed()) popout.contentView.removeChildView(view);
+  win.contentView.addChildView(view);
+  view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  view.setVisible(false);
+  // Parked hidden in main: the next renderer-driven setBounds is a genuine
+  // hidden→visible transition, so the repaint kick there fires for the dock.
+  visibleLiveSurfaces.delete(surfaceId);
+  // Docking re-adds the view on TOP regardless of its surfaceId — the one path
+  // that breaks the ascending-id stack. Re-normalize so z-order stays stable.
+  restackLiveSurfaces();
+  if (popout && !popout.isDestroyed()) popout.close();
+  return true;
+}
+
 function registerIpcHandlers(): void {
   // Central
   handleIpc(
@@ -1912,6 +2529,219 @@ function registerIpcHandlers(): void {
     hardenProxyPartition(partition);
   });
 
+  // Desktop-owned per-server Web Apps. Storage is local (~/.uncorded/web-apps.json);
+  // main is server-agnostic — the renderer (which owns the active server) passes
+  // serverId on every call. Inputs are validated here because the store trusts
+  // its callers. POP_OUT/GET_PREF/SET_PREF back the browser panel's dock overlay.
+  handleIpc(IPC.WEB_APPS_LIST, (_event, serverId: unknown) => {
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.WEB_APPS_LIST, new Error("serverId must be a non-empty string"));
+    }
+    return listWebApps(serverId);
+  });
+  handleIpc(IPC.WEB_APPS_ADD, (_event, serverId: unknown, input: unknown) => {
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("serverId must be a non-empty string"));
+    }
+    if (!input || typeof input !== "object") {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("input must be an object"));
+    }
+    const { url, title, faviconUrl } = input as Record<string, unknown>;
+    // 2048 (not the 4096 sanity cap used elsewhere): a saved Web App's url is
+    // persisted verbatim into synced layouts, whose validator rejects panel
+    // urls over 2048 — accepting more here would let an add succeed and then
+    // poison every workspace sync that includes the panel.
+    if (typeof url !== "string" || url.length === 0 || url.length > 2048) {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("url must be a string ≤2048 chars"));
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("url is not parsable"));
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("url must be http(s)"));
+    }
+    if (title !== undefined && typeof title !== "string") {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("title must be a string"));
+    }
+    if (faviconUrl !== undefined && typeof faviconUrl !== "string") {
+      throw ipcError(IPC.WEB_APPS_ADD, new Error("faviconUrl must be a string"));
+    }
+    return addWebApp(serverId, {
+      url,
+      ...(title !== undefined ? { title } : {}),
+      ...(faviconUrl !== undefined ? { faviconUrl } : {}),
+    });
+  });
+  handleIpc(IPC.WEB_APPS_REMOVE, (_event, serverId: unknown, id: unknown) => {
+    if (typeof serverId !== "string" || serverId.length === 0) {
+      throw ipcError(IPC.WEB_APPS_REMOVE, new Error("serverId must be a non-empty string"));
+    }
+    if (typeof id !== "string" || id.length === 0) {
+      throw ipcError(IPC.WEB_APPS_REMOVE, new Error("id must be a non-empty string"));
+    }
+    removeWebApp(serverId, id);
+  });
+  // The old WEB_APPS_POP_OUT (a bare BrowserWindow on persist:browser) is gone:
+  // it was the one lossy path — a fresh OS window with no dock affordance and no
+  // capture model. "Open in window" is now always create + OPEN_WINDOW (a live
+  // surface in the frameless popout, dockable later).
+  handleIpc(IPC.WEB_APPS_GET_PREF, (_event, url: unknown) => {
+    if (typeof url !== "string" || url.length === 0) {
+      throw ipcError(IPC.WEB_APPS_GET_PREF, new Error("url must be a non-empty string"));
+    }
+    return getUrlPref(url);
+  });
+  handleIpc(IPC.WEB_APPS_SET_PREF, (_event, url: unknown, action: unknown) => {
+    if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
+      throw ipcError(IPC.WEB_APPS_SET_PREF, new Error("url must be a string ≤4KB"));
+    }
+    if (action !== "dock" && action !== "window") {
+      throw ipcError(IPC.WEB_APPS_SET_PREF, new Error("action must be 'dock' or 'window'"));
+    }
+    setUrlPref(url, action satisfies WebAppPref);
+  });
+  // Position an in-app native popup view over a renderer-reported rect (CSS px ==
+  // DIPs at zoom 1; the shell fills the content area whose origin is 0,0 under the
+  // hidden title bar). visible:false hides it without destroying it (off-screen
+  // host placeholder, or a blocking modal that would otherwise be painted over).
+  // Fire-and-forget (onIpc, ipcRenderer.send): this is the per-frame hot path
+  // while a panel is dragged — an invoke round-trip is visible as the view
+  // trailing its panel. Validation throws are logged + dropped by onIpc.
+  onIpc(
+    IPC.LIVE_SURFACE_SET_BOUNDS,
+    (_event, surfaceId: unknown, bounds: unknown, visible: unknown) => {
+      if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
+        throw ipcError(IPC.LIVE_SURFACE_SET_BOUNDS, new Error("surfaceId must be an integer"));
+      }
+      if (typeof visible !== "boolean") {
+        throw ipcError(IPC.LIVE_SURFACE_SET_BOUNDS, new Error("visible must be a boolean"));
+      }
+      const b = bounds as { x: unknown; y: unknown; width: unknown; height: unknown } | null;
+      if (
+        !b ||
+        typeof b.x !== "number" ||
+        typeof b.y !== "number" ||
+        typeof b.width !== "number" ||
+        typeof b.height !== "number"
+      ) {
+        throw ipcError(IPC.LIVE_SURFACE_SET_BOUNDS, new Error("bounds must be {x,y,width,height}"));
+      }
+      const view = liveSurfaces.get(surfaceId);
+      if (!view) return;
+      // While popped out, the popout window owns the view's geometry and
+      // visibility (its resize handler drives layoutSurfacePopout). Any
+      // renderer report arriving now is stale by definition — e.g. the
+      // originating panel closing fires untrack → visible:false, which would
+      // 0×0-hide the view INSIDE the popout the user is looking at. Mirror of
+      // the LIVE_SURFACE_RELEASE popout guard.
+      if (surfacePopouts.has(surfaceId)) return;
+      const wasVisible = visibleLiveSurfaces.has(surfaceId);
+      view.setBounds({
+        x: Math.round(b.x),
+        y: Math.round(b.y),
+        width: Math.max(0, Math.round(b.width)),
+        height: Math.max(0, Math.round(b.height)),
+      });
+      view.setVisible(visible);
+      if (visible) visibleLiveSurfaces.add(surfaceId);
+      else visibleLiveSurfaces.delete(surfaceId);
+      // Defensive repaint kick on the hidden→visible transition (the dock
+      // case): a view re-attached from a closed popout window could in theory
+      // re-join the main window's compositor without scheduling a paint.
+      // NOTE: the blank-dock bug this was written for turned out to be pinned
+      // renderer-side suspension (leaked surface blockers — see
+      // website/src/components/ui/surface-blocker.tsx), not a missed repaint;
+      // kept only because it's cheap and idempotent for views already painting.
+      if (visible && !wasVisible && !view.webContents.isDestroyed()) {
+        view.webContents.invalidate();
+      }
+    },
+  );
+  // Create a fresh live native view for a URL and return its surfaceId. Drives a
+  // Web App panel's always-live mount: the panel binds the returned surfaceId to
+  // its instanceId and renders the live WebContentsView. http(s)-only, same URL
+  // guard as WEB_APPS_ADD.
+  handleIpc(IPC.LIVE_SURFACE_CREATE, (_event, url: unknown) => {
+    if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
+      throw ipcError(IPC.LIVE_SURFACE_CREATE, new Error("url must be a string ≤4KB"));
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw ipcError(IPC.LIVE_SURFACE_CREATE, new Error("url is not parsable"));
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw ipcError(IPC.LIVE_SURFACE_CREATE, new Error("url must be http(s)"));
+    }
+    return createLiveSurface(url);
+  });
+  // Destroy an in-app native popup view (host frame/panel closed, or Web App
+  // removed). The renderer then re-creates a fresh live view for the URL on the
+  // next mount. NO-OP while the surface is popped out into its own window — that
+  // window's own 'closed' handler owns the view's lifetime, and destroying it
+  // here would yank the live view out from under a window the user still has open.
+  handleIpc(IPC.LIVE_SURFACE_RELEASE, (_event, surfaceId: unknown) => {
+    if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
+      throw ipcError(IPC.LIVE_SURFACE_RELEASE, new Error("surfaceId must be an integer"));
+    }
+    if (surfacePopouts.has(surfaceId)) return;
+    const view = liveSurfaces.get(surfaceId);
+    if (!view) return;
+    liveSurfaces.delete(surfaceId);
+    if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
+    closeLiveViewContents(surfaceId, view);
+  });
+  // Open the native view in its own free, frameless OS window that owns it
+  // directly (header + content glued, movable anywhere off-app). Live session
+  // preserved — no reload. Where it docks is resolved at dock time (the
+  // renderer's then-active server), so no target is passed here.
+  handleIpc(IPC.LIVE_SURFACE_OPEN_WINDOW, (_event, surfaceId: unknown) => {
+    if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
+      throw ipcError(IPC.LIVE_SURFACE_OPEN_WINDOW, new Error("surfaceId must be an integer"));
+    }
+    createLiveSurfacePopout(surfaceId);
+  });
+  // Step 2 of the dock handshake (see claimDockLiveSurface): the renderer has
+  // verified it can host a panel and now claims the view. Returns whether the
+  // view is parked in the main window ready to be tracked — on false the
+  // renderer must NOT open a panel (the popout, if any, stays open).
+  handleIpc(IPC.LIVE_SURFACE_CLAIM_DOCK, (_event, surfaceId: unknown) => {
+    if (typeof surfaceId !== "number" || !Number.isInteger(surfaceId)) {
+      throw ipcError(IPC.LIVE_SURFACE_CLAIM_DOCK, new Error("surfaceId must be an integer"));
+    }
+    return claimDockLiveSurface(surfaceId);
+  });
+  // Popout-window chrome buttons (popout-preload.ts → ipcRenderer.send). These
+  // come from a data: URL page that can't pass the shell-origin guard, so they
+  // use ipcMain.on directly; the trust boundary is surfacePopouts membership
+  // (popoutFromSender returns null for any sender that isn't one of our popouts).
+  ipcMain.on(IPC.LIVE_SURFACE_WINDOW_DOCK, (event) => {
+    const found = popoutFromSender(event.sender);
+    if (found) requestDockFromPopout(found);
+  });
+  ipcMain.on(IPC.LIVE_SURFACE_WINDOW_CLOSE, (event) => {
+    const found = popoutFromSender(event.sender);
+    // Just close the window; its 'closed' handler (entry still mapped) releases
+    // the live view.
+    if (found && !found.window.isDestroyed()) found.window.close();
+  });
+  ipcMain.on(IPC.LIVE_SURFACE_WINDOW_OPEN_EXTERNAL, (event) => {
+    const found = popoutFromSender(event.sender);
+    if (!found) return;
+    const view = liveSurfaces.get(found.surfaceId);
+    if (!view || view.webContents.isDestroyed()) return;
+    const url = view.webContents.getURL();
+    if (url.startsWith("https:") || url.startsWith("http:")) {
+      void shell.openExternal(url).catch((err) => {
+        log.error("live-surface popout open-external failed", { err: errorMessage(err) });
+      });
+    }
+  });
+
   // Screen sharing — see installDisplayMediaHandler() above for the picker
   // delegation flow. The renderer-facing surface is window.electron.screenShare.
   handleIpc(IPC.SCREEN_SHARE_LIST_SOURCES, async (): Promise<ScreenShareSource[]> => {
@@ -2083,6 +2913,10 @@ if (!gotInstanceLock) {
         // Pin the guest's effective scale to the host display so a fractional
         // Windows scale can't make it lay out to a wider viewport than painted.
         attachProxyGuestZoomPin(contents);
+      } else if (isBrowserPanelGuest(contents)) {
+        // Browser Panel guest (`persist:browser`): capture window.open into an
+        // in-app live view so a site's detach/pop-out works instead of dead-ending.
+        attachBrowserGuestPopupGuard(contents);
       }
     });
 
@@ -2161,6 +2995,12 @@ if (!gotInstanceLock) {
     // `state: "available"` instead of leaving runtimes stuck in
     // `awaiting-restart` across the next launch.
     runtimeOrchestrator.cancelPendingRestarts("Application is quitting");
+    // Close live-surface popouts now (quit is deferred below, so they'd
+    // otherwise linger until the re-emitted quit). Each window's 'closed'
+    // handler runs the opener-visible teardown (closeLiveViewContents).
+    for (const popout of surfacePopouts.values()) {
+      if (!popout.isDestroyed()) popout.close();
+    }
     void stopAllServerContainers()
       .catch((err) => {
         log.error("stopAllServerContainers crashed", { err: errorMessage(err) });

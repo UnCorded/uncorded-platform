@@ -17,6 +17,8 @@ import type {
   Server,
   StartupNotice,
   UpdateState,
+  WebApp,
+  WebAppPref,
 } from "@uncorded/electron-bridge";
 
 type CleanupFn = () => void;
@@ -102,6 +104,24 @@ const IPC = {
 
   // Reverse-proxy <webview> guest registration
   PROXY_GUEST_REGISTER: "proxy:guest-register",
+
+  // Desktop-owned per-server Web Apps
+  WEB_APPS_LIST: "desktop:web-apps:list",
+  WEB_APPS_ADD: "desktop:web-apps:add",
+  WEB_APPS_REMOVE: "desktop:web-apps:remove",
+  WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
+  WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
+  LIVE_SURFACE_INTERCEPTED: "desktop:live-surface:intercepted",
+  LIVE_SURFACE_CREATE: "desktop:live-surface:create",
+  LIVE_SURFACE_SET_BOUNDS: "desktop:live-surface:set-bounds",
+  LIVE_SURFACE_RELEASE: "desktop:live-surface:release",
+  LIVE_SURFACE_OPEN_WINDOW: "desktop:live-surface:open-window",
+  LIVE_SURFACE_CLAIM_DOCK: "desktop:live-surface:claim-dock",
+  LIVE_SURFACE_DOCK_REQUESTED: "desktop:live-surface:dock-requested",
+  LIVE_SURFACE_TITLE_CHANGED: "desktop:live-surface:title-changed",
+  LIVE_SURFACE_WINDOW_DOCK: "desktop:live-surface:window-dock",
+  LIVE_SURFACE_WINDOW_CLOSE: "desktop:live-surface:window-close",
+  LIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:live-surface:window-open-external",
 } as const satisfies IpcChannelMap;
 
 function ipcInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -397,6 +417,82 @@ contextBridge.exposeInMainWorld("electron", {
     },
     requestPermission(): Promise<{ status: "ok" | "unsupported" }> {
       return ipcInvoke<{ status: "ok" | "unsupported" }>(IPC.SCREEN_SHARE_REQUEST_PERMISSION);
+    },
+  },
+
+  webApps: {
+    list(serverId: string): Promise<WebApp[]> {
+      return ipcInvoke<WebApp[]>(IPC.WEB_APPS_LIST, serverId);
+    },
+    add(
+      serverId: string,
+      input: { url: string; title?: string; faviconUrl?: string },
+    ): Promise<WebApp> {
+      return ipcInvoke<WebApp>(IPC.WEB_APPS_ADD, serverId, input);
+    },
+    remove(serverId: string, id: string): Promise<void> {
+      return ipcInvoke<void>(IPC.WEB_APPS_REMOVE, serverId, id);
+    },
+    getPref(url: string): Promise<WebAppPref | null> {
+      return ipcInvoke<WebAppPref | null>(IPC.WEB_APPS_GET_PREF, url);
+    },
+    setPref(url: string, action: WebAppPref): Promise<void> {
+      return ipcInvoke<void>(IPC.WEB_APPS_SET_PREF, url, action);
+    },
+  },
+
+  liveSurface: {
+    create(url: string): Promise<number> {
+      return ipcInvoke<number>(IPC.LIVE_SURFACE_CREATE, url);
+    },
+    setBounds(
+      surfaceId: number,
+      bounds: { x: number; y: number; width: number; height: number },
+      visible: boolean,
+    ): void {
+      // Hot path: fires per animation frame while a panel is dragged/resized.
+      // Fire-and-forget send (ordered, no invoke round-trip) — every frame of
+      // IPC latency shows up as the native view trailing its panel.
+      ipcRenderer.send(IPC.LIVE_SURFACE_SET_BOUNDS, surfaceId, bounds, visible);
+    },
+    release(surfaceId: number): Promise<void> {
+      return ipcInvoke<void>(IPC.LIVE_SURFACE_RELEASE, surfaceId);
+    },
+    openWindow(surfaceId: number): Promise<void> {
+      return ipcInvoke<void>(IPC.LIVE_SURFACE_OPEN_WINDOW, surfaceId);
+    },
+    claimDock(surfaceId: number): Promise<boolean> {
+      return ipcInvoke<boolean>(IPC.LIVE_SURFACE_CLAIM_DOCK, surfaceId);
+    },
+    onIntercepted(
+      handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
+    ): CleanupFn {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { surfaceId: number; url: string; webContentsId: number },
+      ): void => handler(payload);
+      ipcRenderer.on(IPC.LIVE_SURFACE_INTERCEPTED, listener);
+      return () => ipcRenderer.removeListener(IPC.LIVE_SURFACE_INTERCEPTED, listener);
+    },
+    onDockRequested(
+      handler: (payload: { surfaceId: number; url: string; title: string }) => void,
+    ): CleanupFn {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { surfaceId: number; url: string; title: string },
+      ): void => handler(payload);
+      ipcRenderer.on(IPC.LIVE_SURFACE_DOCK_REQUESTED, listener);
+      return () => ipcRenderer.removeListener(IPC.LIVE_SURFACE_DOCK_REQUESTED, listener);
+    },
+    onTitleChanged(
+      handler: (payload: { surfaceId: number; title: string }) => void,
+    ): CleanupFn {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { surfaceId: number; title: string },
+      ): void => handler(payload);
+      ipcRenderer.on(IPC.LIVE_SURFACE_TITLE_CHANGED, listener);
+      return () => ipcRenderer.removeListener(IPC.LIVE_SURFACE_TITLE_CHANGED, listener);
     },
   },
 

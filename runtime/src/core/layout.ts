@@ -35,6 +35,11 @@ const BROWSER_LEGACY_ALLOWED_KEYS = new Set(["type", "url", "title"]);
 const BROWSER_TABBED_ALLOWED_KEYS = new Set(["type", "tabs", "activeTabId", "recent"]);
 const BROWSER_TAB_ALLOWED_KEYS = new Set(["id", "title", "url"]);
 const BROWSER_RECENT_ALLOWED_KEYS = new Set(["title", "url"]);
+// `instanceId` (the per-panel identity) is validated when present but NOT
+// required: layouts saved before it existed lack it, and the renderer backfills
+// one on load. Rejecting its absence would flip every restored pre-instanceId
+// workspace to "error" — same tolerate-and-backfill stance as `tunnelUrl` above.
+const WEBAPP_ALLOWED_KEYS = new Set(["type", "webAppId", "instanceId", "url", "title", "renamed"]);
 const MAX_BROWSER_TABS = 16;
 const MAX_BROWSER_RECENT = 6;
 
@@ -196,6 +201,62 @@ function validateBrowserTabbedPanel(
   return null;
 }
 
+// A desktop "Web App" panel: a single pinned page rendered as a live native
+// view. The Web App definition is desktop-local, but the panel persists by
+// value (url + title, plus webAppId only when it's a saved bookmark) in synced
+// layouts so it survives restore — a non-desktop client shows a placeholder
+// instead of mounting a live view.
+function validateWebAppPanel(
+  leafId: string,
+  content: Record<string, unknown>,
+): LayoutValidationResult | null {
+  // Optional since dock ≠ save: a panel created by docking a live popup has no
+  // bookmark linkage, so it carries no webAppId. Validate only if present.
+  if ("webAppId" in content) {
+    const webAppId = content["webAppId"];
+    if (typeof webAppId !== "string" || webAppId.length === 0) {
+      return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].webAppId must be a non-empty string.`);
+    }
+    if (webAppId.length > 128) {
+      return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].webAppId must not exceed 128 characters.`);
+    }
+  }
+  // Optional (back-compat) — see WEBAPP_ALLOWED_KEYS note. Validate only if present.
+  if ("instanceId" in content) {
+    const instanceId = content["instanceId"];
+    if (typeof instanceId !== "string" || instanceId.length === 0) {
+      return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].instanceId must be a non-empty string.`);
+    }
+    if (instanceId.length > 128) {
+      return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].instanceId must not exceed 128 characters.`);
+    }
+  }
+  const url = content["url"];
+  if (typeof url !== "string" || url.length === 0) {
+    return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].url must be a non-empty string.`);
+  }
+  if (url.length > 2048) {
+    return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].url must not exceed 2048 characters.`);
+  }
+  const title = content["title"];
+  if (typeof title !== "string") {
+    return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].title must be a string.`);
+  }
+  if (title.length > 256) {
+    return err("LAYOUT_PANEL_FIELD_TOO_LONG", `panels["${leafId}"].title must not exceed 256 characters.`);
+  }
+  // Optional user-rename pin (desktop title sync skips renamed panels).
+  if ("renamed" in content && typeof content["renamed"] !== "boolean") {
+    return err("LAYOUT_INVALID_PANEL_FIELD", `panels["${leafId}"].renamed must be a boolean.`);
+  }
+  for (const key of Object.keys(content)) {
+    if (!WEBAPP_ALLOWED_KEYS.has(key)) {
+      return err("LAYOUT_UNKNOWN_PANEL_FIELD", `panels["${leafId}"] contains unknown field "${key}".`);
+    }
+  }
+  return null;
+}
+
 /**
  * Collect all leaf IDs from the tree.
  * Returns null if a structural error is found (tracked separately).
@@ -330,10 +391,13 @@ function validatePanels(
           ? validateBrowserTabbedPanel(leafId, c)
           : validateBrowserLegacyPanel(leafId, c);
       if (browserErr) return browserErr;
+    } else if (c["type"] === "webapp") {
+      const webAppErr = validateWebAppPanel(leafId, c);
+      if (webAppErr) return webAppErr;
     } else {
       return err(
         "LAYOUT_INVALID_PANEL_TYPE",
-        `panels["${leafId}"].type must be "plugin" or "browser", got "${String(c["type"])}".`,
+        `panels["${leafId}"].type must be "plugin", "browser", or "webapp", got "${String(c["type"])}".`,
       );
     }
   }

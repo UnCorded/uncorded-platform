@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
-import { Bell, Minus, Square, Copy, X, BellOff, RefreshCw, Check } from "lucide-solid";
+import { Bell, Minus, Square, Copy, X, BellOff, RefreshCw, Check, Rocket } from "lucide-solid";
 import { activeServer } from "@/stores/servers";
 import { isElectron, getElectron } from "@/lib/electron";
 import { ServerIcon } from "@/components/server-switcher";
@@ -179,26 +179,24 @@ function BellButton(props: {
   );
 }
 
-// Manual "check for desktop updates" trigger. Spins while a check is in
-// flight, swaps to a check glyph once a terminal state lands (up-to-date or
-// update found). The post-found UX (download progress, restart prompt, etc.)
-// belongs to the sidebar-header UpdatePill — this button is purely the
-// "look now" gesture, replacing the old Alt-key application menu entry.
+// Actionable desktop-update control. Drives the full update gesture directly
+// from the titlebar: checks when idle/up-to-date, downloads when an update is
+// available, installs when one is downloaded, and retries the failed phase on
+// error. Icon + tint encode the state — spinning refresh while checking,
+// emerald check when up to date, amber rocket when there's something to act on.
+// The sidebar UpdatePill mirrors the same state for users who prefer it there.
 function CheckUpdatesButton(): JSX.Element {
   const state = () => updateState();
   const status = () => state()?.status ?? "idle";
   const enabled = () => state()?.enabled ?? false;
 
   const checking = () => status() === "checking";
-  // "Found" means a terminal post-check resolution: either no update is
-  // available (up-to-date) or one was identified (available / downloaded /
-  // already-downloading). Showing a check glyph for all of these communicates
-  // "search complete — see the sidebar pill if there's anything to do."
-  const found = () =>
-    status() === "up-to-date" ||
+  const retryableError = () => status() === "error" && (state()?.canRetry ?? false);
+  const actionable = () =>
     status() === "available" ||
-    status() === "downloading" ||
-    status() === "downloaded";
+    status() === "downloaded" ||
+    retryableError();
+  const upToDate = () => status() === "up-to-date";
 
   const tooltip = (): string => {
     const s = state();
@@ -212,14 +210,16 @@ function CheckUpdatesButton(): JSX.Element {
           : "Up to date — click to check again";
       case "available":
         return s.availableVersion
-          ? `Update v${s.availableVersion} available — see sidebar`
-          : "Update available — see sidebar";
+          ? `Update v${s.availableVersion} available — click to download`
+          : "Update available — click to download";
       case "downloading":
         return s.downloadPercent === null
-          ? "Downloading update — see sidebar"
-          : `Downloading update (${s.downloadPercent}%) — see sidebar`;
+          ? "Downloading update…"
+          : `Downloading update (${s.downloadPercent}%)…`;
       case "downloaded":
-        return "Update ready — see sidebar to restart";
+        return s.downloadedVersion
+          ? `Update v${s.downloadedVersion} ready — click to install`
+          : "Update ready — click to install";
       case "error":
         return s.message
           ? `Last check failed: ${s.message} — click to retry`
@@ -232,11 +232,24 @@ function CheckUpdatesButton(): JSX.Element {
   const handleClick = async (): Promise<void> => {
     const s = state();
     if (!s || !s.enabled) return;
-    if (s.status === "checking") return;
+    if (s.status === "checking" || s.status === "downloading") return;
     try {
-      await getElectron().update.check();
+      if (s.status === "available") {
+        await getElectron().update.download();
+      } else if (s.status === "downloaded") {
+        await getElectron().update.install();
+      } else if (s.status === "error" && s.canRetry) {
+        if (s.errorContext === "check") await getElectron().update.check();
+        else if (s.errorContext === "download") await getElectron().update.download();
+        else if (s.errorContext === "install") await getElectron().update.install();
+        // Missing/unknown errorContext: fall back to a fresh check rather
+        // than silently ignoring a click that promises a retry.
+        else await getElectron().update.check();
+      } else {
+        await getElectron().update.check();
+      }
     } catch (err) {
-      console.error("[titlebar] update check failed", err);
+      console.error("[titlebar] update action failed", err);
     }
   };
 
@@ -245,20 +258,29 @@ function CheckUpdatesButton(): JSX.Element {
       type="button"
       class="relative flex size-8 items-center justify-center text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors disabled:pointer-events-none"
       classList={{
-        "text-emerald-400": found(),
+        "text-emerald-400": upToDate(),
+        "text-amber-400": actionable(),
+        "text-sky-400": checking(),
         "opacity-50": !enabled(),
       }}
       style={{ "-webkit-app-region": "no-drag" }}
-      aria-label="Check for updates"
+      aria-label={checking() ? "Checking for updates" : actionable() ? "Update available" : "Check for updates"}
       data-tooltip={tooltip()}
       data-tooltip-side="bottom"
       disabled={!enabled() || checking()}
       onClick={() => { void handleClick(); }}
     >
-      <Show when={found()} fallback={
-        <RefreshCw class={checking() ? "size-3.5 animate-spin" : "size-3.5"} />
-      }>
-        <Check class="size-4" />
+      <Show
+        when={actionable()}
+        fallback={
+          <Show when={upToDate()} fallback={
+            <RefreshCw class={checking() ? "size-3.5 animate-spin" : "size-3.5"} />
+          }>
+            <Check class="size-4" />
+          </Show>
+        }
+      >
+        <Rocket class="size-4" />
       </Show>
     </button>
   );

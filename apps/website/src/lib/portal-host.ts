@@ -36,10 +36,15 @@
 //     the element happens here, only at destroyByKey/destroyByWorkspace time.
 //   - Positioning: every mount is absolutely positioned in the portal root,
 //     styled to match its placeholder's getBoundingClientRect.
-//   - Rect tracking: rAF-poll loop is the primary mechanism (covers ancestor
-//     flex/transform changes that ResizeObserver misses). RO acts as an
-//     invalidator — any RO fire restarts the poll loop. Loop settles after
-//     2 consecutive frames of identical rects for every tracked mount.
+//   - Rect tracking: a single shared ResizeObserver syncs EVERY mount
+//     synchronously the moment any placeholder resizes. RO callbacks run
+//     post-layout, pre-paint, so the portaled element is restyled in the SAME
+//     frame as the layout change — surfaces stay pixel-locked through splitter
+//     drags and flex transitions instead of trailing a frame behind. Syncing
+//     all mounts per fire also covers placeholders that only MOVED (their own
+//     observation never fires for position changes). A rAF poll remains as the
+//     settle-watcher for changes nothing observes (e.g. layout shifts that
+//     resize no placeholder); it settles after 2 consecutive unchanged frames.
 //   - onDestroy callback: callers register cleanup (WS unsubscribe, voice
 //     unsubscribe, listener removal) here so it runs once when the iframe is
 //     truly torn down — not every time the SolidJS wrapper component
@@ -98,7 +103,6 @@ interface Mount {
   placeholder: HTMLElement;
   element: HTMLElement;
   lastRect: Rect | null;
-  resizeObserver: ResizeObserver;
   // Refcount: each mount(key) bumps this; each unmount(key) decrements. The
   // element is hidden (display:none) at refcount=0, but the entry stays in
   // the map. Real teardown happens only via destroyByKey/destroyByWorkspace.
@@ -113,6 +117,22 @@ interface Mount {
 
 let portalRoot: HTMLElement | null = null;
 const mounts = new Map<string, Mount>();
+
+// One observer for every placeholder. Its callback runs post-layout/pre-paint,
+// so applying rects here locks every portaled element to its placeholder in
+// the SAME frame the layout changed — including each frame of a flex
+// transition. Created lazily so tests can swap the ResizeObserver global
+// before first use.
+let sharedObserver: ResizeObserver | null = null;
+function placeholderObserver(): ResizeObserver {
+  if (sharedObserver === null) {
+    sharedObserver = new ResizeObserver(() => {
+      syncAll();
+      startRectPoll();
+    });
+  }
+  return sharedObserver;
+}
 
 let pollActive = false;
 let unchangedFrames = 0;
@@ -187,18 +207,12 @@ export function mount(opts: MountOptions): void {
     existing.refCount++;
     if (existing.element.style.display === "none") existing.element.style.display = "";
     existing.workspaceId = opts.workspaceId;
-    if (existing.placeholder !== opts.placeholder) {
-      existing.resizeObserver.disconnect();
-      existing.placeholder = opts.placeholder;
-      existing.resizeObserver = new ResizeObserver(() => startRectPoll());
-      existing.resizeObserver.observe(opts.placeholder);
-    } else {
-      // RO was disconnected during the hide path; re-observe so future
-      // resizes invalidate the poll loop again.
-      existing.resizeObserver.disconnect();
-      existing.resizeObserver = new ResizeObserver(() => startRectPoll());
-      existing.resizeObserver.observe(opts.placeholder);
-    }
+    // Re-observe: the hide path unobserved the old placeholder (its node was
+    // about to detach). observe() on an already-observed node is a no-op, so
+    // this is safe whether or not the placeholder changed.
+    placeholderObserver().unobserve(existing.placeholder);
+    existing.placeholder = opts.placeholder;
+    placeholderObserver().observe(opts.placeholder);
     syncRect(existing);
     startRectPoll();
     return;
@@ -211,8 +225,7 @@ export function mount(opts: MountOptions): void {
   el.style.border = "0";
   el.style.pointerEvents = "auto";
 
-  const ro = new ResizeObserver(() => startRectPoll());
-  ro.observe(opts.placeholder);
+  placeholderObserver().observe(opts.placeholder);
 
   const entry: Mount = {
     key: opts.key,
@@ -220,7 +233,6 @@ export function mount(opts: MountOptions): void {
     placeholder: opts.placeholder,
     element: el,
     lastRect: null,
-    resizeObserver: ro,
     refCount: 1,
     onDestroy: opts.onDestroy ?? null,
   };
@@ -248,9 +260,9 @@ export function unmount(key: string): void {
   entry.refCount--;
   if (entry.refCount > 0) return;
   // Hide path: placeholder is going away (component unmounted), but we keep
-  // the element alive for adoption later. Disconnect the RO since its
-  // observed node is about to detach; mount() reconnects it on adoption.
-  entry.resizeObserver.disconnect();
+  // the element alive for adoption later. Unobserve the placeholder since its
+  // node is about to detach; mount() re-observes on adoption.
+  placeholderObserver().unobserve(entry.placeholder);
   entry.element.style.display = "none";
 }
 
@@ -290,7 +302,7 @@ export function destroyAll(): void {
 }
 
 function teardown(entry: Mount): void {
-  entry.resizeObserver.disconnect();
+  placeholderObserver().unobserve(entry.placeholder);
   if (entry.element.parentElement === portalRoot && portalRoot !== null) {
     portalRoot.removeChild(entry.element);
   }
@@ -328,20 +340,19 @@ export function rekey(oldKey: string, newKey: string): void {
   mounts.set(newKey, entry);
 }
 
-// Force a rect re-sync. Used when a placeholder transitions from no-box
-// (display:none ancestor) to has-box — ResizeObserver doesn't always fire
-// reliably across that transition, which leaves the portaled element stuck
-// at visibility:hidden even though its placeholder now has a real rect.
-// Callers (e.g. tab-switch) invoke this to guarantee the next frame syncs.
-//
-// With a key: sync that one mount immediately, then start the poll.
-// Without a key: just start the poll, which sweeps every mount on the next
-// rAF tick.
-export function requestSync(key?: string): void {
-  if (key !== undefined) {
-    const entry = mounts.get(key);
-    if (entry) syncRect(entry);
-  }
+// Force an immediate, synchronous rect sweep of every mount, then run the
+// settle poll. Two jobs:
+//   1. Same-frame lock during splitter drags: the splitter's rAF tick commits
+//      the new flex ratio (Solid flushes the styles synchronously) and then
+//      calls this — the forced rect read + style writes land before paint, so
+//      portaled surfaces never trail the drag. This is also the only signal
+//      for placeholders that only MOVED (ResizeObserver never fires for
+//      position-only changes, and during a drag nothing else may resize).
+//   2. No-box → has-box transitions (tab switch): RO doesn't always fire
+//      reliably across a display:none boundary, which would leave the portaled
+//      element stuck at visibility:hidden; an explicit sync guarantees it.
+export function requestSync(): void {
+  syncAll();
   startRectPoll();
 }
 
@@ -349,10 +360,9 @@ export function requestSync(key?: string): void {
 export function updatePlaceholder(key: string, placeholder: HTMLElement): void {
   const entry = mounts.get(key);
   if (!entry) return;
-  entry.resizeObserver.disconnect();
+  placeholderObserver().unobserve(entry.placeholder);
   entry.placeholder = placeholder;
-  entry.resizeObserver = new ResizeObserver(() => startRectPoll());
-  entry.resizeObserver.observe(placeholder);
+  placeholderObserver().observe(placeholder);
   syncRect(entry);
   startRectPoll();
 }
@@ -394,13 +404,7 @@ function rectsEqual(a: Rect | null, b: Rect): boolean {
   return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 }
 
-function syncRect(entry: Mount): boolean {
-  // Hidden entries (refCount=0, display:none) don't need rect work — their
-  // placeholder is detached from the live DOM, getBoundingClientRect returns
-  // zeros, and styling them is wasted work. Skip until they're re-adopted.
-  if (entry.refCount === 0) return false;
-  const rect = computeRect(entry);
-  if (rectsEqual(entry.lastRect, rect)) return false;
+function applyRect(entry: Mount, rect: Rect): void {
   const s = entry.element.style;
   s.left = `${rect.x}px`;
   s.top = `${rect.y}px`;
@@ -410,15 +414,31 @@ function syncRect(entry: Mount): boolean {
   // flash a stray 0×0 element.
   s.visibility = rect.w === 0 || rect.h === 0 ? "hidden" : "visible";
   entry.lastRect = rect;
+}
+
+function syncRect(entry: Mount): boolean {
+  // Hidden entries (refCount=0, display:none) don't need rect work — their
+  // placeholder is detached from the live DOM, getBoundingClientRect returns
+  // zeros, and styling them is wasted work. Skip until they're re-adopted.
+  if (entry.refCount === 0) return false;
+  const rect = computeRect(entry);
+  if (rectsEqual(entry.lastRect, rect)) return false;
+  applyRect(entry, rect);
   return true;
 }
 
 function syncAll(): boolean {
-  let changed = false;
+  // Read phase first, then write phase: interleaving a style write between
+  // rect reads would force a synchronous re-layout per mount. syncAll runs in
+  // hot pre-paint paths (RO callback, splitter rAF), so keep it one layout.
+  const updates: Array<[Mount, Rect]> = [];
   for (const entry of mounts.values()) {
-    if (syncRect(entry)) changed = true;
+    if (entry.refCount === 0) continue;
+    const rect = computeRect(entry);
+    if (!rectsEqual(entry.lastRect, rect)) updates.push([entry, rect]);
   }
-  return changed;
+  for (const [entry, rect] of updates) applyRect(entry, rect);
+  return updates.length > 0;
 }
 
 function startRectPoll(): void {
@@ -452,10 +472,21 @@ function pollTick(): void {
 
 if (typeof window !== "undefined") {
   // Window resize triggers placeholder rect changes but not always RO (if the
-  // placeholder's size didn't change, just its position). Poll unconditionally.
-  window.addEventListener("resize", () => startRectPoll());
+  // placeholder's size didn't change, just its position). Sync immediately —
+  // both events fire before the frame paints — then poll until settled.
+  window.addEventListener("resize", () => {
+    syncAll();
+    startRectPoll();
+  });
   // Scroll can shift placeholder rects (iframes don't scroll with the page).
-  window.addEventListener("scroll", () => startRectPoll(), { passive: true, capture: true });
+  window.addEventListener(
+    "scroll",
+    () => {
+      syncAll();
+      startRectPoll();
+    },
+    { passive: true, capture: true },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -470,8 +501,9 @@ export function _resetForTests(): void {
   pollHandle = null;
   pollActive = false;
   unchangedFrames = 0;
+  sharedObserver?.disconnect();
+  sharedObserver = null;
   for (const entry of mounts.values()) {
-    entry.resizeObserver.disconnect();
     if (entry.element.parentElement === portalRoot && portalRoot !== null) {
       portalRoot.removeChild(entry.element);
     }

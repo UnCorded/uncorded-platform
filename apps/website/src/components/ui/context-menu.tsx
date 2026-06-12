@@ -2,6 +2,7 @@ import { ContextMenu as KContextMenu } from "@kobalte/core/context-menu";
 import { type ComponentProps, splitProps } from "solid-js";
 import { cn } from "@/lib/utils";
 import { CoViewContextMenuMount } from "@/co-view/primitives";
+import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 const ContextMenu = KContextMenu;
 const ContextMenuTrigger = KContextMenu.Trigger;
@@ -40,6 +41,11 @@ function ContextMenuContent(props: ContextMenuContentProps) {
         )}
         {...others}
       >
+        {/* Suspend native views for the menu's open lifetime so it isn't punched
+            through by a Web App panel's native view. Rendered as a Content child
+            (mounts only while open), not in the wrapper body which never unmounts
+            and would pin suspension — see surface-blocker.tsx. */}
+        <SuspendSurfacesWhileOpen />
         <CoViewContextMenuMount
           getEl={() => contentEl}
           position={() => {
