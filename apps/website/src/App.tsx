@@ -83,7 +83,7 @@ import * as liveSurfaceHost from "@/lib/live-surface-host";
 import { MemberManageSheet } from "@/components/server/member-manage-sheet";
 import { CoViewSheet } from "@/co-view/co-view-sheet";
 import { HostShellRunner } from "@/co-view/host-shell-runner";
-import { ViewerSession } from "@/co-view/viewer-session";
+import { CoViewViewerSelector } from "@/co-view/viewer-selector-view";
 import { CoViewHostProvider } from "@/co-view/host-context";
 import type { CoViewHostController } from "@/co-view/host-context";
 import type { CoViewStateSnapshot } from "@uncorded/protocol";
@@ -1645,7 +1645,7 @@ function App() {
                 a session on the active server. Top-right floating window. */}
             <Show when={activeServerId() && coViewViewingSessionId(activeServerId())}>
               {(sid) => (
-                <ViewerSession
+                <CoViewViewerSelector
                   serverId={activeServerId()!}
                   sessionId={sid()}
                   initialSnapshot={coViewSnapshot()}
