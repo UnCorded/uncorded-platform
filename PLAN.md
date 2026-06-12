@@ -22,32 +22,32 @@ probe behavior). Gate = no NEW failures.
 
 ## Commits
 
-- [ ] **1 — Membership schema + owner auto-join + quotas (Central)**
+- [x] **1 — Membership schema + owner auto-join + quotas (Central)**
       Migration 006 + schema.sql: `server_members`, `server_invitations`
       (account-bound), `server_join_requests`. Backfill owner member rows for
       existing servers. handleCreateServer: owner member row in same tx +
       5-owned quota. Transfer confirm keeps member rows consistent. Tests.
-- [ ] **2 — Capability hardening (Central)**
+- [x] **2 — Capability hardening (Central)**
       tunnel_url stripped from GET /v1/servers + GET /:id; returned only by
       POST /v1/auth/token/server (bundled with token). Private non-member
       GET /:id → 404. server-token: active-member-or-owner check, banned
       denied. Regression tests.
-- [ ] **3 — Sidebar source + invites + requests + kick/ban (Central)**
+- [x] **3 — Sidebar source + invites + requests + kick/ban (Central)**
       GET /v1/me/servers; invites create/list/accept/decline/revoke (20-active
       cap, 15-joined quota at accept); join requests; kick/ban; leave. Tests.
-- [ ] **4 — Two-phase delete + slot reaper (Central)**
+- [x] **4 — Two-phase delete + slot reaper (Central)**
       deleting → cascade → slot freed on confirmed purge. Runtime purge
       handshake stubbed with a clear seam.
-- [ ] **5 — Client sidebar → /v1/me/servers**
+- [x] **5 — Client sidebar → /v1/me/servers**
       loadServers() → /v1/me/servers; listServers() stays for Explore; desktop
       IPC; tunnel_url now flows from token mint (serverId→URL cache).
-- [ ] **6 — Auth-gate with return-to**
+- [x] **6 — Auth-gate with return-to**
       401 interceptor → pending intent → AuthPage → replay after login.
       Covers ?join=<id> deep links.
-- [ ] **7 — Join surfaces (client)**
+- [x] **7 — Join surfaces (client)**
       Invite popup in selector; Explore + request-to-join; owner member
       mgmt (invite-by-username, requests, kick/ban) in server settings.
-- [ ] **8 — Integration test + green gates**
+- [x] **8 — Integration test + green gates**
 
 ## Notes / decisions
 
@@ -57,3 +57,16 @@ probe behavior). Gate = no NEW failures.
 - Invites are account-bound (invited_account_id), not open invite links.
 - Quotas: 5 owned (create), 15 joined (invite-accept / request-accept),
   20 active invites per server (invite create).
+
+## Status — 2026-06-12
+
+All 8 commits landed on feat/server-membership. Gates: typecheck clean,
+lint 0 errors, 3392/3394 tests pass (1 skip; 1 fail = the pre-existing
+voice-probe TCP environment test documented above).
+
+Production rollout reminders:
+- Run `bun run migrate:006` then `bun run migrate:007` against prod
+  Central before deploying (006 backfills owner member rows; 007 adds
+  servers.deleted_at).
+- Token-gating means existing non-owner users of public servers must
+  request to join once (only owners were backfilled as members).
