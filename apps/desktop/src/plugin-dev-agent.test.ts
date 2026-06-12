@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   buildAgentLaunchCommand,
+  buildClaudeCliDeepLink,
   detectAgent,
+  detectClaudeCliProtocol,
   detectCommandPath,
   launchAgentTerminal,
   type ExecFileFn,
@@ -198,6 +200,30 @@ describe("detectCommandPath / detectAgent", () => {
   });
 });
 
+describe("claude-cli deep link", () => {
+  test("URL encodes the directory and prompt", () => {
+    const url = buildClaudeCliDeepLink(WIN_DIR, "Do the thing & more");
+    expect(url.startsWith("claude-cli://open?cwd=")).toBe(true);
+    expect(url).toContain(encodeURIComponent(WIN_DIR));
+    expect(url).toContain(`q=${encodeURIComponent("Do the thing & more")}`);
+    expect(url).not.toContain(" ");
+  });
+
+  test("protocol detection: registry hit on win32, always false elsewhere", async () => {
+    const hit: ExecFileFn = (_f, _a, _o, cb) => {
+      cb(null, "(Default) REG_SZ URL:claude-cli", "");
+      return {};
+    };
+    const miss: ExecFileFn = (_f, _a, _o, cb) => {
+      cb(new Error("not found"), "", "");
+      return {};
+    };
+    expect(await detectClaudeCliProtocol({ platform: "win32", execFileFn: hit })).toBe(true);
+    expect(await detectClaudeCliProtocol({ platform: "win32", execFileFn: miss })).toBe(false);
+    expect(await detectClaudeCliProtocol({ platform: "darwin", execFileFn: hit })).toBe(false);
+  });
+});
+
 describe("launchAgentTerminal", () => {
   function fakeSpawn(record: { calls: Array<{ file: string; args: string[]; options: unknown }> }): SpawnFn {
     return (file, args, options) => {
@@ -254,6 +280,65 @@ describe("launchAgentTerminal", () => {
       spawnFn: fakeSpawn({ calls: [] }),
     });
     expect(result).toMatchObject({ ok: false, code: "NO_TERMINAL" });
+  });
+
+  /** fakeExec, plus reg.exe answering "claude-cli protocol registered". */
+  function withProtocol(inner: ExecFileFn): ExecFileFn {
+    return (file, args, options, cb) => {
+      if (file === "reg.exe") {
+        cb(null, "(Default) REG_SZ URL:claude-cli", "");
+        return {};
+      }
+      return inner(file, args, options, cb);
+    };
+  }
+
+  test("prefers the claude-cli deep link when the protocol is registered", async () => {
+    const record = { calls: [] as Array<{ file: string; args: string[]; options: unknown }> };
+    const opened: string[] = [];
+    const result = await launchAgentTerminal(WIN_DIR, {
+      platform: "win32",
+      execFileFn: withProtocol(fakeExec({ claude: "C:\\x\\claude.cmd", wt: "C:\\x\\wt.exe" })),
+      spawnFn: fakeSpawn(record),
+      openExternalFn: async (url) => {
+        opened.push(url);
+      },
+      deepLinkPrompt: "Full prompt with the user idea",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(record.calls).toHaveLength(0); // no terminal spawned
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!).toContain("claude-cli://open?cwd=");
+    expect(opened[0]!).toContain(encodeURIComponent("Full prompt with the user idea"));
+  });
+
+  test("oversized deep-link prompt falls back to the pointer prompt", async () => {
+    const opened: string[] = [];
+    await launchAgentTerminal(WIN_DIR, {
+      platform: "win32",
+      execFileFn: withProtocol(fakeExec({ claude: "C:\\x\\claude.cmd" })),
+      spawnFn: fakeSpawn({ calls: [] }),
+      openExternalFn: async (url) => {
+        opened.push(url);
+      },
+      deepLinkPrompt: "x".repeat(10_000),
+    });
+    expect(opened[0]!).toContain(encodeURIComponent(AGENT_POINTER_PROMPT));
+  });
+
+  test("deep-link failure falls back to the terminal spawn", async () => {
+    const record = { calls: [] as Array<{ file: string; args: string[]; options: unknown }> };
+    const result = await launchAgentTerminal(WIN_DIR, {
+      platform: "win32",
+      execFileFn: withProtocol(fakeExec({ claude: "C:\\x\\claude.cmd", wt: "C:\\x\\wt.exe" })),
+      spawnFn: fakeSpawn(record),
+      openExternalFn: async () => {
+        throw new Error("no handler after all");
+      },
+    });
+    expect(result).toEqual({ ok: true });
+    expect(record.calls).toHaveLength(1);
+    expect(record.calls[0]!.file).toBe("wt.exe");
   });
 
   test("spawn throw maps to SPAWN_FAILED", async () => {

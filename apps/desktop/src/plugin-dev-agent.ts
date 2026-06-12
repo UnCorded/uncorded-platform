@@ -127,6 +127,47 @@ export async function detectAgent(
 }
 
 // ---------------------------------------------------------------------------
+// claude-cli:// deep link (preferred launch path)
+//
+// Claude Code registers a documented URL scheme that opens a session in a
+// target directory with a pre-filled prompt the user reviews before sending:
+//   claude-cli://open?cwd=<abs-path>&q=<url-encoded prompt>
+// (https://code.claude.com/docs/en/deep-links). The DESKTOP app cannot be
+// launched into a folder (anthropics/claude-code#54614), so this is the
+// closest supported handoff. When the protocol is registered we hand the
+// link to shell.openExternal and skip the hand-rolled terminal spawn.
+// ---------------------------------------------------------------------------
+
+export function buildClaudeCliDeepLink(pluginDir: string, prompt: string): string {
+  return `claude-cli://open?cwd=${encodeURIComponent(pluginDir)}&q=${encodeURIComponent(prompt)}`;
+}
+
+/**
+ * Is the claude-cli:// protocol handler registered? Windows: authoritative
+ * registry probe (HKCU\Software\Classes\claude-cli). Other platforms have no
+ * cheap reliable probe, so we answer false and the terminal path serves them
+ * — a wrong "true" would dead-end in an OS "find an app" dialog, which is
+ * worse than the working fallback.
+ */
+export async function detectClaudeCliProtocol(deps: DetectDeps = {}): Promise<boolean> {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return false;
+  const execFileFn = deps.execFileFn ?? (execFile as unknown as ExecFileFn);
+  return new Promise((resolve) => {
+    try {
+      execFileFn(
+        "reg.exe",
+        ["query", "HKCU\\Software\\Classes\\claude-cli", "/ve"],
+        { env: sanitizedEnv(), timeout: DETECT_TIMEOUT_MS, windowsHide: true },
+        (error) => resolve(error === null),
+      );
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Launch-command builder (pure)
 // ---------------------------------------------------------------------------
 
@@ -285,6 +326,12 @@ export interface LaunchDeps {
   execFileFn?: ExecFileFn;
   spawnFn?: SpawnFn;
   existsFn?: (path: string) => boolean;
+  /** shell.openExternal, injected by main — used for the claude-cli://
+   *  deep link. Absent (tests/web) skips the deep-link path. */
+  openExternalFn?: (url: string) => Promise<void>;
+  /** Full agent prompt for the deep link's q param (pre-filled, user
+   *  reviews before sending). Falls back to the pointer prompt. */
+  deepLinkPrompt?: string;
 }
 
 /**
@@ -299,6 +346,25 @@ export async function launchAgentTerminal(
 ): Promise<LaunchAgentResult> {
   const platform = deps.platform ?? process.platform;
   const detect: DetectDeps = { platform, ...(deps.execFileFn ? { execFileFn: deps.execFileFn } : {}) };
+
+  // Preferred: the documented claude-cli:// deep link — opens a session in
+  // the plugin dir with the prompt pre-filled, via the OS protocol handler
+  // (no PATH or terminal-emulator assumptions). Any failure falls through
+  // to the terminal spawn.
+  if (deps.openExternalFn && (await detectClaudeCliProtocol(detect))) {
+    try {
+      // The q param caps near 5k chars AFTER URL encoding — ship the full
+      // prompt when it fits (the user's idea rides along verbatim), else the
+      // short pointer (PROMPT.md carries the rest either way).
+      const full = deps.deepLinkPrompt;
+      const q =
+        full !== undefined && encodeURIComponent(full).length <= 4_500 ? full : AGENT_POINTER_PROMPT;
+      await deps.openExternalFn(buildClaudeCliDeepLink(pluginDir, q));
+      return { ok: true };
+    } catch (err) {
+      console.warn("[plugin-dev] claude-cli deep link failed; falling back to terminal", { err });
+    }
+  }
 
   const agent = await detectAgent({
     ...detect,

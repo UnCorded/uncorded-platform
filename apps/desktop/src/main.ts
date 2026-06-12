@@ -2748,7 +2748,13 @@ function registerIpcHandlers(): void {
         log.warn("plugin-dev clipboard write failed", { err });
       }
     }
-    return launchAgentTerminal(dir);
+    return launchAgentTerminal(dir, {
+      // Preferred path: the documented claude-cli:// deep link (opens a
+      // session in the plugin dir with the prompt pre-filled). The
+      // hand-rolled terminal spawn remains the fallback.
+      openExternalFn: (url) => shell.openExternal(url),
+      ...(prompt !== null ? { deepLinkPrompt: prompt } : {}),
+    });
   });
   // Restart a registry server with its current persisted settings — the same
   // docker-run recreate sequence as VOICE_SET_HOSTNAME (the tunnel token is
