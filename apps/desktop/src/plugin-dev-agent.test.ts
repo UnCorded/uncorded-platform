@@ -178,18 +178,20 @@ describe("detectCommandPath / detectAgent", () => {
 
   test("falls back to well-known install locations when PATH lookup fails", async () => {
     // The desktop process can inherit a PATH that predates the claude
-    // install; the standard per-user location must still be found.
+    // install; the standard per-user location must still be found. env is
+    // injected — USERPROFILE/APPDATA don't exist on non-Windows CI runners.
     const checked: string[] = [];
     const result = await detectAgent({
       platform: "win32",
       execFileFn: fakeExec({}),
+      env: { USERPROFILE: "C:\\Users\\x", APPDATA: "C:\\Users\\x\\AppData\\Roaming" },
       existsFn: (p) => {
         checked.push(p);
         return p.endsWith("\\.local\\bin\\claude.exe");
       },
     });
     expect(result.found).toBe(true);
-    expect(result.path).toMatch(/\.local\\bin\\claude\.exe$/);
+    expect(result.path).toBe("C:\\Users\\x\\.local\\bin\\claude.exe");
     expect(checked.length).toBeGreaterThan(0);
   });
 

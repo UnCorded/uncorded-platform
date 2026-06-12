@@ -114,13 +114,18 @@ function wellKnownAgentPaths(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 }
 
 export async function detectAgent(
-  deps: DetectDeps & { existsFn?: (path: string) => boolean } = {},
+  deps: DetectDeps & {
+    existsFn?: (path: string) => boolean;
+    /** Injected for tests — the well-known paths derive from USERPROFILE /
+     *  APPDATA / HOME, which don't exist cross-platform on CI runners. */
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<{ found: boolean; path?: string }> {
   const path = await detectCommandPath("claude", deps);
   if (path !== null) return { found: true, path };
   const platform = deps.platform ?? process.platform;
   const existsFn = deps.existsFn ?? existsSync;
-  for (const candidate of wellKnownAgentPaths(platform, process.env)) {
+  for (const candidate of wellKnownAgentPaths(platform, deps.env ?? process.env)) {
     if (existsFn(candidate)) return { found: true, path: candidate };
   }
   return { found: false };
