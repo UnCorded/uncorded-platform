@@ -1,4 +1,4 @@
-import { Show, For, createSignal, createEffect, type JSX } from "solid-js";
+import { Show, For, createSignal, type JSX } from "solid-js";
 import { Check, Compass, ChevronsUpDown, LogOut, Mail, Plus, Wifi, WifiOff, X } from "lucide-solid";
 import { useImgRetry } from "@/lib/img-retry";
 import {
@@ -15,7 +15,6 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { account } from "@/stores/auth";
 import {
   servers,
   serversLoading,
@@ -31,6 +30,14 @@ import {
 import * as central from "@/api/central";
 import { ApiError, type MyInvite } from "@/api/types";
 import { openExploreServers } from "@/components/server/explore-servers-dialog";
+import {
+  myInvites,
+  inviteBusyId,
+  inviteError,
+  refreshInvites,
+  acceptInviteAction,
+  declineInviteAction,
+} from "@/stores/invites";
 
 export function ServerIcon(props: {
   serverId: string;
@@ -100,61 +107,22 @@ export function ServerSwitcher(props: {
 
   const current = () => activeServer();
 
-  // Pending invites — loaded once on mount and refreshed every time the
-  // dropdown opens, so a freshly-sent invite shows up without a reload.
-  const [myInvites, setMyInvites] = createSignal<MyInvite[]>([]);
-  const [inviteBusyId, setInviteBusyId] = createSignal<string | null>(null);
-  // One inline error slot for invite/leave actions inside the menu.
+  // Pending invites live in stores/invites.ts (shared with the sidebar's
+  // no-server view — a first-time invitee has no server, so the switcher
+  // isn't even mounted for them). The dropdown still refreshes on open so a
+  // freshly-sent invite shows without waiting for the 60s poll.
+  // One inline error slot for leave actions inside the menu; invite errors
+  // come from the store.
   const [menuError, setMenuError] = createSignal<string | null>(null);
   // Two-click confirm latch for the per-row "Leave" affordance.
   const [leaveConfirmId, setLeaveConfirmId] = createSignal<string | null>(null);
 
-  async function refreshInvites(): Promise<void> {
-    // Skip while logged out — the call is a guaranteed 401 (the switcher
-    // mounts before/without a session) and the browser logs every failed
-    // network request to the console even when we swallow the rejection.
-    if (account() === null) return;
-    try {
-      setMyInvites(await central.listMyInvites());
-    } catch {
-      // Central unreachable — keep whatever we had.
-    }
-  }
-  // Reactive on login: fires once the account resolves (and on hot login
-  // after the auth gate), not just at mount time.
-  createEffect(() => {
-    if (account() !== null) void refreshInvites();
-  });
-
   async function handleAcceptInvite(inv: MyInvite): Promise<void> {
-    if (inviteBusyId() !== null) return;
-    setInviteBusyId(inv.id);
-    setMenuError(null);
-    try {
-      const { server_id } = await central.acceptInvite(inv.id);
-      await Promise.all([refreshInvites(), loadServers()]);
-      setActiveServer(server_id);
-    } catch (err) {
-      setMenuError(err instanceof ApiError ? err.message : "Could not accept invite");
-      void refreshInvites();
-    } finally {
-      setInviteBusyId(null);
-    }
+    await acceptInviteAction(inv);
   }
 
   async function handleDeclineInvite(inv: MyInvite): Promise<void> {
-    if (inviteBusyId() !== null) return;
-    setInviteBusyId(inv.id);
-    setMenuError(null);
-    try {
-      await central.declineInvite(inv.id);
-      await refreshInvites();
-    } catch (err) {
-      setMenuError(err instanceof ApiError ? err.message : "Could not decline invite");
-      void refreshInvites();
-    } finally {
-      setInviteBusyId(null);
-    }
+    await declineInviteAction(inv);
   }
 
   async function handleLeave(serverId: string): Promise<void> {
@@ -363,8 +331,8 @@ export function ServerSwitcher(props: {
               </For>
             </Show>
 
-            <Show when={menuError()}>
-              <p class="px-2 py-1 text-[11px] text-destructive">{menuError()}</p>
+            <Show when={menuError() ?? inviteError()}>
+              <p class="px-2 py-1 text-[11px] text-destructive">{menuError() ?? inviteError()}</p>
             </Show>
 
             <DropdownMenuSeparator />
