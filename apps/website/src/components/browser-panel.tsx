@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
+  ExternalLink,
   Globe,
   Monitor,
   Plus,
@@ -26,6 +27,17 @@ import {
   removeBrowserRecent,
 } from "@/stores/browser-recent";
 import { isElectron } from "@/lib/electron";
+import { activeServer } from "@/stores/servers";
+import {
+  addWebApp,
+  getWebAppPref,
+  popOutWebApp,
+  onNativeSurfaceIntercepted,
+  nativeSurfaceOpenWindow,
+  dockLiveSurface,
+} from "@/stores/web-apps";
+import { DockPrompt } from "@/components/web-apps/dock-prompt";
+import { showToast } from "@/lib/feedback";
 import * as portalHost from "@/lib/portal-host";
 import { surfaceKeyOf } from "@/lib/surface-key";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -55,6 +67,9 @@ export interface WebviewElement extends HTMLElement {
   canGoBack(): boolean;
   canGoForward(): boolean;
   getURL(): string;
+  // The guest's WebContents id — matches `contents.id` in main. Used to route a
+  // main-intercepted site-initiated window.open back to the owning panel.
+  getWebContentsId(): number;
 }
 
 type WebviewControls = {
@@ -77,6 +92,26 @@ const EMPTY_NAV_STATE = { canBack: false, canForward: false };
 // existing iframe.
 const probeResultCache = new Map<string, "allowed" | "blocked">();
 
+// Routing table for main-intercepted site-initiated window.open. Each mounted
+// browser <webview> registers a handler keyed by its guest WebContents id; the
+// single module-level IPC subscription below dispatches an intercepted popup to
+// the matching panel so the floating frame opens on the panel that triggered it
+// (including background tabs, which still own a live, registered guest). A
+// module-level Map + one subscription avoids N panels each binding the channel.
+const popupInterceptHandlers = new Map<
+  number,
+  (surfaceId: number, url: string) => void
+>();
+let popupInterceptSubscribed = false;
+
+function ensurePopupInterceptSubscription(): void {
+  if (popupInterceptSubscribed) return;
+  popupInterceptSubscribed = true;
+  onNativeSurfaceIntercepted(({ surfaceId, url, webContentsId }) => {
+    popupInterceptHandlers.get(webContentsId)?.(surfaceId, url);
+  });
+}
+
 export function BrowserPanel(props: {
   content: BrowserContent;
   panelId: string;
@@ -97,6 +132,61 @@ export function BrowserPanel(props: {
   const [iframeReloadNonces, setIframeReloadNonces] = createSignal<Record<string, number>>({});
   const reloadNonceFor = (tabId: string) => iframeReloadNonces()[tabId] ?? 0;
   const [webviewControls, setWebviewControls] = createSignal<WebviewControls | null>(null);
+
+  // The dock overlay (Popout / Create Panel / Cancel). Opened by the nav bar's
+  // Popout button unless the user has a saved per-URL preference, in which case
+  // we execute that action directly and skip the overlay. This is the toolbar
+  // path only — a SITE-initiated window.open is handled by handlePopupIntercepted
+  // (which opens a free OS popout window), not this overlay.
+  const [dockPrompt, setDockPrompt] = createSignal<{
+    url: string;
+    title: string;
+  } | null>(null);
+  const handlePopout = async (): Promise<void> => {
+    const tab = activeTab();
+    const server = activeServer();
+    if (!tab || !server) return;
+    let isHttp = false;
+    try {
+      const proto = new URL(tab.url).protocol;
+      isHttp = proto === "https:" || proto === "http:";
+    } catch {
+      isHttp = false;
+    }
+    if (!isHttp) return;
+    const pref = await getWebAppPref(tab.url);
+    if (pref === "popout") {
+      await popOutWebApp(tab.url);
+      return;
+    }
+    if (pref === "panel") {
+      const entry = await addWebApp(server.id, { url: tab.url, title: tab.title });
+      if (entry) showToast(`Added ${entry.title} to Web Apps`, "info");
+      return;
+    }
+    setDockPrompt({ url: tab.url, title: tab.title });
+  };
+
+  // A site-initiated window.open that main captured into a native WebContentsView
+  // (live session preserved, parked hidden) keyed by `surfaceId`. Honor a saved
+  // per-URL preference: "panel" with an active server → auto-dock the live view
+  // into a workspace panel; everything else (the "popout" pref AND the default,
+  // no-pref case) → open it as a free, frameless OS window that owns the view.
+  // The window carries its own Dock-as-panel control, so it's the right default
+  // even with no server. The native view must be consumed (docked / windowed /
+  // released) or it stays parked hidden.
+  const handlePopupIntercepted = async (
+    surfaceId: number,
+    url: string,
+  ): Promise<void> => {
+    const pref = await getWebAppPref(url);
+    const server = activeServer();
+    if (pref === "panel" && server) {
+      await dockLiveSurface(surfaceId, server.id, url);
+      return;
+    }
+    await nativeSurfaceOpenWindow(surfaceId, server?.id ?? "");
+  };
 
   // Reset displayUrl only when the active tab's identity changes, not on every
   // url change. The webview pushes live URLs into displayUrl via
@@ -311,6 +401,7 @@ export function BrowserPanel(props: {
         onNewTab={() => openComposer()}
         onActivateTab={activateTab}
         onCloseTab={closeTab}
+        onPopout={() => void handlePopout()}
       />
 
       <div class="relative flex-1 min-h-0">
@@ -349,6 +440,9 @@ export function BrowserPanel(props: {
                       onNavStateChange={setNavState}
                       onLiveUrlChange={setDisplayUrl}
                       onControlsReady={setWebviewControls}
+                      onPopupIntercepted={(surfaceId, url) =>
+                        void handlePopupIntercepted(surfaceId, url)
+                      }
                     />
                   </Show>
                 </div>
@@ -374,6 +468,21 @@ export function BrowserPanel(props: {
             />
           </div>
         </Show>
+
+        <Show when={dockPrompt()}>
+          {(prompt) => (
+            <Show when={activeServer()}>
+              {(server) => (
+                <DockPrompt
+                  url={prompt().url}
+                  title={prompt().title}
+                  serverId={server().id}
+                  onClose={() => setDockPrompt(null)}
+                />
+              )}
+            </Show>
+          )}
+        </Show>
       </div>
     </div>
   );
@@ -395,6 +504,7 @@ function BrowserNavBar(props: {
   onNewTab: () => void;
   onActivateTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onPopout: () => void;
 }) {
   const [inputValue, setInputValue] = createSignal(props.value);
 
@@ -403,6 +513,20 @@ function BrowserNavBar(props: {
   const handleKeyDown: JSX.EventHandlerUnion<HTMLInputElement, KeyboardEvent> = (event) => {
     if (event.key !== "Enter") return;
     props.onValueSubmit(inputValue());
+  };
+
+  // Popout (desktop only): hand the committed tab — not the address-bar draft —
+  // to BrowserPanel.handlePopout, which decides between the dock overlay and a
+  // saved per-URL preference. http(s) only, so a half-typed URL can't act.
+  const activeTab = () => props.tabs.find((tab) => tab.id === props.activeTabId) ?? null;
+  const pinnable = () => {
+    const tab = activeTab();
+    if (!tab) return false;
+    try {
+      return new URL(tab.url).protocol === "https:" || new URL(tab.url).protocol === "http:";
+    } catch {
+      return false;
+    }
   };
 
   return (
@@ -465,6 +589,18 @@ function BrowserNavBar(props: {
           spellcheck={false}
           placeholder="Enter a URL"
         />
+        <Show when={isElectron() && activeServer()}>
+          <button
+            type="button"
+            class="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30"
+            onClick={props.onPopout}
+            disabled={!pinnable()}
+            title="Popout or save as a Web App"
+            aria-label="Popout or save as a Web App"
+          >
+            <ExternalLink class="size-3" />
+          </button>
+        </Show>
       </div>
 
       <BrowserTabsDropdown
@@ -852,9 +988,40 @@ function WebviewViewport(props: {
   onNavStateChange: (state: { canBack: boolean; canForward: boolean }) => void;
   onLiveUrlChange: (url: string) => void;
   onControlsReady: (controls: WebviewControls | null) => void;
+  // A site-initiated window.open from this guest was captured into a native view
+  // by main; `surfaceId` keys that view. The webContentsId routing is internal.
+  onPopupIntercepted: (surfaceId: number, url: string) => void;
 }) {
   const { activeId } = useWorkspaceContext();
   let webviewEl: WebviewElement | null = null;
+  // The guest WebContents id this viewport registered in popupInterceptHandlers.
+  // getWebContentsId() throws before dom-ready, so we register on dom-ready and
+  // remember the id here to unregister on release.
+  let registeredWcId: number | null = null;
+
+  const registerPopupRoute = () => {
+    if (webviewEl === null || registeredWcId !== null) return;
+    let id: number;
+    try {
+      id = webviewEl.getWebContentsId();
+    } catch {
+      return;
+    }
+    registeredWcId = id;
+    popupInterceptHandlers.set(id, (surfaceId, url) =>
+      props.onPopupIntercepted(surfaceId, url),
+    );
+  };
+
+  const unregisterPopupRoute = () => {
+    if (registeredWcId === null) return;
+    popupInterceptHandlers.delete(registeredWcId);
+    registeredWcId = null;
+  };
+
+  // Safety net: drop the route if the viewport unmounts while its element is
+  // still in the portal (onElementReleased may not fire on teardown).
+  onCleanup(unregisterPopupRoute);
 
   // Background tabs must not push state to the parent — that would let an
   // inactive tab's did-navigate clobber the active tab's address bar /
@@ -921,11 +1088,15 @@ function WebviewViewport(props: {
       url={props.url}
       onElementReady={(element) => {
         webviewEl = element;
+        ensurePopupInterceptSubscription();
         element.addEventListener("did-navigate", refreshNavState);
         element.addEventListener("did-navigate-in-page", refreshNavState);
         element.addEventListener("dom-ready", refreshNavState);
+        element.addEventListener("dom-ready", registerPopupRoute);
         element.addEventListener("did-finish-load", refreshNavState);
         registerControls(element);
+        // The guest may already be past dom-ready on adoption; try immediately.
+        registerPopupRoute();
         // On adoption (e.g. fullscreen toggle remounts BrowserPanel), the new
         // BrowserPanel resets `displayUrl` to the persisted tab.url. The
         // webview itself is unchanged and may already be at a different live
@@ -938,7 +1109,9 @@ function WebviewViewport(props: {
         element.removeEventListener("did-navigate", refreshNavState);
         element.removeEventListener("did-navigate-in-page", refreshNavState);
         element.removeEventListener("dom-ready", refreshNavState);
+        element.removeEventListener("dom-ready", registerPopupRoute);
         element.removeEventListener("did-finish-load", refreshNavState);
+        unregisterPopupRoute();
         if (webviewEl === element) webviewEl = null;
         registerControls(null);
         props.onNavStateChange(EMPTY_NAV_STATE);
@@ -986,6 +1159,14 @@ export function WebviewSurface(props: {
       // wouldn't survive a tab close. Browser panels share `persist:browser`;
       // proxy mounts pass a per-server `persist:proxy:<serverId>` for isolation.
       element.setAttribute("partition", props.partition ?? "persist:browser");
+      // Let window.open reach the main-process window-open handler instead of
+      // being silently suppressed by the guest. A <webview> without `allowpopups`
+      // kills window.open() before setWindowOpenHandler ever fires, so a site's
+      // "detach"/"pop-out" dead-ends. With it set, the request flows to the
+      // handler (attachBrowserGuestPopupGuard / attachProxyGuestNavGuards in the
+      // desktop main), which denies the in-app window and routes the URL to the
+      // OS browser — no native popup ever spawns, so this stays safe.
+      element.setAttribute("allowpopups", "true");
       return element;
     })();
 

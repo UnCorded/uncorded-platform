@@ -25,6 +25,14 @@ export function surfaceKeyOf(content: PanelContent): string {
   if (content.type === "browser") {
     return `browser:${isElectron() ? "webview" : "iframe"}`;
   }
+  if (content.type === "webapp") {
+    // Keyed by the per-PANEL instanceId, NOT the per-URL webAppId, so the same
+    // saved page open in two panels gets two distinct surfaces instead of
+    // collapsing onto one (which made two live views fight over one placeholder).
+    // They still share the `persist:browser` session (the partition is fixed on
+    // the element, not the key), so login carries across.
+    return `webapp:${content.instanceId}`;
+  }
   // Exhaustiveness: if PanelContent gains a variant, TS will flag this line.
   const _exhaustive: never = content;
   throw new Error(`Unknown PanelContent type: ${JSON.stringify(_exhaustive)}`);

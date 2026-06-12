@@ -2,6 +2,8 @@ import { createEffect, onCleanup, onMount, Show, For, createSignal, type JSX } f
 import { Compass, LifeBuoy, Plus, ScreenShare, Send, Settings, Wifi, WifiOff } from "lucide-solid";
 import { useImgRetry } from "@/lib/img-retry";
 import { NavSidebarSections } from "@/components/nav-sidebar-sections";
+import { WebAppsCategory } from "@/components/web-apps/web-apps-category";
+import type { WebApp } from "@uncorded/electron-bridge";
 import { NavSecondary } from "@/components/nav-secondary";
 import { NavUser } from "@/components/nav-user";
 import { VoiceIndicator } from "@/components/voice-indicator";
@@ -166,6 +168,8 @@ function NoServerState() {
 export function AppSidebar(props: {
   onItemSelect?: (item: SidebarItem) => void;
   onItemDrop?: (item: SidebarItem, target: DropTarget) => void;
+  onOpenWebApp?: (app: WebApp) => void;
+  onWebAppDrop?: (app: WebApp, target: DropTarget) => void;
 }) {
   const [wizardOpen, setWizardOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
@@ -257,6 +261,14 @@ export function AppSidebar(props: {
                 {...(props.onItemSelect ? { onSelect: props.onItemSelect } : {})}
                 {...(props.onItemDrop ? { onItemDrop: props.onItemDrop } : {})}
               />
+              <Show when={props.onOpenWebApp}>
+                {(open) => (
+                  <WebAppsCategory
+                    onOpenWebApp={open()}
+                    onWebAppDrop={props.onWebAppDrop ?? (() => {})}
+                  />
+                )}
+              </Show>
             </Show>
           </Show>
         </Show>

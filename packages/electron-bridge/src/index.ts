@@ -231,6 +231,25 @@ export type ScreenSharePermissionStatus =
   | "restricted"
   | "unknown";
 
+// A browser-pane URL the user promoted to a persistent, login-sticky webview
+// panel. PER-SERVER scoped (each server has its own set, keyed serverId-side in
+// the desktop store) but desktop-owned — the runtime/Central never see these.
+// Shared here because the renderer (which can't import desktop-app modules)
+// needs the shape, and the desktop store imports this same type so there's one
+// source of truth. See memory `desktop-owned-web-apps-sidebar`.
+export interface WebApp {
+  id: string;
+  url: string;
+  title: string;
+  faviconUrl?: string;
+  /** Epoch ms the entry was added; used for stable sidebar ordering. */
+  addedAt: number;
+}
+
+/** The dock overlay's two outcomes, also the value of a saved per-URL pref:
+ *  pop out to a native window, or save the page as a Web App ("Create Panel"). */
+export type WebAppPref = "popout" | "panel";
+
 export interface ElectronBridge {
   central: {
     register(
@@ -488,6 +507,97 @@ export interface ElectronBridge {
      */
     requestPermission(): Promise<{ status: "ok" | "unsupported" }>;
   };
+  // Desktop-owned, PER-SERVER "Web Apps" — browser-pane URLs promoted to
+  // persistent login-sticky webview panels. Storage is local to the desktop
+  // (~/.uncorded/web-apps.json), never synced to the runtime/Central. The
+  // renderer gates this whole surface on isElectron() — website/mobile can't
+  // host <webview> so they never call it. The renderer owns serverId (main is
+  // server-agnostic), so list/add/remove take it explicitly.
+  webApps: {
+    list(serverId: string): Promise<WebApp[]>;
+    add(
+      serverId: string,
+      input: { url: string; title?: string; faviconUrl?: string },
+    ): Promise<WebApp>;
+    remove(serverId: string, id: string): Promise<void>;
+    /**
+     * Open `url` in a native window that shares the `persist:browser` session,
+     * so the page stays logged in (same cookie jar as the browser pane + the
+     * saved Web App panels). Drives the dock overlay's "Popout" button.
+     */
+    popOut(url: string): Promise<void>;
+    /**
+     * The dock overlay's "save preference for this URL" — keyed by the EXACT
+     * URL (not host), global (the choice is about the URL, not the server).
+     * `getPref` returns null until the user has saved a choice for this URL.
+     */
+    getPref(url: string): Promise<WebAppPref | null>;
+    setPref(url: string, action: WebAppPref): Promise<void>;
+  };
+  // In-app native popup views. When a Browser Panel guest calls `window.open`,
+  // main captures it (via `setWindowOpenHandler`'s `createWindow`) into a fresh
+  // `WebContentsView` instead of an OS window — preserving the popup's live
+  // session (cookies + sessionStorage + opener). The view is either hosted in a
+  // free, frameless OS popout window (where it OWNS the view directly) or docked
+  // into the main window and positioned by the renderer reporting an on-screen
+  // rect over IPC (anchored to a panel body).
+  nativeSurface: {
+    /**
+     * Create a fresh live native view loading `url` (http(s) only), parked hidden
+     * until the renderer reports a host rect. Returns the `surfaceId` to bind to
+     * a Web App panel's instanceId. The view shares the `persist:browser`
+     * partition, so prior logins (cookies/localStorage) carry over; no in-memory
+     * session is preserved (it's a fresh load). Drives the always-live mount path.
+     */
+    create(url: string): Promise<number>;
+    /**
+     * Position the native view (identified by the `surfaceId` from
+     * `onIntercepted`) over a rect in the window's content area (CSS px == DIPs
+     * at zoom 1, content origin at 0,0). `visible:false` hides it without
+     * destroying it — used when the host placeholder is off-screen (inactive
+     * tab, focus-collapse) or a blocking modal is open (the view would otherwise
+     * paint over it). Used only while the view is DOCKED in the main window.
+     */
+    setBounds(
+      surfaceId: number,
+      bounds: { x: number; y: number; width: number; height: number },
+      visible: boolean,
+    ): Promise<void>;
+    /**
+     * Destroy the native view and its webContents. Called when the host panel
+     * closes / the Web App is removed. The renderer then falls back to a fresh
+     * `<webview>` if the same URL re-opens.
+     */
+    release(surfaceId: number): Promise<void>;
+    /**
+     * Open the native view in its own free, frameless OS window that owns the
+     * view directly (header + content glued, movable anywhere off-app). The live
+     * session is preserved (no reload). `serverId` is the server to dock the view
+     * into if the user later clicks the window's "Dock as panel" header button
+     * (empty string = no active server → the window omits that button).
+     */
+    openWindow(surfaceId: number, serverId: string): Promise<void>;
+    /**
+     * Fires when a Browser Panel guest opens a new window. Main has already
+     * created the native view (parked hidden) and loaded the URL into it;
+     * `webContentsId` identifies the guest (match `<webview>.getWebContentsId()`)
+     * so the owning panel can host it, and `surfaceId` keys all later
+     * setBounds/release/openWindow calls.
+     */
+    onIntercepted(
+      handler: (payload: { surfaceId: number; url: string; webContentsId: number }) => void,
+    ): CleanupFn;
+    /**
+     * Fires when the user clicks "Dock as panel" in a popout window. Main has
+     * already re-parented the live view into the main window (parked hidden) and
+     * closed the popout; the renderer opens a workspace panel for `surfaceId`,
+     * anchored to `serverId`, at the live `url`, and registers the live surface so
+     * `setBounds` takes over positioning. Survives the originating panel closing.
+     */
+    onDockRequested(
+      handler: (payload: { surfaceId: number; serverId: string; url: string }) => void,
+    ): CleanupFn;
+  };
 }
 
 // Canonical IPC channel contract for the desktop main <-> preload transport.
@@ -586,6 +696,29 @@ export interface IpcChannelMap {
 
   // Reverse-proxy <webview> guest registration
   readonly PROXY_GUEST_REGISTER: "proxy:guest-register";
+
+  // Desktop-owned per-server Web Apps
+  readonly WEB_APPS_LIST: "desktop:web-apps:list";
+  readonly WEB_APPS_ADD: "desktop:web-apps:add";
+  readonly WEB_APPS_REMOVE: "desktop:web-apps:remove";
+  readonly WEB_APPS_POP_OUT: "desktop:web-apps:pop-out";
+  readonly WEB_APPS_GET_PREF: "desktop:web-apps:get-pref";
+  readonly WEB_APPS_SET_PREF: "desktop:web-apps:set-pref";
+
+  // In-app native popup views (WebContentsView). A Browser Panel guest's
+  // window.open is captured into a native view hosted in a free OS popout window
+  // (which owns it directly) or docked into the main window and positioned via
+  // bounds-over-IPC — preserving the popup's live session either way.
+  readonly NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted";
+  readonly NATIVE_SURFACE_CREATE: "desktop:native-surface:create";
+  readonly NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds";
+  readonly NATIVE_SURFACE_RELEASE: "desktop:native-surface:release";
+  readonly NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window";
+  readonly NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested";
+  // Sent by the popout window's own chrome (popout-preload) to main.
+  readonly NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock";
+  readonly NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close";
+  readonly NATIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:native-surface:window-open-external";
 }
 
 declare global {

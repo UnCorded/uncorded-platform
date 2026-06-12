@@ -3,6 +3,7 @@ import { Check, Circle } from "lucide-solid";
 import { type ComponentProps, type JSX, splitProps } from "solid-js";
 import { cn } from "@/lib/utils";
 import { CoViewPopoverMount } from "@/co-view/primitives";
+import { SuspendSurfacesWhileOpen } from "@/components/ui/surface-blocker";
 
 const DropdownMenu = KDropdownMenu;
 const DropdownMenuTrigger = KDropdownMenu.Trigger;
@@ -45,6 +46,12 @@ function DropdownMenuContent(props: DropdownMenuContentProps) {
         )}
         {...others}
       >
+        {/* The menu can open OVER a Web App panel's native view (paints above all
+            DOM). Suspend native views for the menu's open lifetime so it isn't
+            punched through. Rendered HERE (a Content child mounts only while open)
+            rather than in the wrapper body, which never unmounts and would pin
+            suspension — see surface-blocker.tsx. */}
+        <SuspendSurfacesWhileOpen />
         <CoViewPopoverMount getEl={() => contentEl} />
         {local.children}
       </KDropdownMenu.Content>

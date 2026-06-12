@@ -101,6 +101,35 @@ export type TabbedBrowserPanelContent = {
 
 export type BrowserPanelContent = LegacyBrowserPanelContent | TabbedBrowserPanelContent;
 
+// A desktop "Web App" opened as a panel: a promoted, login-sticky page rendered
+// as a BARE webview (no browser chrome), the same way a reverse-proxy mount
+// renders its app (proxy-mount-surface.tsx) — just a WebviewSurface loading the
+// URL on the shared `persist:browser` session, so login carries across. Distinct
+// from a browser panel (which has tabs + an address bar): a Web App is a single
+// pinned page with its own warm surface keyed by webAppId.
+//
+// Desktop-only in practice (created only from the Electron-gated Web Apps
+// sidebar), but persisted in synced layouts by url+title — a non-desktop client
+// renders a "desktop only" placeholder.
+//
+// Two distinct ids, deliberately separate:
+//   - `webAppId` — the per-URL *bookmark* identity (the desktop-local Web App
+//     entry). Idempotent by URL: the same saved page always has the same
+//     webAppId. Used for the sidebar linkage and "is this URL saved".
+//   - `instanceId` — the per-*panel* identity. Each open panel gets its own,
+//     so the same URL can be open in two panels at once without colliding. It
+//     keys the surface (surfaceKeyOf) and the renderer's live-surface binding,
+//     and stays stable across layout sync/restore while the underlying live
+//     `surfaceId` churns (recreated on restart). Renderer-minted (randomUUID);
+//     legacy layouts without one are backfilled on load.
+export interface WebAppPanelContent {
+  type: "webapp";
+  webAppId: string;
+  instanceId: string;
+  url: string;
+  title: string;
+}
+
 export type PanelContent =
   | {
       type: "plugin";
@@ -115,7 +144,8 @@ export type PanelContent =
       itemLabel: string;
       itemIcon?: string;
     }
-  | BrowserPanelContent;
+  | BrowserPanelContent
+  | WebAppPanelContent;
 
 export interface WorkspaceLayout {
   /** Schema version — currently always 1. */

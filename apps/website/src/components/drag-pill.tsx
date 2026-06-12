@@ -109,7 +109,7 @@ function dockPlacement(
     }
   }
 
-  if (ctx.kind === "sidebar-item" && tgt.zone !== "center") {
+  if ((ctx.kind === "sidebar-item" || ctx.kind === "web-app") && tgt.zone !== "center") {
     const el = findLeafEl(PREVIEW_LEAF_ID);
     if (el !== null) {
       const r = el.getBoundingClientRect();
@@ -158,6 +158,9 @@ export function DragPill(props: { getPanelContent: (leafId: string) => PanelCont
     if (ctx.kind === "sidebar-item") {
       return { label: ctx.item.label, icon: ctx.item.icon ?? "hash" };
     }
+    if (ctx.kind === "web-app") {
+      return { label: ctx.app.title, icon: "globe" };
+    }
     const content = props.getPanelContent(ctx.sourceLeafId);
     if (content === undefined) return { label: "Empty Panel", icon: "hash" };
     if (content.type === "browser") {
@@ -165,6 +168,9 @@ export function DragPill(props: { getPanelContent: (leafId: string) => PanelCont
         label: browserPanelLabel(content),
         icon: "globe",
       };
+    }
+    if (content.type === "webapp") {
+      return { label: content.title, icon: "globe" };
     }
     return { label: content.itemLabel, icon: content.itemIcon ?? "hash" };
   });
@@ -175,8 +181,8 @@ export function DragPill(props: { getPanelContent: (leafId: string) => PanelCont
     const ctx = dragContext();
     const tgt = dropTarget();
     if (ctx === null || tgt === null || !dwelling()) return false;
-    // Sidebar-item: center = open in panel; edges = split. Both commit.
-    if (ctx.kind === "sidebar-item") return true;
+    // Sidebar-item / web-app: center = open in panel; edges = split. Both commit.
+    if (ctx.kind === "sidebar-item" || ctx.kind === "web-app") return true;
     // Panel drag: center on a different leaf is a no-op; don't dock for it.
     return tgt.zone !== "center";
   });

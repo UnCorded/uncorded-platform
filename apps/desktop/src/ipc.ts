@@ -105,4 +105,34 @@ export const IPC = {
   // host-owned proxy surface as its webview attaches so main can pin the
   // guest's navigation to its mount and gate its permission requests.
   PROXY_GUEST_REGISTER: "proxy:guest-register",
+
+  // Desktop-owned per-server Web Apps — promoted browser-pane URLs persisted
+  // locally (~/.uncorded/web-apps.json). list/add/remove take a serverId
+  // (renderer owns server scope; main stays server-agnostic). POP_OUT opens a
+  // native same-session window; GET_PREF/SET_PREF persist the dock overlay's
+  // per-URL "don't ask again" choice.
+  WEB_APPS_LIST: "desktop:web-apps:list",
+  WEB_APPS_ADD: "desktop:web-apps:add",
+  WEB_APPS_REMOVE: "desktop:web-apps:remove",
+  WEB_APPS_POP_OUT: "desktop:web-apps:pop-out",
+  WEB_APPS_GET_PREF: "desktop:web-apps:get-pref",
+  WEB_APPS_SET_PREF: "desktop:web-apps:set-pref",
+
+  // In-app native popup views (WebContentsView). INTERCEPTED is a main→renderer
+  // push: main captured a Browser Panel guest's window.open into a native view
+  // (preserving its live session) and routes it to the owning panel by
+  // webContentsId. SET_BOUNDS positions/hides the view over a renderer-reported
+  // rect while DOCKED; RELEASE destroys it. OPEN_WINDOW hosts the view in a free
+  // frameless OS popout window; DOCK_REQUESTED is the main→renderer push when the
+  // user clicks the popout's "Dock as panel". WINDOW_DOCK/CLOSE/OPEN_EXTERNAL are
+  // sent by the popout window's own chrome (popout-preload) back to main.
+  NATIVE_SURFACE_INTERCEPTED: "desktop:native-surface:intercepted",
+  NATIVE_SURFACE_CREATE: "desktop:native-surface:create",
+  NATIVE_SURFACE_SET_BOUNDS: "desktop:native-surface:set-bounds",
+  NATIVE_SURFACE_RELEASE: "desktop:native-surface:release",
+  NATIVE_SURFACE_OPEN_WINDOW: "desktop:native-surface:open-window",
+  NATIVE_SURFACE_DOCK_REQUESTED: "desktop:native-surface:dock-requested",
+  NATIVE_SURFACE_WINDOW_DOCK: "desktop:native-surface:window-dock",
+  NATIVE_SURFACE_WINDOW_CLOSE: "desktop:native-surface:window-close",
+  NATIVE_SURFACE_WINDOW_OPEN_EXTERNAL: "desktop:native-surface:window-open-external",
 } as const satisfies IpcChannelMap;

@@ -1,6 +1,6 @@
 import { Match, Show, Switch, createSignal, onCleanup, type Component } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import { Check, Columns2, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
+import { Check, Columns2, Globe, Hash, Maximize2, Minimize2, MoreHorizontal, Pencil, Rows2, Volume2, Users, X, type LucideProps } from "lucide-solid";
 import { cn } from "@/lib/utils";
 import { useCoarsePointer } from "@/lib/use-coarse-pointer";
 import {
@@ -13,6 +13,7 @@ import { type LeafNode, type PanelNode, type SplitNode, PREVIEW_LEAF_ID } from "
 import { type PanelContent } from "@uncorded/protocol";
 import { PluginFrame } from "@/components/channel-view";
 import { BrowserPanel } from "@/components/browser-panel";
+import { WebAppPanel } from "@/components/web-apps/web-app-panel";
 import { browserPanelLabel, createEmptyBrowserPanel } from "@/lib/browser-panel-state";
 import {
   dragContext,
@@ -292,6 +293,58 @@ function PanelLeaf(props: {
     props.onClose();
   };
 
+  // Inline rename for Web App panels — hover the header → pencil → the title
+  // becomes an input (Enter saves, Esc/blur cancels). The new title is written
+  // straight into PanelContent via onUpdateContent; because surfaceKeyOf keys
+  // a webapp by its webAppId (not title), the rename does NOT reload the
+  // webview. Scoped to `webapp` content for v1 (plugin/browser titles are
+  // derived, not user-owned).
+  const renamableWebApp = (): (PanelContent & { type: "webapp" }) | null => {
+    const c = props.content;
+    return c !== undefined && c.type === "webapp" ? c : null;
+  };
+  const [renaming, setRenaming] = createSignal(false);
+  const [renameValue, setRenameValue] = createSignal("");
+  let renameInput: HTMLInputElement | undefined;
+
+  const startRename = () => {
+    const webapp = renamableWebApp();
+    if (webapp === null) return;
+    setRenameValue(webapp.title);
+    setRenaming(true);
+    requestAnimationFrame(() => {
+      renameInput?.focus();
+      renameInput?.select();
+    });
+  };
+  const cancelRename = () => {
+    setRenaming(false);
+    setRenameValue("");
+  };
+  const submitRename = () => {
+    const webapp = renamableWebApp();
+    if (webapp === null) {
+      cancelRename();
+      return;
+    }
+    const next = renameValue().trim();
+    if (next.length === 0 || next === webapp.title) {
+      cancelRename();
+      return;
+    }
+    props.onUpdateContent({ ...webapp, title: next });
+    cancelRename();
+  };
+  const onRenameKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelRename();
+    }
+  };
+
   // Empty-panel zone guide: during a sidebar-item drag, an empty leaf paints
   // a 5-box affordance (4 edges + center) so the user sees where they can aim.
   // Box geometry mirrors the EDGE_THRESHOLD hit-test in drag-state.
@@ -303,7 +356,10 @@ function PanelLeaf(props: {
   // 5-box guide visible during dwell stacks two indicators on top of each
   // other and reads as visual noise. Live hit-test (pre-dwell) keeps the
   // guide so the user still sees where the boxes are while aiming.
-  const isSidebarDragging = () => dragContext()?.kind === "sidebar-item";
+  const isSidebarDragging = () => {
+    const kind = dragContext()?.kind;
+    return kind === "sidebar-item" || kind === "web-app";
+  };
   const showZoneGuide = () => {
     if (props.content !== undefined) return false;
     if (!isSidebarDragging()) return false;
@@ -365,23 +421,55 @@ function PanelLeaf(props: {
         data-panel-header
         onPointerDown={onHeaderPointerDown}
       >
-        <div class="flex items-center gap-1.5 flex-1 min-w-0">
+        <div class="group/title flex items-center gap-1.5 flex-1 min-w-0">
           <Show when={props.content}>
             {(content) => <PanelHeaderIcon content={content()} />}
           </Show>
-          <span
-            class="text-sm truncate"
-            classList={{
-              "text-muted-foreground": !props.content,
-              "text-foreground font-medium": !!props.content,
-            }}
+          <Show
+            when={renaming()}
+            fallback={
+              <>
+                <span
+                  class="text-sm truncate"
+                  classList={{
+                    "text-muted-foreground": !props.content,
+                    "text-foreground font-medium": !!props.content,
+                  }}
+                >
+                  {props.content
+                    ? props.content.type === "browser"
+                      ? browserPanelLabel(props.content)
+                      : props.content.type === "webapp"
+                        ? props.content.title
+                        : props.content.itemLabel
+                    : "Empty Panel"}
+                </span>
+                <Show when={renamableWebApp()}>
+                  <button
+                    type="button"
+                    class="flex shrink-0 items-center justify-center rounded-sm p-0.5 text-muted-foreground opacity-0 transition-opacity outline-none hover:text-foreground group-hover/title:opacity-100 focus-visible:opacity-100"
+                    aria-label="Rename panel"
+                    data-tooltip="Rename panel"
+                    onClick={startRename}
+                  >
+                    <Pencil class="size-3" />
+                  </button>
+                </Show>
+              </>
+            }
           >
-            {props.content
-              ? props.content.type === "browser"
-                ? browserPanelLabel(props.content)
-                : props.content.itemLabel
-              : "Empty Panel"}
-          </span>
+            <input
+              ref={renameInput}
+              type="text"
+              value={renameValue()}
+              onInput={(e) => setRenameValue(e.currentTarget.value)}
+              onKeyDown={onRenameKeyDown}
+              onBlur={submitRename}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              class="h-5 min-w-0 flex-1 rounded border border-ring/40 bg-muted px-1 text-sm text-foreground outline-none focus:border-ring"
+            />
+          </Show>
         </div>
 
         <div class="flex items-center gap-1 shrink-0" data-no-drag>
@@ -519,7 +607,7 @@ function PanelLeaf(props: {
 // ---------------------------------------------------------------------------
 
 function PanelHeaderIcon(props: { content: PanelContent }) {
-  if (props.content.type === "browser") {
+  if (props.content.type === "browser" || props.content.type === "webapp") {
     return <Globe class="size-3.5 text-muted-foreground shrink-0" />;
   }
   const plugin = props.content;
@@ -537,6 +625,7 @@ function PanelBody(props: {
   // type flips recreate the branch.
   type BrowserContent = Extract<PanelContent, { type: "browser" }>;
   type PluginContent = Extract<PanelContent, { type: "plugin" }>;
+  type WebAppContent = Extract<PanelContent, { type: "webapp" }>;
   return (
     <Switch>
       <Match when={props.content.type === "browser" ? (props.content as BrowserContent) : null}>
@@ -547,6 +636,9 @@ function PanelBody(props: {
             onChange={props.onUpdateContent}
           />
         )}
+      </Match>
+      <Match when={props.content.type === "webapp" ? (props.content as WebAppContent) : null}>
+        {(webapp) => <WebAppPanel content={webapp()} panelId={props.panelId} />}
       </Match>
       <Match when={props.content.type === "plugin" ? (props.content as PluginContent) : null}>
         {(plugin) => <PluginFrame content={plugin()} panelId={props.panelId} />}

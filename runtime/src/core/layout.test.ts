@@ -114,6 +114,123 @@ describe("validateLayout", () => {
     expect(r).toEqual({ ok: true });
   });
 
+  it("accepts a valid webapp panel", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "11111111-2222-3333-4444-555555555555",
+          url: "https://app.roll20.net/editor/",
+          title: "Roll20",
+        },
+      },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("rejects a webapp panel missing webAppId", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": { type: "webapp", url: "https://example.com", title: "X" },
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("LAYOUT_INVALID_PANEL_FIELD");
+  });
+
+  it("rejects a webapp panel with an unknown field", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "abc",
+          url: "https://example.com",
+          title: "X",
+          partition: "persist:browser",
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("LAYOUT_UNKNOWN_PANEL_FIELD");
+  });
+
+  it("accepts a webapp panel with a valid instanceId", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "11111111-2222-3333-4444-555555555555",
+          instanceId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          url: "https://app.roll20.net/editor/",
+          title: "Roll20",
+        },
+      },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("accepts a legacy webapp panel missing instanceId (backfilled by the renderer)", () => {
+    // Layouts saved before instanceId existed must NOT flip to "error" — the
+    // field is optional in the validator and the renderer mints one on load.
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "11111111-2222-3333-4444-555555555555",
+          url: "https://app.roll20.net/editor/",
+          title: "Roll20",
+        },
+      },
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("rejects a webapp panel with an empty-string instanceId", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "abc",
+          instanceId: "",
+          url: "https://example.com",
+          title: "X",
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("LAYOUT_INVALID_PANEL_FIELD");
+  });
+
+  it("rejects a webapp panel with an over-long instanceId", () => {
+    const r = validateLayout({
+      version: 1,
+      root: { type: "leaf", id: "wa-1" },
+      panels: {
+        "wa-1": {
+          type: "webapp",
+          webAppId: "abc",
+          instanceId: "x".repeat(129),
+          url: "https://example.com",
+          title: "X",
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("LAYOUT_PANEL_FIELD_TOO_LONG");
+  });
+
   it("accepts a valid focused leaf id", () => {
     const r = validateLayout({
       ...validSplitLayout,

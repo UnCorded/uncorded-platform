@@ -30,9 +30,17 @@ export type SidebarItemPayload = {
   panelType: string;
 };
 
+export type WebAppPayload = {
+  id: string;
+  url: string;
+  title: string;
+  faviconUrl?: string;
+};
+
 export type DragPayload =
   | { kind: "panel"; sourceLeafId: string; sourceWorkspaceId: string }
-  | { kind: "sidebar-item"; item: SidebarItemPayload };
+  | { kind: "sidebar-item"; item: SidebarItemPayload }
+  | { kind: "web-app"; app: WebAppPayload };
 
 export interface DropTarget {
   leafId: string;
