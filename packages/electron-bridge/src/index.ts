@@ -251,6 +251,73 @@ export interface WebApp {
  *  values "panel"/"popout" are migrated on read (apps/desktop/web-apps-store). */
 export type WebAppPref = "dock" | "window";
 
+// --- Plugin Development Workspace -----------------------------------------
+// Desktop-owned plugin dev folders under ~/.uncorded/plugin-dev/<slug>/ —
+// the persistent source of truth for user-authored plugins (server copies
+// are disposable). Directory-scan-as-truth: the folders ARE the registry;
+// the desktop store (apps/desktop/plugin-dev-store) derives these shapes.
+
+/** Health of a dev plugin's manifest.json — agents edit these files live, so
+ *  a broken manifest is a state to surface, not an error to hide. */
+export type DevPluginManifestStatus = "ok" | "invalid" | "missing";
+
+export interface DevPlugin {
+  slug: string;
+  displayName: string;
+  description: string;
+  /** Absolute path of the plugin folder on this machine. */
+  path: string;
+  /** Epoch ms; from the sidecar metadata, or folder mtime when absent. */
+  createdAt: number;
+  /** Scaffold template version at creation; null for hand-dropped folders. */
+  scaffoldVersion: number | null;
+  manifestStatus: DevPluginManifestStatus;
+}
+
+export interface CreateDevPluginInput {
+  slug: string;
+  displayName: string;
+  description: string;
+  /** The user's "what should it do?" text — feeds the agent prompt. */
+  idea: string;
+  author: string;
+  pluginType: "standalone" | "extension";
+  /** Required when pluginType is "extension". */
+  extendsSlug?: string;
+  /** Lucide icon name; defaults to "Puzzle". */
+  icon?: string;
+}
+
+export type CreateDevPluginErrorCode =
+  | "SLUG_INVALID"
+  | "SLUG_RESERVED"
+  | "SLUG_TAKEN"
+  | "WRITE_FAILED";
+
+export type CreateDevPluginResult =
+  | { ok: true; plugin: DevPlugin; promptCopied: boolean }
+  | { ok: false; code: CreateDevPluginErrorCode; message: string };
+
+export interface AgentDetection {
+  found: boolean;
+  /** Resolved executable path when found. */
+  path?: string;
+}
+
+export type LaunchAgentResult =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "AGENT_NOT_FOUND" | "NO_TERMINAL" | "SPAWN_FAILED" | "PLUGIN_NOT_FOUND";
+      message: string;
+    };
+
+/** Seam for "Install into server" — deploy mechanics land in a later phase;
+ *  until then the handler answers NOT_IMPLEMENTED. */
+export type InstallDevPluginResult =
+  | { ok: true; serverId: string }
+  | { ok: false; code: "NOT_IMPLEMENTED" | (string & {}); message: string };
+
 export interface ElectronBridge {
   central: {
     register(
