@@ -129,7 +129,9 @@ export function NewPluginDialog(props: {
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent class="sm:max-w-lg">
+      {/* p-5: DialogContent has no default padding (repo convention is
+          consumer-owned, see avatar-crop-dialog). */}
+      <DialogContent class="sm:max-w-lg p-5">
         <Show
           when={created()}
           fallback={
@@ -143,7 +145,7 @@ export function NewPluginDialog(props: {
               </DialogHeader>
 
               <form
-                class="flex flex-col gap-3"
+                class="mt-4 flex flex-col gap-3"
                 onSubmit={(e) => {
                   e.preventDefault();
                   void submit();
@@ -275,16 +277,18 @@ export function NewPluginDialog(props: {
                 </DialogDescription>
               </DialogHeader>
 
-              <p class="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground break-all">
-                {c().plugin.path}
-              </p>
-              <p class="text-xs text-muted-foreground">
-                Paste the prompt into any coding agent, or start one right here.
-                PROMPT.md and AGENTS.md inside the folder carry everything the
-                agent needs.
-              </p>
+              <div class="mt-4 flex flex-col gap-2">
+                <p class="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground break-all">
+                  {c().plugin.path}
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  Paste the prompt into any coding agent, or start one right here.
+                  PROMPT.md and AGENTS.md inside the folder carry everything the
+                  agent needs.
+                </p>
+              </div>
 
-              <div class="flex justify-end gap-2 pt-1">
+              <div class="mt-3 flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={() => void openDevPluginFolder(c().plugin.slug)}>
                   <FolderOpen class="size-4" />
                   Open folder

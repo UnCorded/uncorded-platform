@@ -18,7 +18,9 @@ export function AddPluginChooser(props: {
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent class="sm:max-w-md">
+      {/* p-5: DialogContent has no default padding (repo convention is
+          consumer-owned, see avatar-crop-dialog). */}
+      <DialogContent class="sm:max-w-md p-5">
         <DialogHeader>
           <DialogTitle>Add a plugin</DialogTitle>
           <DialogDescription>
@@ -26,7 +28,7 @@ export function AddPluginChooser(props: {
           </DialogDescription>
         </DialogHeader>
 
-        <div class="flex flex-col gap-2">
+        <div class="mt-4 flex flex-col gap-2">
           <button
             type="button"
             disabled={!desktop}

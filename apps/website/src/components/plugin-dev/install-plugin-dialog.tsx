@@ -136,7 +136,9 @@ export function InstallPluginDialog(props: {
 
   return (
     <Dialog open={open()} onOpenChange={props.onOpenChange}>
-      <DialogContent class="sm:max-w-lg">
+      {/* p-5: DialogContent has no default padding (repo convention is
+          consumer-owned, see avatar-crop-dialog). */}
+      <DialogContent class="sm:max-w-lg p-5">
         <DialogHeader>
           <DialogTitle>
             Install "{props.plugin?.displayName ?? ""}" into {serverName()}
@@ -166,6 +168,7 @@ export function InstallPluginDialog(props: {
                 </p>
               }
             >
+              <div class="mt-4 flex flex-col gap-3">
               <Show when={localTarget()?.deployed}>
                 <p class="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
                   Already installed on this server — reinstalling replaces its
@@ -229,12 +232,13 @@ export function InstallPluginDialog(props: {
                   {localTarget()?.deployed ? "Reinstall" : "Install"}
                 </Button>
               </div>
+              </div>
             </Show>
           </Show>
         </Show>
 
         <Show when={phase().kind === "running"}>
-          <div class="flex flex-col gap-1.5 py-2">
+          <div class="mt-3 flex flex-col gap-1.5 py-2">
             <For each={steps()}>
               {(step) => (
                 <div class="flex items-center gap-2 text-sm">
@@ -267,7 +271,7 @@ export function InstallPluginDialog(props: {
 
         <Show when={phase().kind === "result" ? (phase() as Extract<Phase, { kind: "result" }>).view : null}>
           {(view) => (
-            <>
+            <div class="mt-4 flex flex-col gap-3">
               <Show
                 when={view().ok}
                 fallback={
@@ -295,7 +299,7 @@ export function InstallPluginDialog(props: {
                   Done
                 </Button>
               </div>
-            </>
+            </div>
           )}
         </Show>
       </DialogContent>

@@ -145,7 +145,10 @@ export function ScreenSharePicker() {
         }
       }}
     >
-      <DialogContent class="max-w-3xl">
+      {/* DialogContent ships no default padding — every consumer pads itself
+          (see avatar-crop-dialog's p-5); without it the content sits flush
+          against the dialog edges. */}
+      <DialogContent class="max-w-3xl p-5">
         <DialogHeader>
           <DialogTitle>Choose what to share</DialogTitle>
           <DialogDescription>
