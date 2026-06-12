@@ -937,6 +937,26 @@ function createWindow(): void {
     });
   });
 
+  // A real shell navigation (F5/Ctrl+R reload, dev-server restart) tears down
+  // the renderer, and with it the session-only live-surfaces map — after the
+  // new document loads, NOTHING can reference the WebContentsViews parked or
+  // docked in this window, so they'd leak (each holds a renderer process)
+  // while painting stale pixels over the fresh shell. Destroy them up front.
+  // Popped-out views are exempt: their windows own their lifetime, and a
+  // post-reload renderer can still dock them (the dock flow re-sends
+  // surfaceId + url). The shell is an SPA, so main-frame non-same-document
+  // navigations only happen on reload; the initial load sweeps an empty map.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    for (const [surfaceId, view] of [...nativeSurfaces]) {
+      if (surfacePopouts.has(surfaceId)) continue;
+      nativeSurfaces.delete(surfaceId);
+      visibleNativeSurfaces.delete(surfaceId);
+      if (win && !win.isDestroyed()) win.contentView.removeChildView(view);
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    }
+  });
+
   // F5 / Ctrl+R reload, Ctrl+Shift+R force-reload (cache bypass), F12 devtools.
   // Electron's default application menu used to wire these via role bindings,
   // but suppressDefaultAppMenu() removed the menu entirely, taking the
@@ -1755,6 +1775,11 @@ function dockNativeSurfaceFromPopout(found: {
     if (!popout.isDestroyed()) popout.close();
     return;
   }
+  // No main window to dock into (hidden-to-tray windows still exist; this is
+  // the truly-destroyed case). Proceeding would strip the view out of the
+  // popout and then drop it — keep the popout alive instead; the user loses
+  // nothing.
+  if (!win || win.isDestroyed()) return;
   const url = view.webContents.getURL();
   if (!popout.isDestroyed()) popout.contentView.removeChildView(view);
   if (win && !win.isDestroyed()) {
@@ -2314,6 +2339,13 @@ function registerIpcHandlers(): void {
       }
       const view = nativeSurfaces.get(surfaceId);
       if (!view) return;
+      // While popped out, the popout window owns the view's geometry and
+      // visibility (its resize handler drives layoutSurfacePopout). Any
+      // renderer report arriving now is stale by definition — e.g. the
+      // originating panel closing fires untrack → visible:false, which would
+      // 0×0-hide the view INSIDE the popout the user is looking at. Mirror of
+      // the NATIVE_SURFACE_RELEASE popout guard.
+      if (surfacePopouts.has(surfaceId)) return;
       const wasVisible = visibleNativeSurfaces.has(surfaceId);
       view.setBounds({
         x: Math.round(b.x),
