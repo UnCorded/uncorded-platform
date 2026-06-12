@@ -131,7 +131,7 @@ export async function handleVoiceProbe(
       last_heartbeat_at,
       voice_reachability_checked_at
     FROM servers
-    WHERE id = ${serverId}
+    WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   const server = rows[0];
   if (!server) return notFound("Server not found");

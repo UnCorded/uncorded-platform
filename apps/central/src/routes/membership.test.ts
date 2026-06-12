@@ -53,20 +53,39 @@ describe("owner auto-join", () => {
     expect(rows[0]!.status).toBe("active");
   });
 
-  test("member rows cascade away when the server is deleted", async () => {
+  test("delete drops member rows immediately; the owner mirror survives until purge", async () => {
     const owner = await registerAndLogin(ts, "memcascade");
+    const joiner = await registerAndLogin(ts, "memcascadejoiner");
     const created = await createServer(owner.token, "Cascade Me");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${created.serverId!}, ${joiner.accountId}, 'member', 'active')
+    `;
 
     const del = await fetch(`${ts.url}/v1/servers/${created.serverId}`, {
       method: "DELETE",
       headers: authHeaders(owner.token),
     });
-    expect(del.status).toBe(204);
+    expect(del.status).toBe(202);
 
+    // Members are released (their joined slots free) the moment deletion
+    // starts; only the owner mirror remains with the held row.
     const rows = await ts.sql`
+      SELECT role FROM server_members WHERE server_id = ${created.serverId!}
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.role).toBe("owner");
+
+    const confirm = await fetch(`${ts.url}/v1/servers/${created.serverId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(owner.token),
+    });
+    expect(confirm.status).toBe(204);
+
+    const after = await ts.sql`
       SELECT 1 FROM server_members WHERE server_id = ${created.serverId!}
     `;
-    expect(rows.length).toBe(0);
+    expect(after.length).toBe(0);
   });
 });
 
@@ -83,8 +102,9 @@ describe("owned-server quota", () => {
     expect(overflow.status).toBe(403);
     expect(overflow.code).toBe("QUOTA_EXCEEDED");
 
-    // Deleting one frees the slot again (Phase 1 immediate delete; the
-    // two-phase purge keeps the slot held until confirmed purge instead).
+    // Two-phase delete: marking a server deleting does NOT free the slot —
+    // only the confirmed purge does, so delete-recreate can't mint servers
+    // while local volumes still hold the old data.
     const rows = await ts.sql`
       SELECT id FROM servers WHERE owner_id = ${owner.accountId} LIMIT 1
     `;
@@ -92,7 +112,16 @@ describe("owned-server quota", () => {
       method: "DELETE",
       headers: authHeaders(owner.token),
     });
-    expect(del.status).toBe(204);
+    expect(del.status).toBe(202);
+
+    const stillHeld = await createServer(owner.token, "Still Blocked");
+    expect(stillHeld.status).toBe(403);
+
+    const confirm = await fetch(`${ts.url}/v1/servers/${rows[0]!.id}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(owner.token),
+    });
+    expect(confirm.status).toBe(204);
 
     const retry = await createServer(owner.token, "Fits Again");
     expect(retry.status).toBe(201);

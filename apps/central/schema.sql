@@ -83,11 +83,19 @@ CREATE TABLE servers (
   last_heartbeat_ip TEXT,
   voice_reachability JSONB,
   voice_reachability_checked_at TIMESTAMPTZ,
+  -- Two-phase delete. NULL = live. Set when the owner deletes; every read
+  -- path treats the server as gone, but the row (and the owner's quota slot)
+  -- survives until the desktop confirms it purged local data
+  -- (POST /:id/purge-confirm) or the abandoned-delete reaper gives up
+  -- waiting. Prevents a delete-recreate loop from minting unlimited servers
+  -- while local volumes still hold the old data.
+  deleted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_servers_owner_id ON servers(owner_id);
+CREATE INDEX idx_servers_deleting ON servers(deleted_at) WHERE deleted_at IS NOT NULL;
 CREATE INDEX idx_servers_visibility_online ON servers(visibility, is_online);
 
 -- Heartbeat sync tracking

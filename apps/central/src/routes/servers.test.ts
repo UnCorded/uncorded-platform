@@ -5,7 +5,7 @@ import {
   registerAndLogin,
   type TestServer,
 } from "../test-helpers";
-import { sweepStaleServers } from "./servers";
+import { sweepStaleServers, sweepAbandonedDeletes } from "./servers";
 
 let ts: TestServer;
 let ownerToken: string;
@@ -366,17 +366,103 @@ describe("DELETE /v1/servers/:id", () => {
     expect(res.status).toBe(403);
   });
 
-  test("owner can delete, subsequent GET returns 404", async () => {
+  test("owner delete marks deleting (202); server reads as gone everywhere", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "DELETE",
       headers: authHeaders(crudToken),
     });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(202);
+    expect((await res.json()).status).toBe("deleting");
+
+    // The row survives (quota slot held) but every read path answers 404.
+    const dbRow = await ts.sql`
+      SELECT deleted_at FROM servers WHERE id = ${serverId}
+    `;
+    expect(dbRow.length).toBe(1);
+    expect(dbRow[0]!.deleted_at).not.toBeNull();
 
     const getRes = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       headers: authHeaders(crudToken),
     });
     expect(getRes.status).toBe(404);
+
+    const tokenRes = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ server_id: serverId }),
+    });
+    expect(tokenRes.status).toBe(404);
+
+    // Re-deleting is idempotent.
+    const again = await fetch(`${ts.url}/v1/servers/${serverId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    expect(again.status).toBe(202);
+  });
+
+  test("purge-confirm hard-deletes the row; repeat answers 404", async () => {
+    const confirm = await fetch(`${ts.url}/v1/servers/${serverId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(confirm.status).toBe(204);
+
+    const dbRow = await ts.sql`SELECT 1 FROM servers WHERE id = ${serverId}`;
+    expect(dbRow.length).toBe(0);
+
+    const again = await fetch(`${ts.url}/v1/servers/${serverId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(again.status).toBe(404);
+  });
+
+  test("purge-confirm on a live server is 409; non-owner is 403", async () => {
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ name: "Still Alive" }),
+    });
+    const liveId = (await res.json()).server_id as string;
+
+    const live = await fetch(`${ts.url}/v1/servers/${liveId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(crudToken),
+    });
+    expect(live.status).toBe(409);
+
+    await fetch(`${ts.url}/v1/servers/${liveId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    const nonOwner = await fetch(`${ts.url}/v1/servers/${liveId}/purge-confirm`, {
+      method: "POST",
+      headers: authHeaders(otherToken),
+    });
+    expect(nonOwner.status).toBe(403);
+  });
+
+  test("abandoned-delete reaper frees rows past the handshake window", async () => {
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
+      body: JSON.stringify({ name: "Abandoned" }),
+    });
+    const abandonedId = (await res.json()).server_id as string;
+    await fetch(`${ts.url}/v1/servers/${abandonedId}`, {
+      method: "DELETE",
+      headers: authHeaders(crudToken),
+    });
+    await ts.sql`
+      UPDATE servers SET deleted_at = now() - interval '8 days'
+      WHERE id = ${abandonedId}
+    `;
+
+    const reaped = await sweepAbandonedDeletes(ts.sql);
+    expect(reaped).toBeGreaterThanOrEqual(1);
+    const gone = await ts.sql`SELECT 1 FROM servers WHERE id = ${abandonedId}`;
+    expect(gone.length).toBe(0);
   });
 });
 

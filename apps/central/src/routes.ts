@@ -14,6 +14,7 @@ import {
   handleGetServer,
   handleUpdateServer,
   handleDeleteServer,
+  handlePurgeConfirm,
 } from "./routes/servers";
 import { handleHeartbeat } from "./routes/heartbeat";
 import { handleVoiceProbe } from "./routes/voice-probe";
@@ -270,6 +271,14 @@ export function createRouter(ctx: RouteContext) {
           return await handleUpdateServer(request, ctx, serverId);
         if (method === "DELETE")
           return await handleDeleteServer(request, ctx, serverId);
+      }
+
+      // Two-phase delete: desktop confirms the local data purge
+      const purgeConfirmMatch = pathname.match(
+        /^\/v1\/servers\/([0-9a-f-]{36})\/purge-confirm$/,
+      );
+      if (purgeConfirmMatch && method === "POST") {
+        return await handlePurgeConfirm(request, ctx, purgeConfirmMatch[1]!);
       }
 
       // Heartbeat

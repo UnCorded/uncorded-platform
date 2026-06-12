@@ -29,7 +29,8 @@ export async function handleServerToken(
   }
 
   const rows = await ctx.sql`
-    SELECT id, owner_id, visibility, tunnel_url FROM servers WHERE id = ${body.server_id}
+    SELECT id, owner_id, visibility, tunnel_url FROM servers
+    WHERE id = ${body.server_id} AND deleted_at IS NULL
   `;
   const server = rows[0];
   if (!server) return notFound("Server not found");

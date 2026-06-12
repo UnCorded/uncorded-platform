@@ -1,6 +1,6 @@
 import type { RouteContext } from "../routes";
 import { authenticate, RATE_DIRECTORY_BROWSE, type RateLimitConfig } from "../middleware";
-import { badRequest, errorResponse, forbidden, notFound, rateLimited } from "../errors";
+import { badRequest, conflict, errorResponse, forbidden, notFound, rateLimited } from "../errors";
 import { generateServerSecret, hashToken } from "../crypto";
 import { MAX_OWNED_SERVERS } from "../membership";
 
@@ -228,7 +228,8 @@ export async function handleListServers(
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -238,7 +239,8 @@ export async function handleListServers(
     `;
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -251,7 +253,8 @@ export async function handleListServers(
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
       FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -260,7 +263,8 @@ export async function handleListServers(
     `;
     countResult = await ctx.sql`
       SELECT count(*)::int AS total FROM servers
-      WHERE visibility = 'public' AND is_online = true
+      WHERE deleted_at IS NULL
+        AND visibility = 'public' AND is_online = true
         AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval
         AND tunnel_url IS NOT NULL
         AND tunnel_state IS DISTINCT FROM 'expired'
@@ -298,7 +302,7 @@ export async function handleGetServer(
            runtime_version, connected_users, plugin_count,
            (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
            last_heartbeat_at, created_at, updated_at
-    FROM servers WHERE id = ${serverId}
+    FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
 
   const row = rows[0];
@@ -340,7 +344,7 @@ export async function handleUpdateServer(
   if (!updateAllowed) return rateLimited(updateRetryAfter);
 
   const existing = await ctx.sql`
-    SELECT id, owner_id FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   if (existing.length === 0) return notFound("Server not found");
   if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
@@ -410,6 +414,13 @@ export async function handleUpdateServer(
 
 // --- DELETE /v1/servers/:id ---
 
+// Phase 1 of the two-phase delete: mark the server deleting and cascade the
+// social rows. Every read path treats a deleting server as gone immediately
+// (member rows dropped — freeing the members' joined slots — invites revoked,
+// requests declined), but the servers row itself survives so the owner's
+// quota slot stays held until the desktop confirms the local data purge via
+// POST /:id/purge-confirm, or the abandoned-delete reaper times out the
+// handshake. Idempotent: re-deleting a deleting server is another 202.
 export async function handleDeleteServer(
   request: Request,
   ctx: RouteContext,
@@ -423,12 +434,79 @@ export async function handleDeleteServer(
   if (!deleteAllowed) return rateLimited(deleteRetryAfter);
 
   const existing = await ctx.sql`
-    SELECT id, owner_id FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id, deleted_at FROM servers WHERE id = ${serverId}
   `;
   if (existing.length === 0) return notFound("Server not found");
   if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
 
-  await ctx.sql`DELETE FROM servers WHERE id = ${serverId}`;
+  if (existing[0]!.deleted_at === null) {
+    await ctx.sql.begin(async (tx) => {
+      await tx`
+        UPDATE servers SET deleted_at = now(), updated_at = now()
+        WHERE id = ${serverId} AND deleted_at IS NULL
+      `;
+      await tx`
+        DELETE FROM server_members
+        WHERE server_id = ${serverId} AND role = 'member'
+      `;
+      await tx`
+        UPDATE server_invitations SET status = 'revoked'
+        WHERE server_id = ${serverId} AND status = 'pending'
+      `;
+      await tx`
+        UPDATE server_join_requests SET status = 'declined', resolved_at = now()
+        WHERE server_id = ${serverId} AND status = 'pending'
+      `;
+    });
+  }
 
+  return Response.json({ status: "deleting" }, { status: 202 });
+}
+
+// --- POST /v1/servers/:id/purge-confirm ---
+//
+// Phase 2: the desktop calls this after it has torn down the container and
+// archived/purged the local volume. Hard-deletes the row (FK cascades clean
+// the rest) and frees the owner's quota slot. A 404 after a retry means the
+// purge already landed — callers should treat it as success.
+export async function handlePurgeConfirm(
+  request: Request,
+  ctx: RouteContext,
+  serverId: string,
+): Promise<Response> {
+  const account = await authenticate(request, ctx.sql);
+  if (account instanceof Response) return account;
+
+  const { allowed, retryAfter } =
+    ctx.rateLimiter.consume(`server-delete:${account.id}`, RATE_SERVER_DELETE);
+  if (!allowed) return rateLimited(retryAfter);
+
+  const existing = await ctx.sql`
+    SELECT id, owner_id, deleted_at FROM servers WHERE id = ${serverId}
+  `;
+  if (existing.length === 0) return notFound("Server not found");
+  if (existing[0]!.owner_id !== account.id) return forbidden("Not the server owner");
+  if (existing[0]!.deleted_at === null) {
+    return conflict("Server is not being deleted — call DELETE /v1/servers/:id first");
+  }
+
+  await ctx.sql`DELETE FROM servers WHERE id = ${serverId}`;
   return new Response(null, { status: 204 });
+}
+
+// Reaper for abandoned deletes: if the purge-confirm handshake never arrives
+// (desktop uninstalled, machine gone), the held quota slot must not leak
+// forever. After this window the local-purge guarantee is moot anyway — we
+// hard-delete and free the slot. Runs hourly (see index.ts).
+const ABANDONED_DELETE_WINDOW = "7 days";
+
+export async function sweepAbandonedDeletes(
+  sql: RouteContext["sql"],
+): Promise<number> {
+  const result = await sql`
+    DELETE FROM servers
+    WHERE deleted_at IS NOT NULL
+      AND deleted_at < now() - ${ABANDONED_DELETE_WINDOW}::interval
+  `;
+  return result.count;
 }

@@ -66,7 +66,7 @@ export async function handleTransferServer(
   if (!allowed) return rateLimited(retryAfter);
 
   const serverRows = await ctx.sql`
-    SELECT id, owner_id, name FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id, name FROM servers WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   if (serverRows.length === 0) return notFound("Server not found");
   const server = serverRows[0]!;
@@ -303,6 +303,7 @@ export async function handleConfirmServerTransfer(
         SET owner_id = ${row.to_account_id as string}, updated_at = now()
         WHERE id = ${row.server_id as string}
           AND owner_id = ${row.from_account_id as string}
+          AND deleted_at IS NULL
       `;
       if (moved.count > 0) {
         // Keep the server_members mirror in step with owner_id (the source

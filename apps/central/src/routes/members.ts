@@ -45,7 +45,8 @@ async function requireOwnedServer(
   accountId: string,
 ): Promise<OwnedServerCheck> {
   const rows = await ctx.sql`
-    SELECT id, owner_id, visibility, name FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id, visibility, name FROM servers
+    WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   const server = rows[0];
   if (!server) return { ok: false, response: notFound("Server not found") };
@@ -112,6 +113,7 @@ export async function handleListMyServers(
     FROM server_members m
     JOIN servers s ON s.id = m.server_id
     WHERE m.account_id = ${account.id} AND m.status = 'active'
+      AND s.deleted_at IS NULL
     ORDER BY m.joined_at ASC, s.name ASC
   `;
 
@@ -479,7 +481,8 @@ export async function handleCreateJoinRequest(
   if (!allowed) return rateLimited(retryAfter);
 
   const rows = await ctx.sql`
-    SELECT id, owner_id, visibility FROM servers WHERE id = ${serverId}
+    SELECT id, owner_id, visibility FROM servers
+    WHERE id = ${serverId} AND deleted_at IS NULL
   `;
   const server = rows[0];
   if (!server) return notFound("Server not found");
