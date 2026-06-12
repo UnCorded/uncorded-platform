@@ -170,9 +170,9 @@ async function ensureUniqueServerRoot(baseRoot: string, slug: string): Promise<C
   return { root, plugins, data, config };
 }
 
-// The runtime container runs with --network host (see server-runtime.ts), so
-// the runtime's hardcoded PORT=3000 binds directly to host:3000. Cloudflare
-// Tunnel ingress is dashboard-managed and maps test.uncorded.app → 127.0.0.1:3000,
+// The runtime container publishes its :3000 to host 127.0.0.1:3000 (bridge
+// network with --publish; see server-runtime.ts). The runtime's PORT is fixed
+// at 3000 and Cloudflare Tunnel ingress maps the public hostname → 127.0.0.1:3000,
 // so this number must stay 3000 in lockstep with both the entrypoint and the
 // tunnel config. This caps the host to one runtime container at a time;
 // multi-runtime-per-host is a separate workstream that needs configurable
@@ -451,9 +451,39 @@ async function waitForFirstHeartbeat(
   return firstHeartbeatTunnelUrl;
 }
 
+/**
+ * The durable record the local registry needs to restore a server on the next
+ * desktop launch. A subset of the registry's ServerRecord — exactly the fields
+ * provisioning knows at container-start. Persisted via
+ * ProvisionOptions.persistServerRecord; see the call site in provisionServer.
+ */
+export interface ProvisionPersistRecord {
+  containerId: string;
+  volumePath: string;
+  hostPort: number;
+  tunnelPublicHostname?: string;
+  imageSignature?: {
+    digest: string;
+    payloadJson: string;
+    signatureB64: string;
+  };
+}
+
 export interface ProvisionOptions {
   /** See RunServerArgs.devPluginFrontendMounts. Empty/undefined in packaged builds. */
   devPluginFrontendMounts?: readonly { slug: string; hostDir: string }[];
+  /**
+   * Persist the server to the local registry the moment its container is
+   * confirmed healthy — BEFORE the best-effort Central heartbeat / public-
+   * tunnel waits. Those later steps soft-warn (and the heartbeat wait throws
+   * PreserveServerError) on failure without meaning the server doesn't exist,
+   * so gating persistence on them would leave a healthy, running container that
+   * restoreServerContainers can't boot after a restart — the bug this fixes.
+   * Injected by main.ts as a thin wrapper over registerServer; tests pass a
+   * spy. Omitted → persistence is skipped (unit tests that only assert the
+   * provisioning event stream).
+   */
+  persistServerRecord?: (serverId: string, record: ProvisionPersistRecord) => void;
 }
 
 export async function provisionServer(
@@ -744,6 +774,27 @@ export async function provisionServer(
       step: "wait-health",
       status: "completed",
       message: "Server reported healthy",
+    });
+
+    // Persist to the local registry NOW — the container exists and is healthy.
+    // Everything past this point (set-channel, heartbeat, public-tunnel) is a
+    // best-effort Central round-trip that soft-warns or throws
+    // PreserveServerError on failure; none of them change the fact that this
+    // machine hosts this server. Writing the record here (rather than after the
+    // wizard's `done`) is what lets restoreServerContainers boot the server on
+    // the next launch even when those round-trips never complete.
+    //
+    // INVARIANT: this is the last step before the preserve-only tail, so a
+    // persisted record is never left behind by the non-preserve rollback in the
+    // catch below (which only fires for failures *before* this point). If a
+    // future throwing, non-preserve step is added after here, extend the
+    // rollback to drop the registry entry too.
+    opts.persistServerRecord?.(created.id, {
+      containerId,
+      volumePath: layout.root,
+      hostPort,
+      ...(tunnelHostnameForRun ? { tunnelPublicHostname: tunnelHostnameForRun } : {}),
+      ...(imageSignature ? { imageSignature } : {}),
     });
 
     // Persist the chosen channel into the runtime's update-state so future

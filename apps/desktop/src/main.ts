@@ -36,7 +36,7 @@ import type {
 } from "@uncorded/electron-bridge";
 import { removeIfExists, runServerContainer } from "./server-runtime";
 import { reconcileRegistryWithCentral } from "./reconcile";
-import { rm } from "node:fs/promises";
+import { archiveServerVolume, gcExpiredArchives } from "./server-archive";
 import {
   getUpdateState,
   requestUpdateCheck,
@@ -1349,22 +1349,35 @@ async function purgeLocalServer(serverId: string): Promise<void> {
     } catch {
       // Container may already be gone — continue
     }
+    // Archive — never hard-delete — the server volume. It holds irreplaceable
+    // user data (custom plugins, channel history, server config) that no
+    // teardown, automatic (reconcile orphan-purge) or intentional (delete),
+    // should permanently destroy. archiveServerVolume moves it into
+    // ~/.uncorded/trash; gcExpiredArchives reclaims it (and the encryption
+    // secret) after the retention window. Best-effort: a failed archive leaves
+    // the volume in place — still NOT deleted — rather than wedging the purge.
     try {
-      await rm(record.volumePath, { recursive: true, force: true });
-    } catch {
-      // Best effort — continue
+      const result = await archiveServerVolume(serverId, record.volumePath);
+      if (result.archived) {
+        log.info("archived server volume on purge", { serverId, dest: result.dest });
+      }
+    } catch (err) {
+      log.warn("failed to archive server volume on purge — left in place", {
+        serverId,
+        err: errorMessage(err),
+      });
     }
     removeServerRecord(serverId);
   }
   // Clear the cached tunnel token. We do NOT clear on container stop —
   // stops happen routinely (laptop sleep, app quit) and a clear there
   // would force the user to re-paste the token on every restart. Purge
-  // is the only intent strong enough to invalidate stored secrets.
+  // is the only intent strong enough to invalidate it.
   deleteSecret(tunnelSecretKey(serverId));
-  // The runtime encryption secret is purge-only for the same reason: a
-  // stop is routine, but rotating the secret across stop-start cycles
-  // would orphan every encrypted-at-rest row. Cleared with the tunnel.
-  deleteSecret(encryptionSecretKey(serverId));
+  // The runtime encryption secret is deliberately KEPT here: it's required to
+  // decrypt the just-archived at-rest data, so dropping it now would make the
+  // archived volume unrecoverable. gcExpiredArchives deletes it only once it
+  // removes the archived volume past the retention window.
 }
 
 // On launch: walk the local server registry, force-remove any stale container
@@ -2228,14 +2241,15 @@ function registerIpcHandlers(): void {
         sessionId,
         ...eventPayload,
       });
-    }, { devPluginFrontendMounts: devPluginFrontendMounts() }).then((result) => {
-      registerServer(result.serverId, {
-        containerId: result.containerId,
-        volumePath: result.volumePath,
-        hostPort: result.hostPort,
-        ...(result.tunnelPublicHostname ? { tunnelPublicHostname: result.tunnelPublicHostname } : {}),
-        ...(result.imageSignature ? { imageSignature: result.imageSignature } : {}),
-      });
+    }, {
+      devPluginFrontendMounts: devPluginFrontendMounts(),
+      // Persist to the local registry the instant the container is confirmed
+      // healthy — BEFORE provisioning's best-effort heartbeat / public-tunnel
+      // waits — so a server that's up but whose Central round-trip times out
+      // still survives a restart. restoreServerContainers reads this registry
+      // on every launch; without an entry here the server can never auto-boot.
+      persistServerRecord: (serverId, record) => { registerServer(serverId, record); },
+    }).then((result) => {
       sendToWindow(IPC.SERVER_PROVISION_DONE, { sessionId, ...result });
     }).catch((err) => {
       sendToWindow(IPC.SERVER_PROVISION_ERROR, {
@@ -2975,6 +2989,23 @@ if (!gotInstanceLock) {
       .finally(() => {
         startupCompleteResolve();
       });
+
+    // Reclaim archived server volumes (and their encryption secrets) past the
+    // retention window. Independent of the restore chain and best-effort — a
+    // failure here only means trash lingers, never lost live data. See
+    // purgeLocalServer / server-archive.ts for why teardown archives instead of
+    // hard-deleting.
+    void gcExpiredArchives({
+      onReclaim: (sid) => {
+        deleteSecret(encryptionSecretKey(sid));
+        log.info("trash GC reclaimed archived server", { serverId: sid });
+      },
+      onError: (name, err) => {
+        log.warn("trash GC failed to remove archived entry", { name, err: errorMessage(err) });
+      },
+    }).catch((err) => {
+      log.error("gcExpiredArchives crashed", { err: errorMessage(err) });
+    });
   });
 
   // Stop containers cleanly when the user quits the desktop app. `before-quit`

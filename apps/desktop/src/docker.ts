@@ -40,6 +40,14 @@ export interface RunConfig {
   // containers bind directly to host ports and `--publish` is rejected by the
   // daemon.
   network?: string;
+  /**
+   * Extra host-to-IP mappings rendered as `--add-host <host>:<ip>`. Used in dev
+   * to map `host.docker.internal:host-gateway` so a bridged runtime container
+   * can reach a Central running on the developer's host loopback. Docker
+   * Desktop provides this alias automatically, but native-Linux Docker does
+   * not — the explicit mapping makes dev provisioning work on every platform.
+   */
+  addHosts?: string[];
   restartPolicy: "unless-stopped" | "no";
   capDropAll?: boolean;
   capAdd?: string[];
@@ -397,6 +405,10 @@ function buildRunArgs(config: RunConfig): string[] {
 
   if (config.network) {
     args.push("--network", config.network);
+  }
+
+  for (const addHost of config.addHosts ?? []) {
+    args.push("--add-host", addHost);
   }
 
   for (const vol of config.volumes) {

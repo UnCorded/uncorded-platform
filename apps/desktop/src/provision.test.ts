@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { ProvisionInput } from "./provision";
+import type { ProvisionInput, ProvisionPersistRecord } from "./provision";
 
 // ---------------------------------------------------------------------------
 // Capture real Node built-in module refs BEFORE any mock.module calls.
@@ -540,6 +540,84 @@ describe("provisionServer — PreserveServerError: heartbeat timeout", () => {
     expect(mockCentralDeleteServer.mock.calls.length).toBe(0);
     expect(mockDockerRemoveContainer.mock.calls.length).toBe(0);
     expect(mockRm.mock.calls.length).toBe(0);
+  });
+});
+
+describe("provisionServer — local registry persistence", () => {
+  it("persists after health passes and before the heartbeat wait", async () => {
+    const seenSteps: string[] = [];
+    const stepsAtPersist: string[][] = [];
+    const persistServerRecord = mock((_serverId: string, _record: ProvisionPersistRecord) => {
+      stepsAtPersist.push([...seenSteps]);
+    });
+
+    await provisionModule.provisionServer(
+      makeInput(),
+      (e) => seenSteps.push(e.step),
+      { persistServerRecord },
+    );
+
+    expect(persistServerRecord.mock.calls.length).toBe(1);
+    const snapshot = stepsAtPersist[0] ?? [];
+    // Health must have completed before we persist...
+    expect(snapshot).toContain("wait-health");
+    // ...and the Central heartbeat round-trip must NOT have started yet —
+    // persisting before it is the whole point (a healthy-but-heartbeat-pending
+    // server must survive a restart).
+    expect(snapshot).not.toContain("wait-heartbeat");
+  });
+
+  it("persists the containerId, volumePath, hostPort and signature material", async () => {
+    const persistServerRecord = mock((_serverId: string, _record: ProvisionPersistRecord) => {});
+    await provisionModule.provisionServer(makeInput(), () => {}, { persistServerRecord });
+
+    expect(persistServerRecord.mock.calls.length).toBe(1);
+    const [serverId, record] = (persistServerRecord.mock.calls[0] as unknown) as [
+      string,
+      ProvisionPersistRecord,
+    ];
+    expect(serverId).toBe("srv_abc123");
+    expect(record.containerId).toBe("container_abc");
+    expect(record.hostPort).toBe(3000);
+    expect(record.volumePath.endsWith("test-server")).toBe(true);
+    expect(record.imageSignature?.digest).toBe(FAKE_DIGEST);
+  });
+
+  it("persists even when the heartbeat times out (PreserveServerError) — the restart-survival regression", async () => {
+    // Same timeline as the heartbeat-timeout rollback test: health passes, then
+    // the heartbeat wait blows its budget and throws PreserveServerError. The
+    // record MUST already be written — otherwise the running container is
+    // orphaned and restoreServerContainers can never boot it next launch. This
+    // is the exact bug this change fixes.
+    const base = 1_000_000;
+    const seq = [base, base, base + 1, base + 80_000];
+    let idx = 0;
+    Date.now = () => seq[idx++] ?? base + 80_000;
+    mockCentralGetServer.mockResolvedValue({ tunnel_url: null, last_heartbeat_at: null });
+
+    const persistServerRecord = mock((_serverId: string, _record: ProvisionPersistRecord) => {});
+
+    await expect(
+      provisionModule.provisionServer(makeInput(), () => {}, { persistServerRecord }),
+    ).rejects.toThrow();
+
+    expect(persistServerRecord.mock.calls.length).toBe(1);
+    const [, record] = (persistServerRecord.mock.calls[0] as unknown) as [
+      string,
+      ProvisionPersistRecord,
+    ];
+    expect(record.containerId).toBe("container_abc");
+  });
+
+  it("does NOT persist when a pre-health step fails (container never starts)", async () => {
+    mockDockerRunContainer.mockRejectedValue(new Error("docker daemon unavailable"));
+    const persistServerRecord = mock((_serverId: string, _record: ProvisionPersistRecord) => {});
+
+    await expect(
+      provisionModule.provisionServer(makeInput(), () => {}, { persistServerRecord }),
+    ).rejects.toThrow("docker daemon unavailable");
+
+    expect(persistServerRecord.mock.calls.length).toBe(0);
   });
 });
 

@@ -36,12 +36,71 @@ export function getBaseUrl(): string {
     ?? (app.isPackaged ? PROD_CENTRAL_URL : DEV_CENTRAL_URL);
 }
 
-// Central URL written into a provisioned server's config. The desktop app can
-// use localhost in dev, but containers can't reach localhost on the host — they
-// must go through the public tunnel. Defaults to PROD_CENTRAL_URL; override via
-// UNCORDED_CONTAINER_CENTRAL_URL for custom tunnel hostnames.
+// Docker's host-gateway alias. Docker Desktop resolves this automatically, but
+// native-Linux Docker only resolves it when the container is started with
+// `--add-host host.docker.internal:host-gateway` — which runServerContainer
+// adds in dev so the rewrite below works on every platform.
+const HOST_GATEWAY_ALIAS = "host.docker.internal";
+
+// Rewrite a host-loopback Central URL into one a bridged container can reach.
+// The runtime container runs on Docker's bridge network with published ports
+// (see server-runtime.ts), so inside it `localhost` is the container itself,
+// not the host. Routable hosts (a real tunnel, or prod) pass through untouched.
+function toContainerReachableUrl(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    // Unparseable base (e.g. a malformed VITE_CENTRAL_URL) — fail safe to prod
+    // rather than handing the runtime a central_url it would reject at boot.
+    return PROD_CENTRAL_URL;
+  }
+  const host = url.hostname.toLowerCase();
+  const isLoopback =
+    host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  if (!isLoopback) return baseUrl;
+  url.hostname = HOST_GATEWAY_ALIAS;
+  // Origin only, no trailing slash — match the PROD_CENTRAL_URL shape the
+  // runtime expects when it joins request paths onto central_url.
+  return `${url.protocol}//${url.host}`;
+}
+
+// Pure resolution of the container's central_url from explicit inputs. Split
+// out from getContainerCentralUrl so it's unit-testable without the
+// process-global electron stub or env vars — whose shared, mutable state across
+// the test worker made order-dependent tests flaky.
+//
+// Resolution order:
+//   1. override (UNCORDED_CONTAINER_CENTRAL_URL) — explicit, for custom tunnel
+//      hostnames or a staging Central.
+//   2. Packaged builds — always production Central. (The web origin can be
+//      repointed via VITE_CENTRAL_URL for testing; the container's Central is
+//      deliberately not, to avoid a packaged app silently heartbeating to a
+//      dev box.)
+//   3. Dev — the desktop's own base URL, rewritten so a bridged container can
+//      reach a Central on the host loopback (localhost → host.docker.internal).
+export function resolveContainerCentralUrl(opts: {
+  override: string | undefined;
+  isPackaged: boolean;
+  baseUrl: string;
+}): string {
+  if (opts.override) return opts.override;
+  if (opts.isPackaged) return PROD_CENTRAL_URL;
+  return toContainerReachableUrl(opts.baseUrl);
+}
+
+// Central URL written into a provisioned server's config (server.json), used by
+// the runtime for heartbeats and for fetching Central's JWT-signing public
+// keys. MUST resolve to the same Central instance the desktop registered the
+// server against (getBaseUrl) — otherwise Central never sees the heartbeat and
+// the provision wizard soft-warns on every run while the server is in fact
+// healthy.
 export function getContainerCentralUrl(): string {
-  return process.env["UNCORDED_CONTAINER_CENTRAL_URL"] ?? PROD_CENTRAL_URL;
+  return resolveContainerCentralUrl({
+    override: process.env["UNCORDED_CONTAINER_CENTRAL_URL"],
+    isPackaged: app.isPackaged,
+    baseUrl: getBaseUrl(),
+  });
 }
 
 function getSessionToken(): string | null {

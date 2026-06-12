@@ -262,6 +262,60 @@ describe("runContainer", () => {
       "net.core.wmem_max=7500000",
     ]);
   });
+
+  it("renders each addHosts entry as a --add-host flag", async () => {
+    let capturedArgs: string[] = [];
+    mockExecFile.mockImplementation(((...args: unknown[]) => {
+      capturedArgs = args[1] as string[];
+      const cb = args[args.length - 1] as (err: null, stdout: string, stderr: string) => void;
+      cb(null, "container-id-addhost\n", "");
+      return {} as ChildProcess;
+    }) as unknown as typeof import("node:child_process").execFile);
+
+    const config: RunConfig = {
+      image: "uncorded/server:latest",
+      name: "uncorded-addhost",
+      volumes: [],
+      env: {},
+      ports: [],
+      restartPolicy: "no",
+      addHosts: ["host.docker.internal:host-gateway", "custom.host:10.1.2.3"],
+    };
+
+    await dockerModule.runContainer(config);
+
+    const addHostValues = capturedArgs.reduce<string[]>((acc, arg, idx) => {
+      if (arg === "--add-host") acc.push(capturedArgs[idx + 1] ?? "");
+      return acc;
+    }, []);
+    expect(addHostValues).toEqual([
+      "host.docker.internal:host-gateway",
+      "custom.host:10.1.2.3",
+    ]);
+  });
+
+  it("omits --add-host entirely when addHosts is not provided", async () => {
+    let capturedArgs: string[] = [];
+    mockExecFile.mockImplementation(((...args: unknown[]) => {
+      capturedArgs = args[1] as string[];
+      const cb = args[args.length - 1] as (err: null, stdout: string, stderr: string) => void;
+      cb(null, "container-id-noaddhost\n", "");
+      return {} as ChildProcess;
+    }) as unknown as typeof import("node:child_process").execFile);
+
+    const config: RunConfig = {
+      image: "uncorded/server:latest",
+      name: "uncorded-noaddhost",
+      volumes: [],
+      env: {},
+      ports: [],
+      restartPolicy: "no",
+    };
+
+    await dockerModule.runContainer(config);
+
+    expect(capturedArgs).not.toContain("--add-host");
+  });
 });
 
 // ── Docker Desktop boot helpers ──────────────────────────────────────────────
