@@ -298,12 +298,29 @@ export async function handleConfirmServerTransfer(
       // Guard against the from-account having lost ownership in the meantime
       // (e.g., a separate manual SQL move). The WHERE clause makes the move
       // a no-op rather than silently overwriting a different owner.
-      await tx`
+      const moved = await tx`
         UPDATE servers
         SET owner_id = ${row.to_account_id as string}, updated_at = now()
         WHERE id = ${row.server_id as string}
           AND owner_id = ${row.from_account_id as string}
       `;
+      if (moved.count > 0) {
+        // Keep the server_members mirror in step with owner_id (the source
+        // of truth): the recipient becomes the role='owner' row — upserted,
+        // since they may already be a plain member — and the old owner stays
+        // on as a regular member rather than being dropped from the server.
+        await tx`
+          INSERT INTO server_members (server_id, account_id, role, status)
+          VALUES (${row.server_id as string}, ${row.to_account_id as string}, 'owner', 'active')
+          ON CONFLICT (server_id, account_id)
+          DO UPDATE SET role = 'owner', status = 'active'
+        `;
+        await tx`
+          UPDATE server_members SET role = 'member'
+          WHERE server_id = ${row.server_id as string}
+            AND account_id = ${row.from_account_id as string}
+        `;
+      }
       await tx`
         UPDATE server_transfers SET is_pending = false WHERE id = ${transferId}
       `;

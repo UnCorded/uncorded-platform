@@ -1,7 +1,8 @@
 import type { RouteContext } from "../routes";
 import { authenticate, RATE_DIRECTORY_BROWSE, type RateLimitConfig } from "../middleware";
-import { badRequest, forbidden, notFound, rateLimited } from "../errors";
+import { badRequest, errorResponse, forbidden, notFound, rateLimited } from "../errors";
 import { generateServerSecret, hashToken } from "../crypto";
+import { MAX_OWNED_SERVERS } from "../membership";
 
 const RATE_SERVER_CREATE: RateLimitConfig = { maxTokens: 10, refillRate: 10 / 60 };
 const RATE_SERVER_GET: RateLimitConfig = { maxTokens: 60, refillRate: 1 };
@@ -131,6 +132,17 @@ export async function handleCreateServer(
   const secretHash = await hashToken(secret);
 
   const rows = await ctx.sql.begin(async (tx) => {
+    // Serialize creates per account so two concurrent requests can't both
+    // pass the quota count. The account row is the natural lock target.
+    await tx`SELECT id FROM accounts WHERE id = ${account.id} FOR UPDATE`;
+
+    const owned = await tx`
+      SELECT count(*)::int AS total FROM servers WHERE owner_id = ${account.id}
+    `;
+    if ((owned[0]!.total as number) >= MAX_OWNED_SERVERS) {
+      return null;
+    }
+
     const inserted = await tx`
       INSERT INTO servers (name, description, visibility, owner_id, server_secret_hash)
       VALUES (${name}, ${description}, ${visibility}, ${account.id}, ${secretHash})
@@ -143,8 +155,23 @@ export async function handleCreateServer(
       VALUES (${serverId}, 1)
     `;
 
+    // Mirror ownership into server_members so "servers I belong to" is one
+    // query. servers.owner_id stays the source of truth (see schema.sql).
+    await tx`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${serverId}, ${account.id}, 'owner', 'active')
+    `;
+
     return inserted;
   });
+
+  if (rows === null) {
+    return errorResponse(
+      403,
+      "QUOTA_EXCEEDED",
+      `You can own at most ${MAX_OWNED_SERVERS} servers`,
+    );
+  }
 
   return new Response(
     JSON.stringify({

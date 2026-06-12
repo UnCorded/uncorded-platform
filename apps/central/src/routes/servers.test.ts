@@ -9,16 +9,22 @@ import { sweepStaleServers } from "./servers";
 
 let ts: TestServer;
 let ownerToken: string;
-let ownerAccountId: string;
 let otherToken: string;
+// Second creator account for the detail/patch/delete describes — the owned
+// quota (MAX_OWNED_SERVERS) caps creates per account, so this file spreads
+// its fixture servers across accounts instead of piling them on one.
+let crudToken: string;
+let crudAccountId: string;
 
 beforeAll(async () => {
   ts = await startTestServer();
   const owner = await registerAndLogin(ts, "owner");
   ownerToken = owner.token;
-  ownerAccountId = owner.accountId;
   const other = await registerAndLogin(ts, "other");
   otherToken = other.token;
+  const crud = await registerAndLogin(ts, "crudowner");
+  crudToken = crud.token;
+  crudAccountId = crud.accountId;
 });
 
 afterAll(async () => {
@@ -140,6 +146,9 @@ describe("GET /v1/servers", () => {
 describe("GET /v1/servers — directory hygiene", () => {
   // Helper: create a public server and force its liveness/tunnel columns to an
   // arbitrary state, bypassing the heartbeat path so each case is isolated.
+  // Each server gets its own throwaway creator account so this describe can
+  // grow without bumping into the per-account owned quota.
+  let hygieneSeq = 0;
   async function makeServer(
     name: string,
     cols: {
@@ -149,9 +158,10 @@ describe("GET /v1/servers — directory hygiene", () => {
       tunnel_state: string | null;
     },
   ): Promise<string> {
+    const creator = await registerAndLogin(ts, `hygiene${hygieneSeq++}`);
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(creator.token) },
       body: JSON.stringify({ name, visibility: "public" }),
     });
     const id = (await res.json()).server_id as string;
@@ -262,7 +272,7 @@ describe("GET /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Detail Server" }),
     });
     const body = await res.json();
@@ -271,13 +281,13 @@ describe("GET /v1/servers/:id", () => {
 
   test("returns server details", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.id).toBe(serverId);
     expect(body.name).toBe("Detail Server");
-    expect(body.owner_id).toBe(ownerAccountId);
+    expect(body.owner_id).toBe(crudAccountId);
     // Must not include server_secret_hash
     expect(body.server_secret_hash).toBeUndefined();
   });
@@ -285,7 +295,7 @@ describe("GET /v1/servers/:id", () => {
   test("returns 404 for non-existent server", async () => {
     const res = await fetch(
       `${ts.url}/v1/servers/00000000-0000-0000-0000-000000000000`,
-      { headers: authHeaders(ownerToken) },
+      { headers: authHeaders(crudToken) },
     );
     expect(res.status).toBe(404);
   });
@@ -297,7 +307,7 @@ describe("PATCH /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Patchable" }),
     });
     const body = await res.json();
@@ -307,7 +317,7 @@ describe("PATCH /v1/servers/:id", () => {
   test("owner can update name and visibility", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Renamed", visibility: "public" }),
     });
     expect(res.status).toBe(200);
@@ -328,7 +338,7 @@ describe("PATCH /v1/servers/:id", () => {
   test("returns 400 for empty update", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
@@ -341,7 +351,7 @@ describe("DELETE /v1/servers/:id", () => {
   beforeAll(async () => {
     const res = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
+      headers: { "Content-Type": "application/json", ...authHeaders(crudToken) },
       body: JSON.stringify({ name: "Deletable" }),
     });
     const body = await res.json();
@@ -359,12 +369,12 @@ describe("DELETE /v1/servers/:id", () => {
   test("owner can delete, subsequent GET returns 404", async () => {
     const res = await fetch(`${ts.url}/v1/servers/${serverId}`, {
       method: "DELETE",
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
     expect(res.status).toBe(204);
 
     const getRes = await fetch(`${ts.url}/v1/servers/${serverId}`, {
-      headers: authHeaders(ownerToken),
+      headers: authHeaders(crudToken),
     });
     expect(getRes.status).toBe(404);
   });
