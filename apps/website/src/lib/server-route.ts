@@ -23,7 +23,7 @@
 
 import { createSignal, createEffect, untrack } from "solid-js";
 import type { Server } from "../api/types";
-import { servers, activeServerId, setActiveServer } from "../stores/servers";
+import { servers, serversLoadedOnce, activeServerId, setActiveServer } from "../stores/servers";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ID_SUFFIX_RE = /--([0-9a-f]{8})$/;
@@ -120,12 +120,17 @@ const [pendingRoute, setPendingRoute] = createSignal<string | null>(null);
 export function mountServerRoute(): void {
   setPendingRoute(readServerRoute());
 
-  // Resolve the pending segment once the membership list is available.
+  // Resolve the pending segment once the membership list is authoritative.
+  // Gated on serversLoadedOnce, NOT list emptiness: a zero-server user's list
+  // is legitimately empty after a successful load, and their stale /s/ URL
+  // must resolve (to "dead link, clean it") rather than pend forever. The
+  // loading flag wouldn't work either — it's false before the first load
+  // even starts, which would clear the pending route at mount.
   createEffect(() => {
     const pending = pendingRoute();
     if (pending === null) return;
+    if (!serversLoadedOnce()) return;
     const list = servers();
-    if (list.length === 0) return; // first load hasn't landed yet
     setPendingRoute(null);
     const id = resolveServerRoute(pending, list);
     if (id) {

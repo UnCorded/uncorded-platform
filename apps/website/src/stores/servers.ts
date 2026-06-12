@@ -33,7 +33,18 @@ export function bumpServerIconVersion(serverId: string, updatedAt: number): void
  */
 const [serversError, setServersError] = createSignal<string | null>(null);
 
-export { servers, serversLoading, serversError, activeServerId, activePluginSlug };
+/**
+ * Flips true after the first SUCCESSFUL loadServers and stays true. Distinct
+ * from serversLoading (false both before the first load starts and between
+ * polls) — consumers that must wait for an authoritative list (the /s/ route
+ * restore deciding whether a slug is dead) gate on this, so "loaded and
+ * genuinely empty" is distinguishable from "not loaded yet". A failed load
+ * deliberately does NOT set it: an unreachable Central must not make a
+ * pending route conclude the user has no servers.
+ */
+const [serversLoadedOnce, setServersLoadedOnce] = createSignal(false);
+
+export { servers, serversLoading, serversError, serversLoadedOnce, activeServerId, activePluginSlug };
 
 export function removeServer(id: string): void {
   setServers((prev) => prev.filter((s) => s.id !== id));
@@ -163,6 +174,7 @@ export async function loadServers(): Promise<void> {
       })),
     );
     setServersError(null);
+    setServersLoadedOnce(true);
     startPolling();
 
     // Reconcile: purge servers that used to be in local state but Central no
