@@ -29,7 +29,6 @@ interface ServerRow {
   description: string | null;
   visibility: string;
   owner_id: string;
-  tunnel_url: string | null;
   tunnel_state: string | null;
   runtime_version: string | null;
   connected_users: number;
@@ -40,6 +39,10 @@ interface ServerRow {
   updated_at: string;
 }
 
+// tunnel_url is deliberately absent: the join endpoint is a capability, not
+// directory metadata. It is returned only by POST /v1/auth/token/server,
+// bundled with the token, after the membership check passes — so knowing a
+// server exists never reveals where it lives.
 function serverJson(row: ServerRow) {
   return {
     id: row.id,
@@ -47,7 +50,6 @@ function serverJson(row: ServerRow) {
     description: row.description ?? null,
     visibility: row.visibility,
     owner_id: row.owner_id,
-    tunnel_url: row.tunnel_url ?? null,
     tunnel_state: row.tunnel_state ?? null,
     runtime_version: row.runtime_version ?? null,
     connected_users: row.connected_users,
@@ -221,7 +223,7 @@ export async function handleListServers(
   if (search) {
     const pattern = `%${search}%`;
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+      SELECT id, name, description, visibility, owner_id, tunnel_state,
              runtime_version, connected_users, plugin_count,
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
@@ -244,7 +246,7 @@ export async function handleListServers(
     `;
   } else {
     servers = await ctx.sql`
-      SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+      SELECT id, name, description, visibility, owner_id, tunnel_state,
              runtime_version, connected_users, plugin_count,
              (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
              last_heartbeat_at, created_at, updated_at
@@ -292,7 +294,7 @@ export async function handleGetServer(
   // once heartbeats stop past the liveness window), derived the same way as the
   // directory so a stale server can't show a green dot.
   const rows = await ctx.sql`
-    SELECT id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+    SELECT id, name, description, visibility, owner_id, tunnel_state,
            runtime_version, connected_users, plugin_count,
            (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
            last_heartbeat_at, created_at, updated_at
@@ -301,6 +303,18 @@ export async function handleGetServer(
 
   const row = rows[0];
   if (!row) return notFound("Server not found");
+
+  // Private servers are invisible to non-members: 404, not 403, so probing an
+  // id can't confirm the server exists. Banned members get the same 404 — a
+  // ban removes the server from their world entirely.
+  if ((row.visibility as string) === "private" && row.owner_id !== account.id) {
+    const member = await ctx.sql`
+      SELECT 1 FROM server_members
+      WHERE server_id = ${serverId} AND account_id = ${account.id}
+        AND status = 'active'
+    `;
+    if (member.length === 0) return notFound("Server not found");
+  }
 
   return Response.json(serverJson(row as unknown as ServerRow));
 }
@@ -385,7 +399,7 @@ export async function handleUpdateServer(
       visibility = COALESCE(${visibility ?? null}, visibility),
       updated_at = now()
     WHERE id = ${serverId}
-    RETURNING id, name, description, visibility, owner_id, tunnel_url, tunnel_state,
+    RETURNING id, name, description, visibility, owner_id, tunnel_state,
               runtime_version, connected_users, plugin_count,
               (is_online AND last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
               last_heartbeat_at, created_at, updated_at

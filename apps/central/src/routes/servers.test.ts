@@ -379,3 +379,118 @@ describe("DELETE /v1/servers/:id", () => {
     expect(getRes.status).toBe(404);
   });
 });
+
+describe("capability hardening — tunnel_url never leaves the directory", () => {
+  let hardOwnerToken: string;
+  let hardServerId: string;
+
+  beforeAll(async () => {
+    const owner = await registerAndLogin(ts, "hardowner");
+    hardOwnerToken = owner.token;
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(hardOwnerToken) },
+      body: JSON.stringify({ name: "Capability Server", visibility: "public" }),
+    });
+    hardServerId = (await res.json()).server_id;
+    await ts.sql`
+      UPDATE servers
+      SET is_online = true,
+          last_heartbeat_at = now(),
+          tunnel_url = 'https://secret-endpoint.trycloudflare.com',
+          tunnel_state = 'named'
+      WHERE id = ${hardServerId}
+    `;
+  });
+
+  test("GET /v1/servers responses carry no tunnel_url (regression: URL leak)", async () => {
+    const res = await fetch(`${ts.url}/v1/servers?per_page=100`, {
+      headers: authHeaders(hardOwnerToken),
+    });
+    const body = await res.json();
+    const row = body.servers.find(
+      (s: { name: string }) => s.name === "Capability Server",
+    );
+    expect(row).toBeDefined();
+    expect("tunnel_url" in row).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("secret-endpoint");
+  });
+
+  test("GET /v1/servers/:id carries no tunnel_url, even for the owner", async () => {
+    const res = await fetch(`${ts.url}/v1/servers/${hardServerId}`, {
+      headers: authHeaders(hardOwnerToken),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect("tunnel_url" in body).toBe(false);
+    // Status fields the owner needs are still present.
+    expect(body.tunnel_state).toBe("named");
+    expect(body.is_online).toBe(true);
+  });
+
+  test("PATCH /v1/servers/:id response carries no tunnel_url", async () => {
+    const res = await fetch(`${ts.url}/v1/servers/${hardServerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders(hardOwnerToken) },
+      body: JSON.stringify({ description: "patched" }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect("tunnel_url" in body).toBe(false);
+  });
+});
+
+describe("GET /v1/servers/:id — private servers are invisible to non-members", () => {
+  let privOwnerToken: string;
+  let privServerId: string;
+
+  beforeAll(async () => {
+    const owner = await registerAndLogin(ts, "privowner");
+    privOwnerToken = owner.token;
+    const res = await fetch(`${ts.url}/v1/servers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(privOwnerToken) },
+      body: JSON.stringify({ name: "Invisible Server", visibility: "private" }),
+    });
+    privServerId = (await res.json()).server_id;
+  });
+
+  test("non-member gets 404, not 403 (regression: existence leak)", async () => {
+    const stranger = await registerAndLogin(ts, "privstranger");
+    const res = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(stranger.token),
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error.code).toBe("NOT_FOUND");
+  });
+
+  test("banned member gets 404 too", async () => {
+    const banned = await registerAndLogin(ts, "privbanned");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${privServerId}, ${banned.accountId}, 'member', 'banned')
+    `;
+    const res = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(banned.token),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("active member and owner still see it", async () => {
+    const member = await registerAndLogin(ts, "privmember");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${privServerId}, ${member.accountId}, 'member', 'active')
+    `;
+    const memberRes = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(member.token),
+    });
+    expect(memberRes.status).toBe(200);
+
+    const ownerRes = await fetch(`${ts.url}/v1/servers/${privServerId}`, {
+      headers: authHeaders(privOwnerToken),
+    });
+    expect(ownerRes.status).toBe(200);
+  });
+});

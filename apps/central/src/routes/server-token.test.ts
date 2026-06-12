@@ -30,6 +30,13 @@ beforeAll(async () => {
   });
   const body = await res.json();
   serverId = body.server_id;
+
+  // Tokens are membership-gated, so the non-owner fixture joins as an active
+  // member (directly — invite/accept endpoints live in routes/me.ts tests).
+  await ts.sql`
+    INSERT INTO server_members (server_id, account_id, role, status)
+    VALUES (${serverId}, ${otherAccountId}, 'member', 'active')
+  `;
 });
 
 afterAll(async () => {
@@ -74,7 +81,7 @@ describe("POST /v1/auth/token/server", () => {
     expect(typeof payload.jti).toBe("string");
   });
 
-  test("non-owner gets is_owner=false", async () => {
+  test("active member gets a token with is_owner=false", async () => {
     const res = await fetch(`${ts.url}/v1/auth/token/server`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(otherToken) },
@@ -86,6 +93,47 @@ describe("POST /v1/auth/token/server", () => {
     const payload = decodeJwtPart(parts[1]!);
     expect(payload.sub).toBe(otherAccountId);
     expect(payload.is_owner).toBe(false);
+  });
+
+  test("bundles tunnel_url with the token (the only place Central reveals it)", async () => {
+    await ts.sql`
+      UPDATE servers SET tunnel_url = 'https://token-test.trycloudflare.com'
+      WHERE id = ${serverId}
+    `;
+    const res = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(otherToken) },
+      body: JSON.stringify({ server_id: serverId }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.tunnel_url).toBe("https://token-test.trycloudflare.com");
+  });
+
+  test("non-member of a public server gets 403 NOT_A_MEMBER", async () => {
+    const stranger = await registerAndLogin(ts, "tokenstranger");
+    const res = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(stranger.token) },
+      body: JSON.stringify({ server_id: serverId }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error.code).toBe("NOT_A_MEMBER");
+  });
+
+  test("banned member of a public server gets 403 even though the server is public", async () => {
+    const banned = await registerAndLogin(ts, "tokenbanned");
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${serverId}, ${banned.accountId}, 'member', 'banned')
+    `;
+    const res = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(banned.token) },
+      body: JSON.stringify({ server_id: serverId }),
+    });
+    expect(res.status).toBe(403);
   });
 
   test("verifies JWT signature with public key", async () => {
@@ -121,8 +169,7 @@ describe("POST /v1/auth/token/server", () => {
     expect(valid).toBe(true);
   });
 
-  test("returns 403 for non-owner on private server", async () => {
-    // Create a private server
+  test("non-member of a private server gets 404, not 403 (no existence leak)", async () => {
     const createRes = await fetch(`${ts.url}/v1/servers`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(ownerToken) },
@@ -131,13 +178,24 @@ describe("POST /v1/auth/token/server", () => {
     const createBody = await createRes.json();
     const privateServerId = createBody.server_id as string;
 
-    // Non-owner should be forbidden
     const res = await fetch(`${ts.url}/v1/auth/token/server`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(otherToken) },
       body: JSON.stringify({ server_id: privateServerId }),
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
+
+    // An active member of the private server does get a token.
+    await ts.sql`
+      INSERT INTO server_members (server_id, account_id, role, status)
+      VALUES (${privateServerId}, ${otherAccountId}, 'member', 'active')
+    `;
+    const memberRes = await fetch(`${ts.url}/v1/auth/token/server`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(otherToken) },
+      body: JSON.stringify({ server_id: privateServerId }),
+    });
+    expect(memberRes.status).toBe(200);
   });
 
   test("returns 404 for non-existent server", async () => {
