@@ -76,7 +76,38 @@ describe("GET /v1/me/servers", () => {
     const priv = body.servers.find((s: { id: string }) => s.id === privateServerId);
     expect(priv.role).toBe("owner");
     expect(priv.is_online).toBe(false);
-    expect("tunnel_url" in priv).toBe(false);
+    // Member-scoped surface: tunnel_url is present (null until the first
+    // tunneled heartbeat) — unlike the directory and GET /:id, which strip it.
+    expect("tunnel_url" in priv).toBe(true);
+    expect(priv.tunnel_url).toBeNull();
+  });
+
+  test("members see tunnel_url on their list; the public directory still strips it", async () => {
+    await ts.sql`
+      UPDATE servers
+      SET is_online = true,
+          last_heartbeat_at = now(),
+          tunnel_url = 'https://members-only.trycloudflare.com',
+          tunnel_state = 'named'
+      WHERE id = ${publicServerId}
+    `;
+
+    // Owner and plain member both get the URL from /v1/me/servers…
+    for (const token of [owner.token, member.token]) {
+      const res = await get(token, "/v1/me/servers");
+      const row = (await res.json()).servers.find(
+        (s: { id: string }) => s.id === publicServerId,
+      );
+      expect(row.tunnel_url).toBe("https://members-only.trycloudflare.com");
+    }
+
+    // …while the same server's directory row stays URL-less for everyone.
+    const dir = await get(stranger.token, "/v1/servers?per_page=100");
+    const dirRow = (await dir.json()).servers.find(
+      (s: { id: string }) => s.id === publicServerId,
+    );
+    expect(dirRow).toBeDefined();
+    expect("tunnel_url" in dirRow).toBe(false);
   });
 
   test("active member sees the joined server with role=member", async () => {

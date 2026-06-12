@@ -105,8 +105,8 @@ export async function handleListMyServers(
   if (!allowed) return rateLimited(retryAfter);
 
   const rows = await ctx.sql`
-    SELECT s.id, s.name, s.description, s.visibility, s.owner_id, s.tunnel_state,
-           s.runtime_version, s.connected_users, s.plugin_count,
+    SELECT s.id, s.name, s.description, s.visibility, s.owner_id, s.tunnel_url,
+           s.tunnel_state, s.runtime_version, s.connected_users, s.plugin_count,
            (s.is_online AND s.last_heartbeat_at > now() - ${SERVER_STALE_INTERVAL}::interval) AS is_online,
            s.last_heartbeat_at, s.created_at, s.updated_at,
            m.role, m.joined_at
@@ -117,9 +117,16 @@ export async function handleListMyServers(
     ORDER BY m.joined_at ASC, s.name ASC
   `;
 
+  // tunnel_url rides on THIS list — and only this list. serverJson strips it
+  // everywhere (directory, GET /:id) because knowing a server exists must not
+  // reveal where it lives; here every row is a server the caller is an active
+  // member of, i.e. exactly the audience the token endpoint would hand the
+  // URL to anyway. Carrying it keeps sidebar icons and the 60s URL-rotation
+  // refresh seamless without weakening the non-member boundary.
   return Response.json({
     servers: rows.map((row) => ({
       ...serverJson(row as unknown as ServerRow),
+      tunnel_url: (row.tunnel_url as string | null) ?? null,
       role: row.role as string,
       joined_at: row.joined_at as string,
     })),
