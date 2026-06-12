@@ -168,7 +168,10 @@ cookie and returns `iframeUrl` (set as the iframe `src`) and `openUrl` (an "Open
 in browser" fallback, required under Safari ITP). Same render on desktop and web.
 Fails when the upstream blocks framing (`X-Frame-Options: DENY` /
 restrictive `frame-ancestors` CSP). Throws [`ProxyError`](#errors) (`NOT_FOUND`,
-`NOT_APPROVED`, `FORBIDDEN`, `UNAUTHORIZED`, `RATE_LIMITED`, …).
+`NOT_APPROVED`, `FORBIDDEN`, `UNAUTHORIZED`, `RATE_LIMITED`, …). **Not for
+`fetch()`-driven WebGL/canvas apps** (Foundry VTT, maps): textures fetched
+credentialed from this sandboxed `null`-origin iframe are CORS-blocked and the
+canvas stays blank — use `reserveMount`.
 
 ```ts
 sdk.proxy.reserveMount(mount: string, el: HTMLElement): () => void
@@ -182,7 +185,10 @@ the SDK reports its layout rect to the shell (rAF-coalesced, tracks scroll/resiz
 and the shell bootstraps the session and positions the surface over it. Synchronous
 — it returns an **idempotent dispose function**; call it (or let the panel unmount)
 to release the viewport. Bootstrap/`ProxyError` failures surface in the shell-owned
-surface (e.g. an "Open in browser" prompt on web), not as a throw here.
+surface (e.g. an "Open in browser" prompt on web), not as a throw here. **Required
+for `fetch()`-driven WebGL/canvas apps** (Foundry VTT, maps): the host surface has
+a real origin, so credentialed texture fetches load same-origin with no CORS wall —
+the case `openMount` can't render.
 
 ## platform
 

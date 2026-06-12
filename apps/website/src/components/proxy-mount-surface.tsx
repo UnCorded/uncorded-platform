@@ -15,6 +15,16 @@
 // frame-ancestors) shows an "Open in browser" prompt instead — the desktop
 // <webview> path that escapes those restrictions arrives in a later chunk.
 //
+// Even when the page DOES frame, a sandboxed `null`-origin iframe can't render a
+// `fetch()`-driven WebGL/canvas app (Foundry VTT, map tools): textures load via
+// credentialed `fetch()`, and Chromium hard-blocks `Access-Control-Allow-Origin:
+// null` for credentialed requests, so the canvas silently stays blank. The shell
+// can't detect that — framing "succeeded". So on the web iframe path we also
+// surface a small, persistent, non-obstructing "Open in browser" chip alongside
+// the iframe, giving the user an escape hatch the silent-failure case otherwise
+// hides. (Desktop renders these in a real-origin <webview>, where same-origin
+// textures load with no CORS wall — no chip needed there.)
+//
 // The real surface element lives in PortalContainer (z-40), positioned to mirror
 // this component's placeholder. This overlay layer only carries the placeholder,
 // so it stays `pointer-events:none`; input lands on the portaled element, which
@@ -144,6 +154,11 @@ export function ProxyMountSurface(props: {
                     url={b().url}
                     onBlocked={() => setLoadBlocked(true)}
                   />
+                  {/* Persistent escape hatch: the iframe may frame fine yet
+                      render a blank canvas (null-origin texture CORS, see
+                      header). This chip is always available so the user is
+                      never stranded on a silently-broken surface. */}
+                  <ProxyBrowserChip openUrl={b().openUrl} />
                 </Match>
                 <Match when={probe() === "blocked" || loadBlocked()}>
                   <ProxyOpenInBrowser url={b().url} openUrl={b().openUrl} />
@@ -207,6 +222,42 @@ function ProxyStatus(props: { label: string; spin?: boolean }) {
       </Show>
       <p class="text-xs text-muted-foreground">{props.label}</p>
     </div>
+  );
+}
+
+// A small, persistent affordance pinned to the surface's top-right corner while
+// the proxied app is framed in a sandboxed <iframe> on the web. Deliberately
+// subtle (low opacity until hover) so it doesn't obscure the app, but always
+// present — the canvas-CORS failure (header) is invisible to the shell, so this
+// is the only reliable way out for a user staring at a blank map. `pointer-
+// events:auto` re-enables clicks on this child even though the overlay layer is
+// click-through; it paints above the portaled iframe because ProxyMountOverlay
+// is a later z-40 sibling of PortalContainer (see proxy-mount-overlay.tsx).
+function ProxyBrowserChip(props: { openUrl: string }) {
+  return (
+    <a
+      href={props.openUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Open this app in your browser — required for map/canvas apps that can't render embedded here"
+      class="absolute right-2 top-2 inline-flex items-center gap-1 rounded-md bg-background/70 px-2 py-1 text-[11px] font-medium text-muted-foreground opacity-60 shadow-sm ring-1 ring-border/60 backdrop-blur-sm transition-all hover:bg-background hover:text-foreground hover:opacity-100"
+      style={{ "pointer-events": "auto" }}
+    >
+      Open in browser
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        class="size-3"
+        aria-hidden="true"
+      >
+        <path d="M7 17 17 7" />
+        <path d="M7 7h10v10" />
+      </svg>
+    </a>
   );
 }
 
