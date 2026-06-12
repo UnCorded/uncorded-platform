@@ -1,5 +1,5 @@
 import { createEffect, onCleanup, onMount, Show, For, createSignal, type JSX } from "solid-js";
-import { Compass, LifeBuoy, Plus, ScreenShare, Send, Settings, Wifi, WifiOff } from "lucide-solid";
+import { Compass, LifeBuoy, Plus, Puzzle, ScreenShare, Send, Settings, Wifi, WifiOff } from "lucide-solid";
 import { useImgRetry } from "@/lib/img-retry";
 import { NavSidebarSections } from "@/components/nav-sidebar-sections";
 import { WebAppsCategory } from "@/components/web-apps/web-apps-category";
@@ -25,6 +25,8 @@ import { dragContext, type DropTarget } from "@/lib/drag-state";
 import { CreateServerWizard } from "@/components/server/create-server-wizard";
 import { ServerSettingsSheet } from "@/components/server/server-settings-sheet";
 import { SupportSheet } from "@/components/support-sheet";
+import { PluginDevSheet } from "@/components/plugin-dev/plugin-dev-sheet";
+import { isElectron } from "@/lib/electron";
 import { emitCoViewSheetOpen } from "@/lib/co-view-events";
 import { UpdatePill } from "@/components/ui/update-pill";
 import { onServerSettingsOpen, type ServerSettingsTab } from "@/lib/server-settings-events";
@@ -174,6 +176,7 @@ export function AppSidebar(props: {
   const [wizardOpen, setWizardOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [supportOpen, setSupportOpen] = createSignal(false);
+  const [pluginDevOpen, setPluginDevOpen] = createSignal(false);
   const [pendingSettingsTab, setPendingSettingsTab] = createSignal<ServerSettingsTab | null>(null);
   const sidebarCtx = useSidebar();
 
@@ -194,6 +197,11 @@ export function AppSidebar(props: {
       icon: ScreenShare,
       onClick: () => emitCoViewSheetOpen(),
     },
+    // Plugin Dev is desktop-only (the workspace lives on this machine's
+    // disk), and machine-global — listed here rather than per-server.
+    ...(isElectron()
+      ? [{ title: "Plugin Dev", icon: Puzzle, onClick: () => setPluginDevOpen(true) }]
+      : []),
     { title: "Support", icon: LifeBuoy, onClick: () => setSupportOpen(true) },
     // TODO: wire to feature-request / feedback system once it exists.
     { title: "Feedback", icon: Send, disabled: true },
@@ -346,6 +354,7 @@ export function AppSidebar(props: {
         onPendingTabConsumed={() => setPendingSettingsTab(null)}
       />
       <SupportSheet open={supportOpen()} onOpenChange={setSupportOpen} />
+      <PluginDevSheet open={pluginDevOpen()} onOpenChange={setPluginDevOpen} />
     </Sidebar>
   );
 }
