@@ -2446,23 +2446,16 @@ function registerIpcHandlers(): void {
       view.setVisible(visible);
       if (visible) visibleLiveSurfaces.add(surfaceId);
       else visibleLiveSurfaces.delete(surfaceId);
-      // A view that was moved back from a now-closed popout BrowserWindow can
-      // re-attach to the main window's compositor without scheduling a paint, so
-      // it shows blank until something dirties it. Force a repaint on the
-      // hidden→visible transition (the dock case) — idempotent for views that are
-      // already painting.
+      // Defensive repaint kick on the hidden→visible transition (the dock
+      // case): a view re-attached from a closed popout window could in theory
+      // re-join the main window's compositor without scheduling a paint.
+      // NOTE: the blank-dock bug this was written for turned out to be pinned
+      // renderer-side suspension (leaked surface blockers — see
+      // website/src/components/ui/surface-blocker.tsx), not a missed repaint;
+      // kept only because it's cheap and idempotent for views already painting.
       if (visible && !wasVisible && !view.webContents.isDestroyed()) {
         view.webContents.invalidate();
       }
-      log.info("[DOCK2] setBounds", {
-        surfaceId,
-        w: Math.round(b.width),
-        h: Math.round(b.height),
-        visible,
-        wasVisible,
-        loading: view.webContents.isLoadingMainFrame(),
-        url: view.webContents.getURL(),
-      });
     },
   );
   // Create a fresh live native view for a URL and return its surfaceId. Drives a
