@@ -369,6 +369,49 @@ function decodeJwtExpiration(token: string): number {
   }
 }
 
+// Generic authed passthrough for the renderer. The renderer's own fetch()
+// carries no session inside Electron (the session token lives in the OS
+// keychain, not a cookie jar), so every plain /v1 call the web code makes is
+// proxied through here with the Cookie header attached. Returns raw
+// status+body without throwing so the renderer can rebuild its typed
+// ApiError (withAuthGate and the join surfaces branch on err.status).
+export async function rendererRequest(
+  method: string,
+  path: string,
+  bodyJson?: string,
+): Promise<{ status: number; body: unknown }> {
+  const headers = new Headers();
+  if (bodyJson !== undefined) headers.set("Content-Type", "application/json");
+  const sessionToken = getSessionToken();
+  if (sessionToken) headers.set("Cookie", `__Host-session=${sessionToken}`);
+
+  const init: RequestInit = { method, headers };
+  if (bodyJson !== undefined) init.body = bodyJson;
+
+  let res: Response;
+  try {
+    res = await fetch(`${getBaseUrl()}${path}`, init);
+  } catch (err) {
+    throw new Error(`Central request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Same semantic as request(): a 401 with a token present means the session
+  // is dead — drop it so the renderer lands on AuthPage instead of looping.
+  if (res.status === 401 && sessionToken) {
+    clearSessionToken();
+  }
+
+  let parsed: unknown = null;
+  if (res.status !== 204) {
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = null;
+    }
+  }
+  return { status: res.status, body: parsed };
+}
+
 export async function getServerToken(server_id: string): Promise<ServerTokenResponse> {
   const res = await request<{ token: string; tunnel_url?: string | null }>(
     "/v1/auth/token/server",

@@ -15,6 +15,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { account } from "@/stores/auth";
 import {
   servers,
   serversLoading,
@@ -111,13 +112,21 @@ export function ServerSwitcher(props: {
   const [exploreOpen, setExploreOpen] = createSignal(false);
 
   async function refreshInvites(): Promise<void> {
+    // Skip while logged out — the call is a guaranteed 401 (the switcher
+    // mounts before/without a session) and the browser logs every failed
+    // network request to the console even when we swallow the rejection.
+    if (account() === null) return;
     try {
       setMyInvites(await central.listMyInvites());
     } catch {
-      // Unauthenticated or Central unreachable — keep whatever we had.
+      // Central unreachable — keep whatever we had.
     }
   }
-  void refreshInvites();
+  // Reactive on login: fires once the account resolves (and on hot login
+  // after the auth gate), not just at mount time.
+  createEffect(() => {
+    if (account() !== null) void refreshInvites();
+  });
 
   // A ?join= deep link / post-login intent replay opens Explore; the dialog
   // itself fires the join request and clears the target.

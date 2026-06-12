@@ -40,6 +40,7 @@ const IPC = {
   CENTRAL_GET_PROFILE: "central:get-profile",
   CENTRAL_PATCH_PROFILE: "central:patch-profile",
   CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url",
+  CENTRAL_REQUEST: "central:request",
   CENTRAL_LIST_SERVERS: "central:list-servers",
   CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers",
   CENTRAL_CREATE_SERVER: "central:create-server",
@@ -174,6 +175,17 @@ contextBridge.exposeInMainWorld("electron", {
     },
     getAvatarUploadUrl(contentType: string): Promise<AvatarUploadUrl> {
       return ipcInvoke<AvatarUploadUrl>(IPC.CENTRAL_GET_AVATAR_UPLOAD_URL, contentType);
+    },
+    request(
+      method: string,
+      path: string,
+      bodyJson?: string,
+    ): Promise<{ status: number; body: unknown }> {
+      return ipcInvoke<{ status: number; body: unknown }>(IPC.CENTRAL_REQUEST, {
+        method,
+        path,
+        ...(bodyJson !== undefined ? { bodyJson } : {}),
+      });
     },
     listServers(): Promise<Server[]> {
       return ipcInvoke<Server[]>(IPC.CENTRAL_LIST_SERVERS);

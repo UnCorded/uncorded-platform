@@ -281,6 +281,15 @@ export interface ElectronBridge {
       new_password?: string;
     }): Promise<Account>;
     getAvatarUploadUrl(contentType: string): Promise<AvatarUploadUrl>;
+    /** Generic authed /v1 passthrough — the renderer's own fetch carries no
+     *  session inside Electron, so plain Central calls proxy through main
+     *  with the keychain session attached. Optional: older packaged preloads
+     *  (auto-update lag) won't expose it; callers must feature-check. */
+    request?(
+      method: string,
+      path: string,
+      bodyJson?: string,
+    ): Promise<{ status: number; body: unknown }>;
     /** Sidebar source: the user's memberships (/v1/me/servers) — includes
      *  offline servers so an inactive server never vanishes. */
     listServers(): Promise<Server[]>;
@@ -661,6 +670,7 @@ export interface IpcChannelMap {
   readonly CENTRAL_GET_PROFILE: "central:get-profile";
   readonly CENTRAL_PATCH_PROFILE: "central:patch-profile";
   readonly CENTRAL_GET_AVATAR_UPLOAD_URL: "central:get-avatar-upload-url";
+  readonly CENTRAL_REQUEST: "central:request";
   readonly CENTRAL_LIST_SERVERS: "central:list-servers";
   readonly CENTRAL_LIST_PUBLIC_SERVERS: "central:list-public-servers";
   readonly CENTRAL_CREATE_SERVER: "central:create-server";

@@ -2173,6 +2173,32 @@ function registerIpcHandlers(): void {
   handleIpc(IPC.CENTRAL_GET_AVATAR_UPLOAD_URL, (_event, contentType: string) =>
     central.getAvatarUploadUrl(contentType),
   );
+  // Generic authed Central passthrough for the renderer's plain /v1 calls
+  // (membership surfaces, patchServer, …). Scope-guarded to relative /v1
+  // paths so the renderer can't point main's keychain session at an
+  // arbitrary host.
+  handleIpc(
+    IPC.CENTRAL_REQUEST,
+    (_event, payload: { method: string; path: string; bodyJson?: string }) => {
+      const ALLOWED_METHODS = new Set(["GET", "POST", "PATCH", "PUT", "DELETE"]);
+      if (
+        typeof payload?.method !== "string" ||
+        !ALLOWED_METHODS.has(payload.method.toUpperCase()) ||
+        typeof payload.path !== "string" ||
+        !payload.path.startsWith("/v1/") ||
+        payload.path.includes("://") ||
+        payload.path.includes("..")
+      ) {
+        throw new Error("central:request requires an allowed method and a relative /v1 path");
+      }
+      return central.rendererRequest(
+        payload.method.toUpperCase(),
+        payload.path,
+        payload.bodyJson,
+      );
+    },
+  );
+
   // central:list-servers serves the sidebar — the user's memberships
   // (/v1/me/servers), liveness-independent so inactive servers never vanish.
   // central:list-public-servers is the online-only Explore directory.

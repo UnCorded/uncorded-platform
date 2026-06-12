@@ -24,6 +24,27 @@ async function request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  // Inside Electron the session lives in the OS keychain, not a cookie jar —
+  // a plain renderer fetch is unauthenticated. Route through the main-process
+  // passthrough, which attaches the session and returns raw status+body so
+  // ApiError keeps its status (withAuthGate and the join surfaces branch on
+  // it). Feature-checked: an older packaged preload won't expose request().
+  const desktop = desktopCentral();
+  if (desktop?.request) {
+    const method = (init.method ?? "GET").toUpperCase();
+    const bodyJson = typeof init.body === "string" ? init.body : undefined;
+    const res = await desktop.request(method, path, bodyJson);
+    if (res.status < 200 || res.status >= 300) {
+      const errBody = res.body as { error?: { code?: string; message?: string } } | null;
+      throw new ApiError(
+        errBody?.error?.code ?? "UNKNOWN",
+        errBody?.error?.message ?? `Request failed with status ${res.status}`,
+        res.status,
+      );
+    }
+    return res.body as T;
+  }
+
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
