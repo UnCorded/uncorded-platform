@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { createHttpHandler } from "./handler";
 import type { HttpHandlerHandle } from "./handler";
+import { PLUGIN_API_VERSION } from "../api-version";
 import { RateLimiter, BAN_THRESHOLD_SHORT, BAN_DURATION_SHORT_MS } from "./rate-limiter";
 import type {
   HttpDependencies,
@@ -365,9 +366,13 @@ describe("GET /health", () => {
 
     return fetch(`${ctx.baseUrl}/health`).then(async (res) => {
       expect(res.status).toBe(200);
-      const body = await res.json() as { status: string; version: string; plugins: number; uptime: number };
+      const body = await res.json() as { status: string; version: string; plugin_api_version: string; plugins: number; uptime: number };
       expect(body.status).toBe("ok");
       expect(body.version).toBe("1.0.0-test");
+      // The SDK contract version, distinct from the release version — the
+      // desktop's deploy preflight checks a dev plugin's manifest
+      // api_version range against this before copying it in.
+      expect(body.plugin_api_version).toBe(PLUGIN_API_VERSION);
       expect(body.plugins).toBe(2);
       expect(body.uptime).toBeGreaterThanOrEqual(0);
     });

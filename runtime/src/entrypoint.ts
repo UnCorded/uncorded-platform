@@ -12,7 +12,7 @@
 // by warning and continuing. The seed server.json includes central_public_keys
 // so boot succeeds without Central.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 import { boot, BootError } from "./main";
@@ -229,6 +229,41 @@ log.info("runtime version", { version: runtimeVersion });
 // ---------------------------------------------------------------------------
 mkdirSync(VOICE_CONFIG_DIR, { recursive: true, mode: 0o700 });
 chmodSync(VOICE_CONFIG_DIR, 0o700);
+
+// ---------------------------------------------------------------------------
+// SDK resolution for sideloaded plugins
+//
+// Plugin backends spawn with cwd = their own folder. Core plugins at
+// /app/core-plugins/<slug> resolve `@uncorded/plugin-sdk` by walking up to
+// /app/node_modules, but a sideloaded plugin at /plugins/<slug> walks
+// /plugins/<slug>/node_modules → /plugins/node_modules → /node_modules and
+// never reaches /app — so without this link, any dev/sideloaded plugin that
+// imports the SDK spawn-fails into quarantine. Linking /plugins/node_modules
+// to the image's own tree makes the SDK (at the exact version this runtime
+// speaks) resolvable as a fallback, while a plugin's own vendored
+// node_modules still wins the walk when present.
+//
+// Recreated each boot if absent (/plugins is a host bind mount — the host
+// side may prune it). A real directory or operator-placed link is left alone.
+// ---------------------------------------------------------------------------
+try {
+  mkdirSync(USER_PLUGINS_DIR, { recursive: true });
+  const linkPath = `${USER_PLUGINS_DIR}/node_modules`;
+  let present = true;
+  try {
+    lstatSync(linkPath);
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    symlinkSync("/app/node_modules", linkPath, "dir");
+    log.info("linked /plugins/node_modules -> /app/node_modules for sideloaded plugin SDK resolution");
+  }
+} catch (err) {
+  // Non-fatal: core plugins are unaffected; sideloaded plugins that vendor
+  // their own node_modules still load.
+  log.warn("could not prepare /plugins/node_modules SDK link", { err: String(err) });
+}
 
 // ---------------------------------------------------------------------------
 // Seed server.json if missing (first-time boot)
