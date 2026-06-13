@@ -61,6 +61,28 @@ RUN apk add --no-cache wget tar coreutils \
     && chmod +x /livekit-server \
     && /livekit-server --version
 
+# Download the Codex CLI — the agent harness t3-code drives (`codex exec` /
+# `codex login`). The musl target is a statically linked Rust binary, so it
+# runs on the debian base with no libc deps. Pinned; bump CODEX_VERSION to
+# update (verify against the release before bumping). gh is NOT required —
+# same wget-from-releases pattern as cloudflared/livekit.
+FROM alpine AS codex-dl
+ARG TARGETARCH=amd64
+ARG CODEX_VERSION=rust-v0.139.0
+RUN apk add --no-cache wget tar \
+    && case "${TARGETARCH}" in \
+         amd64) TRIPLE="x86_64-unknown-linux-musl" ;; \
+         arm64) TRIPLE="aarch64-unknown-linux-musl" ;; \
+         *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2 ; exit 1 ;; \
+       esac \
+    && wget -qO /tmp/codex.tar.gz \
+         "https://github.com/openai/codex/releases/download/${CODEX_VERSION}/codex-${TRIPLE}.tar.gz" \
+    && mkdir -p /tmp/codex \
+    && tar -xzf /tmp/codex.tar.gz -C /tmp/codex \
+    && find /tmp/codex -type f -name 'codex*' -exec mv {} /codex \; \
+    && chmod +x /codex \
+    && /codex --version
+
 FROM oven/bun:1.3 AS base
 
 WORKDIR /app
@@ -71,8 +93,12 @@ WORKDIR /app
 # `x509: certificate signed by unknown authority`. Bun's installer works
 # without this because Bun statically links its own roots. Keep this layer
 # near the top of the base stage so it stays cache-hot across source edits.
+#
+# git is required by repo-oriented plugins inside the runtime — t3-code clones
+# project repos and t3 itself drives branch/commit/PR flows; without git on
+# PATH those features fail at runtime.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cache-friendly layer)
@@ -115,6 +141,11 @@ RUN bun run /tmp/stamp-sdk-cache-bust.ts && rm /tmp/stamp-sdk-cache-bust.ts
 # Install cloudflared binary (quick tunnel + authenticated tunnel support).
 # Runs as UID 1001 — no caps needed for cloudflared tunnel mode.
 COPY --from=cloudflared-dl /cloudflared /usr/local/bin/cloudflared
+
+# Codex CLI on PATH for repo-oriented plugins (t3-code drives `codex exec`).
+# Per-user auth (`codex login`) lands in each user's HOME = the per-user
+# workspace the t3 instance is spawned with.
+COPY --from=codex-dl /codex /usr/local/bin/codex
 
 # tini as PID 1 for signal forwarding + zombie reaping. Downloaded as a
 # static binary so the image is self-contained and distro-independent.
