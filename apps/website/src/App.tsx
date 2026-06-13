@@ -84,6 +84,7 @@ import { MemberManageSheet } from "@/components/server/member-manage-sheet";
 import { CoViewSheet } from "@/co-view/co-view-sheet";
 import { HostShellRunner } from "@/co-view/host-shell-runner";
 import { CoViewViewerSelector } from "@/co-view/viewer-selector-view";
+import { isProjectedViewerDevEnabled } from "@/co-view/projected-viewer-dev-flag";
 import { CoViewHostProvider } from "@/co-view/host-context";
 import type { CoViewHostController } from "@/co-view/host-context";
 import type { CoViewStateSnapshot } from "@uncorded/protocol";
@@ -1648,6 +1649,7 @@ function App() {
                 <CoViewViewerSelector
                   serverId={activeServerId()!}
                   sessionId={sid()}
+                  projectedEnabled={isProjectedViewerDevEnabled()}
                   initialSnapshot={coViewSnapshot()}
                   onLeft={() => {
                     setCoViewViewing(activeServerId()!, null);
