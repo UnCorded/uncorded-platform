@@ -83,6 +83,27 @@ RUN apk add --no-cache wget tar \
     && chmod +x /codex \
     && /codex --version
 
+# Download the GitHub CLI — t3 drives GitHub auth + PRs through `gh`
+# (`gh auth`, `gh pr`), not a token/credential-helper. Per-user `gh auth login`
+# lands in each user's HOME = the per-user workspace the instance is spawned
+# with. CGO_ENABLED=0 Go binary → static, runs on alpine (this stage) + debian.
+FROM alpine AS gh-dl
+ARG TARGETARCH=amd64
+ARG GH_VERSION=2.94.0
+RUN apk add --no-cache wget tar \
+    && case "${TARGETARCH}" in \
+         amd64) GHARCH="amd64" ;; \
+         arm64) GHARCH="arm64" ;; \
+         *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2 ; exit 1 ;; \
+       esac \
+    && wget -qO /tmp/gh.tar.gz \
+         "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GHARCH}.tar.gz" \
+    && mkdir -p /tmp/gh \
+    && tar -xzf /tmp/gh.tar.gz -C /tmp/gh \
+    && find /tmp/gh -type f -name gh -path '*/bin/*' -exec mv {} /gh \; \
+    && chmod +x /gh \
+    && /gh --version
+
 FROM oven/bun:1.3 AS base
 
 WORKDIR /app
@@ -146,6 +167,9 @@ COPY --from=cloudflared-dl /cloudflared /usr/local/bin/cloudflared
 # Per-user auth (`codex login`) lands in each user's HOME = the per-user
 # workspace the t3 instance is spawned with.
 COPY --from=codex-dl /codex /usr/local/bin/codex
+
+# GitHub CLI on PATH — t3's GitHub provider (auth, private clone, push, PRs).
+COPY --from=gh-dl /gh /usr/local/bin/gh
 
 # tini as PID 1 for signal forwarding + zombie reaping. Downloaded as a
 # static binary so the image is self-contained and distro-independent.
